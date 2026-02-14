@@ -518,48 +518,85 @@ class GoogleDocsReportWriter:
             requests_payload: List[Dict[str, Any]] = []
             description_text: str = video.description.strip() or "(no description)"
 
+            def _build_format_request(
+                start_index: int, end_index: int
+            ) -> Dict[str, Any]:
+                return {
+                    "updateTextStyle": {
+                        "range": {
+                            "startIndex": start_index,
+                            "endIndex": end_index,
+                        },
+                        "textStyle": {
+                            "weightedFontFamily": {"fontFamily": "Arial"},
+                            "fontSize": {"magnitude": 13, "unit": "PT"},
+                        },
+                        "fields": "weightedFontFamily,fontSize",
+                    }
+                }
+
             # Важно: requests идут снизу вверх, чтобы сдвиг индексов не ломал следующие вставки.
+            url_start_index: int = _cell_start_index(
+                row_index=2,
+                col_index=0,
+                use_plus_one=use_plus_one,
+            )
+            url_text: str = f"{video.url}\n"
             requests_payload.append(
                 {
                     "insertText": {
-                        "location": {
-                            "index": _cell_start_index(
-                                row_index=2,
-                                col_index=0,
-                                use_plus_one=use_plus_one,
-                            )
-                        },
-                        "text": f"{video.url}\n",
+                        "location": {"index": url_start_index},
+                        "text": url_text,
                     }
                 }
             )
             requests_payload.append(
+                _build_format_request(
+                    start_index=url_start_index,
+                    end_index=url_start_index + len(url_text),
+                )
+            )
+
+            description_start_index: int = _cell_start_index(
+                row_index=1,
+                col_index=0,
+                use_plus_one=use_plus_one,
+            )
+            description_full_text: str = f"{description_text}\n"
+            requests_payload.append(
                 {
                     "insertText": {
-                        "location": {
-                            "index": _cell_start_index(
-                                row_index=1,
-                                col_index=0,
-                                use_plus_one=use_plus_one,
-                            )
-                        },
-                        "text": f"{description_text}\n",
+                        "location": {"index": description_start_index},
+                        "text": description_full_text,
                     }
                 }
             )
             requests_payload.append(
+                _build_format_request(
+                    start_index=description_start_index,
+                    end_index=description_start_index + len(description_full_text),
+                )
+            )
+
+            title_start_index: int = _cell_start_index(
+                row_index=0,
+                col_index=0,
+                use_plus_one=use_plus_one,
+            )
+            title_text: str = f"{video.title}\n"
+            requests_payload.append(
                 {
                     "insertText": {
-                        "location": {
-                            "index": _cell_start_index(
-                                row_index=0,
-                                col_index=0,
-                                use_plus_one=use_plus_one,
-                            )
-                        },
-                        "text": f"{video.title}\n",
+                        "location": {"index": title_start_index},
+                        "text": title_text,
                     }
                 }
+            )
+            requests_payload.append(
+                _build_format_request(
+                    start_index=title_start_index,
+                    end_index=title_start_index + len(title_text),
+                )
             )
             LOGGER.debug(
                 "Google Docs text batchUpdate requests order: url(row2), description(row1), title(row0)"
