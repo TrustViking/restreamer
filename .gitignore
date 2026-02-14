@@ -1,0 +1,82 @@
+########################################
+# restreamer: privacy + clean repo
+########################################
+
+########################################
+# Secrets / credentials (НЕ КОМИТИТЬ)
+########################################
+.env
+.env.*
+*.env
+
+# Google OAuth / API (обычно это супер-секреты)
+credentials*.json
+token*.json
+client_secret*.json
+*oauth*.json
+
+# Keys / certs (на всякий)
+*.pem
+*.key
+*.p12
+
+########################################
+# Local helper materials
+########################################
+_HELP/
+
+########################################
+# Python / caches
+########################################
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+########################################
+# Virtual environments
+########################################
+.venv/
+venv/
+ENV/
+.venv_restreamer/
+
+########################################
+# Logs / temp / outputs
+########################################
+*.log
+logs/
+tmp/
+temp/
+out/
+output/
+outputs/
+downloads/
+data/
+
+########################################
+# IDE / OS / local workspace stuff
+########################################
+.vscode/
+*.code-workspace
+
+# Windows / macOS мусор
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+########################################
+# Optional: local launcher scripts with absolute paths
+# (если restreamer.bat содержит D:\_projects\... и т.п.)
+########################################
+restreamer.bat
