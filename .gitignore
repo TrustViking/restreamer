@@ -80,3 +80,7 @@ Desktop.ini
 # (если restreamer.bat содержит D:\_projects\... и т.п.)
 ########################################
 restreamer.bat
+
+# Local debug artifacts for Google Docs comparisons
+doc_*.html
+doc_*.txt

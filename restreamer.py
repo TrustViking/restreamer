@@ -8,12 +8,13 @@ import logging
 import os
 import re
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, cast
+from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from dotenv import load_dotenv
@@ -26,12 +27,14 @@ try:
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
+    from googleapiclient.errors import HttpError
 except ImportError:
     GoogleAuthRequest = None  # type: ignore
     Credentials = None  # type: ignore
     InstalledAppFlow = None  # type: ignore
     build = None  # type: ignore
     MediaFileUpload = None  # type: ignore
+    HttpError = Exception  # type: ignore
 
 try:
     from PIL import Image
@@ -53,6 +56,7 @@ class VideoMetadata:
     title: str
     description: str
     thumbnail_url: str
+    youtube_language: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,28 @@ class NormalizedImage:
     bytes_data: bytes
     extension: str
     mime_type: str
+
+
+@dataclass(frozen=True)
+class SheetRow:
+    row_number: int
+    link: str
+    date_raw: str
+    time_raw: str
+
+
+@dataclass(frozen=True)
+class PlannedVideo:
+    row_number: int
+    original_link: str
+    normalized_link: str
+    scheduled_at_kiev: datetime
+    date_key: str
+    date_display: str
+    language: str
+    metadata: VideoMetadata
+    thumbnail: NormalizedImage
+    local_thumbnail_path: Optional[Path]
 
 
 # ----------------------------
@@ -101,6 +127,10 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
         description: str = str(info.get("description") or "").strip()
         thumbnail_url: str = str(info.get("thumbnail") or "").strip()
         video_id: str = str(info.get("id") or "").strip()
+        youtube_language: Optional[str] = (
+            str(info.get("language") or info.get("channel_language") or "").strip()
+            or None
+        )
 
         if not title:
             raise ValueError("Не удалось получить title (yt-dlp вернул пусто).")
@@ -139,17 +169,45 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
             title=title,
             description=description,
             thumbnail_url=thumbnail_url,
+            youtube_language=youtube_language,
         )
 
 
 def _normalize_youtube_video_url(video_url: str) -> str:
-    video_id_match: Optional[re.Match[str]] = re.search(
-        r"(?:youtu\.be/|v=|shorts/)([A-Za-z0-9_-]{11})",
-        video_url,
-    )
-    if not video_id_match:
-        return video_url
-    return f"https://youtu.be/{video_id_match.group(1)}"
+    parsed = urlparse(video_url.strip())
+    host = parsed.netloc.lower()
+    path = parsed.path
+    query = parse_qs(parsed.query)
+
+    video_id: Optional[str] = None
+    if "youtu.be" in host:
+        candidate: str = path.strip("/").split("/")[0]
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
+            video_id = candidate
+    elif "youtube.com" in host or "m.youtube.com" in host:
+        if path == "/watch":
+            candidate = (query.get("v") or [""])[0]
+            if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
+                video_id = candidate
+        else:
+            parts: List[str] = [part for part in path.split("/") if part]
+            if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live", "v"}:
+                candidate = parts[1]
+                if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
+                    video_id = candidate
+
+    if not video_id:
+        fallback_match: Optional[re.Match[str]] = re.search(
+            r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})",
+            video_url,
+        )
+        if fallback_match:
+            video_id = fallback_match.group(1)
+
+    if not video_id:
+        raise ValueError(f"Не удалось извлечь YouTube video id из URL: {video_url}")
+
+    return f"https://youtu.be/{video_id}"
 
 
 # ----------------------------
@@ -181,16 +239,17 @@ class TelegramBotClient:
                 },
             )
 
-    def send_photo_bytes(
+    def send_photo_as_file_bytes(
         self,
         photo_bytes: bytes,
         filename: str,
         mime_type: str,
         caption: Optional[str] = None,
     ) -> None:
-        url: str = self._make_api_url("sendPhoto")
+        # Use sendDocument to avoid Telegram image compression.
+        url: str = self._make_api_url("sendDocument")
         files: Dict[str, Tuple[str, bytes, str]] = {
-            "photo": (filename, photo_bytes, mime_type),
+            "document": (filename, photo_bytes, mime_type),
         }
         data: Dict[str, str] = {"chat_id": self._chat_id}
         if caption:
@@ -239,6 +298,11 @@ def _split_text_for_telegram(text: str, max_chunk_size: int) -> List[str]:
     return chunks
 
 
+def _telegram_safe_time(value: str) -> str:
+    # Prevent Telegram from turning HH:MM into a clickable timestamp.
+    return value.replace(":", ":\u2060")
+
+
 # ----------------------------
 # HTTP-вспомогательные функции
 # ----------------------------
@@ -267,6 +331,7 @@ class GoogleServicesFactory:
     _SCOPES: Tuple[str, ...] = (
         "https://www.googleapis.com/auth/documents",
         "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
     )
 
     def __init__(self, credentials_path: Path, token_path: Path) -> None:
@@ -289,6 +354,14 @@ class GoogleServicesFactory:
         creds: Any = self._get_credentials()
         return build("drive", "v3", credentials=creds)
 
+    def create_sheets_service(self) -> Any:
+        if build is None:
+            raise RuntimeError(
+                "Google API client недоступен (googleapiclient не установлен)."
+            )
+        creds: Any = self._get_credentials()
+        return build("sheets", "v4", credentials=creds)
+
     def _get_credentials(self) -> Any:
         if Credentials is None or GoogleAuthRequest is None or InstalledAppFlow is None:
             raise RuntimeError(
@@ -301,6 +374,11 @@ class GoogleServicesFactory:
             creds = Credentials.from_authorized_user_file(
                 str(self._token_path), scopes=list(self._SCOPES)
             )
+            if creds is not None and not creds.has_scopes(list(self._SCOPES)):
+                LOGGER.warning(
+                    "Existing token has insufficient scopes. Re-auth is required."
+                )
+                creds = None
 
         if creds is not None and getattr(creds, "valid", False):
             return creds
@@ -310,10 +388,17 @@ class GoogleServicesFactory:
             and getattr(creds, "expired", False)
             and getattr(creds, "refresh_token", None)
         ):
-            creds.refresh(GoogleAuthRequest())
-            creds_any: Any = creds
-            self._token_path.write_text(str(creds_any.to_json()), encoding="utf-8")
-            return creds
+            try:
+                creds.refresh(GoogleAuthRequest())
+                creds_any: Any = creds
+                self._token_path.write_text(str(creds_any.to_json()), encoding="utf-8")
+                return creds
+            except Exception as refresh_error:
+                LOGGER.warning(
+                    "Token refresh failed (%s). Re-auth flow will be started.",
+                    refresh_error,
+                )
+                creds = None
 
         flow: Any = InstalledAppFlow.from_client_secrets_file(
             str(self._credentials_path), scopes=list(self._SCOPES)
@@ -322,6 +407,73 @@ class GoogleServicesFactory:
         creds_any: Any = creds
         self._token_path.write_text(str(creds_any.to_json()), encoding="utf-8")
         return creds
+
+
+class GoogleSheetsClient:
+    def __init__(self, sheets_service: Any) -> None:
+        self._sheets_service: Any = sheets_service
+
+    def read_rows(self, spreadsheet_id: str, range_name: str) -> List[SheetRow]:
+        try:
+            response: Dict[str, Any] = (
+                self._sheets_service.spreadsheets()
+                .values()
+                .get(spreadsheetId=spreadsheet_id, range=range_name)
+                .execute()
+            )
+        except HttpError as error:
+            error_text: str = str(error)
+            if "Unable to parse range" not in error_text:
+                raise
+            LOGGER.warning(
+                "Range %s is invalid for spreadsheet %s; fallback to A:C on first sheet.",
+                range_name,
+                spreadsheet_id,
+            )
+            response = (
+                self._sheets_service.spreadsheets()
+                .values()
+                .get(spreadsheetId=spreadsheet_id, range="A:C")
+                .execute()
+            )
+        values: List[List[str]] = cast(List[List[str]], response.get("values", []))
+        if not values:
+            LOGGER.warning("Google Sheets range is empty: %s", range_name)
+            return []
+
+        header: List[str] = [str(value).strip() for value in values[0]]
+        normalized_header: List[str] = [_normalize_header_name(item) for item in header]
+
+        links_index: Optional[int] = _find_header_index(
+            normalized_header=normalized_header,
+            aliases=("links", "link", "url", "video", "youtube"),
+        )
+        date_index: Optional[int] = _find_header_index(
+            normalized_header=normalized_header,
+            aliases=("date", "дата", "day"),
+        )
+        time_index: Optional[int] = _find_header_index(
+            normalized_header=normalized_header,
+            aliases=("time", "время", "hour"),
+        )
+        if links_index is None or date_index is None or time_index is None:
+            raise RuntimeError(
+                "Google Sheets header не распознан. "
+                f"Found columns: {header!r}. "
+                "Нужны колонки для Links/Date/Time."
+            )
+
+        rows: List[SheetRow] = []
+        for row_number, row_values in enumerate(values[1:], start=2):
+            rows.append(
+                SheetRow(
+                    row_number=row_number,
+                    link=_value_from_row(row_values=row_values, index=links_index),
+                    date_raw=_value_from_row(row_values=row_values, index=date_index),
+                    time_raw=_value_from_row(row_values=row_values, index=time_index),
+                )
+            )
+        return rows
 
 
 class GoogleDriveClient:
@@ -461,6 +613,429 @@ class GoogleDocsReportWriter:
 
     def __init__(self, docs_client: GoogleDocsClient) -> None:
         self._docs_client: GoogleDocsClient = docs_client
+
+    def write_daily_document(
+        self,
+        document_id: str,
+        header_text: str,
+        language_groups: Dict[str, List[PlannedVideo]],
+    ) -> None:
+        self._insert_header_text(
+            document_id=document_id,
+            text=f"{header_text}\n\n",
+        )
+
+        non_empty_languages: List[str] = [
+            language
+            for language in ("uk", "en", "ru", "other")
+            if language_groups.get(language)
+        ]
+
+        for index, language in enumerate(non_empty_languages):
+            self.write_language_table(
+                document_id=document_id,
+                language=language,
+                videos=language_groups[language],
+            )
+            if index < len(non_empty_languages) - 1:
+                self._docs_client.batch_update(
+                    document_id=document_id,
+                    requests_payload=[
+                        {"insertPageBreak": {"endOfSegmentLocation": {}}}
+                    ],
+                )
+
+    def _insert_styled_text(self, document_id: str, text: str, bold: bool) -> None:
+        doc: Dict[str, Any] = self._docs_client.get_document(document_id=document_id)
+        content: List[Dict[str, Any]] = cast(
+            List[Dict[str, Any]], doc["body"]["content"]
+        )
+        start_index: int = int(content[-1]["endIndex"]) - 1
+        self._docs_client.batch_update(
+            document_id=document_id,
+            requests_payload=[
+                {"insertText": {"location": {"index": start_index}, "text": text}},
+                {
+                    "updateTextStyle": {
+                        "range": {
+                            "startIndex": start_index,
+                            "endIndex": start_index + len(text),
+                        },
+                        "textStyle": {
+                            "weightedFontFamily": {"fontFamily": "Arial"},
+                            "fontSize": {"magnitude": 13, "unit": "PT"},
+                            "bold": bold,
+                        },
+                        "fields": "weightedFontFamily,fontSize,bold",
+                    }
+                },
+            ],
+        )
+
+    def _insert_header_text(self, document_id: str, text: str) -> None:
+        doc: Dict[str, Any] = self._docs_client.get_document(document_id=document_id)
+        content: List[Dict[str, Any]] = cast(
+            List[Dict[str, Any]], doc["body"]["content"]
+        )
+        start_index: int = int(content[-1]["endIndex"]) - 1
+
+        requests_payload: List[Dict[str, Any]] = [
+            {"insertText": {"location": {"index": start_index}, "text": text}},
+            {
+                "updateTextStyle": {
+                    "range": {
+                        "startIndex": start_index,
+                        "endIndex": start_index + len(text),
+                    },
+                    "textStyle": {
+                        "weightedFontFamily": {"fontFamily": "Arial"},
+                        "fontSize": {"magnitude": 13, "unit": "PT"},
+                        "bold": False,
+                    },
+                    "fields": "weightedFontFamily,fontSize,bold",
+                }
+            },
+        ]
+
+        # Header emphasis required by template.
+        bold_line_prefixes: Tuple[str, ...] = (
+            "Ежедневные стримы / Everyday streams",
+            "❇️ Эфир",
+            "❇️ Форма для ключей",
+            "При технических проблемах / In case of technical problems",
+            "❇️ Опис / Description / Описание",
+            "UA - ",
+            "ENG - ",
+            "RU - ",
+        )
+        cursor: int = 0
+        for line in text.splitlines(keepends=True):
+            line_start: int = start_index + cursor
+            line_end: int = line_start + len(line)
+            if any(line.startswith(prefix) for prefix in bold_line_prefixes):
+                requests_payload.append(
+                    {
+                        "updateTextStyle": {
+                            "range": {
+                                "startIndex": line_start,
+                                "endIndex": line_end,
+                            },
+                            "textStyle": {"bold": True},
+                            "fields": "bold",
+                        }
+                    }
+                )
+            cursor += len(line)
+
+        self._docs_client.batch_update(
+            document_id=document_id,
+            requests_payload=requests_payload,
+        )
+
+    def write_language_table(
+        self,
+        document_id: str,
+        language: str,
+        videos: List[PlannedVideo],
+    ) -> None:
+        row_values: List[Tuple[str, bool]] = _build_language_table_rows(
+            language=language,
+            videos=videos,
+        )
+        rows: int = len(row_values)
+        columns: int = 1
+        self._docs_client.insert_table_at_end(
+            document_id=document_id,
+            rows=rows,
+            columns=columns,
+        )
+        doc: Dict[str, Any] = self._docs_client.get_document(document_id=document_id)
+        cell_start_indices: List[int] = _find_last_table_cell_paragraph_start_indices(
+            doc=doc,
+            rows=rows,
+            columns=columns,
+        )
+
+        def _cell_start_index(row_index: int, use_plus_one: bool) -> int:
+            idx: int = _cell_index(row=row_index, col=0, columns=columns)
+            return cell_start_indices[idx] + (1 if use_plus_one else 0)
+
+        def _build_requests(use_plus_one: bool) -> List[Dict[str, Any]]:
+            requests_payload: List[Dict[str, Any]] = []
+            for row_index in range(rows - 1, -1, -1):
+                text, is_bold = row_values[row_index]
+                start_index: int = _cell_start_index(
+                    row_index=row_index,
+                    use_plus_one=use_plus_one,
+                )
+                text_to_insert: str = f"{text}\n"
+                requests_payload.append(
+                    {
+                        "insertText": {
+                            "location": {"index": start_index},
+                            "text": text_to_insert,
+                        }
+                    }
+                )
+                requests_payload.append(
+                    {
+                        "updateTextStyle": {
+                            "range": {
+                                "startIndex": start_index,
+                                "endIndex": start_index + len(text_to_insert),
+                            },
+                            "textStyle": {
+                                "weightedFontFamily": {"fontFamily": "Arial"},
+                                "fontSize": {"magnitude": 13, "unit": "PT"},
+                                "bold": is_bold,
+                            },
+                            "fields": "weightedFontFamily,fontSize,bold",
+                        }
+                    }
+                )
+            return requests_payload
+
+        try:
+            self._docs_client.batch_update(
+                document_id=document_id,
+                requests_payload=_build_requests(use_plus_one=False),
+            )
+        except Exception:
+            self._docs_client.batch_update(
+                document_id=document_id,
+                requests_payload=_build_requests(use_plus_one=True),
+            )
+
+        self._apply_language_table_visual_style(
+            document_id=document_id,
+            rows=rows,
+            columns=columns,
+            row_values=row_values,
+        )
+        self._apply_language_table_content_style(
+            document_id=document_id,
+            rows=rows,
+            columns=columns,
+            row_values=row_values,
+        )
+
+        preview_label_row_index: int = 5
+        preview_first_item_row_index: int = preview_label_row_index + 1
+
+        def _refresh_row_start_index(row_index: int) -> int:
+            updated_doc: Dict[str, Any] = self._docs_client.get_document(
+                document_id=document_id
+            )
+            updated_indices: List[int] = _find_last_table_cell_paragraph_start_indices(
+                doc=updated_doc,
+                rows=rows,
+                columns=columns,
+            )
+            idx: int = _cell_index(row=row_index, col=0, columns=columns)
+            return updated_indices[idx] + 1
+
+        indexed_videos: List[Tuple[int, PlannedVideo]] = list(
+            enumerate(videos, start=1)
+        )
+        for preview_index, video in reversed(indexed_videos):
+            row_index: int = preview_first_item_row_index + (preview_index - 1)
+            row_start_index: int = _refresh_row_start_index(row_index)
+            link_text: str = f"{video.normalized_link}\n"
+            try:
+                self._docs_client.batch_update(
+                    document_id=document_id,
+                    requests_payload=[
+                        {
+                            "insertText": {
+                                "location": {"index": row_start_index},
+                                "text": link_text,
+                            }
+                        }
+                    ],
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Preview link insert failed for row %d in language %s.",
+                    video.row_number,
+                    language,
+                )
+                continue
+
+            inserted: bool = False
+            for image_uri in _thumbnail_candidates(video):
+                try:
+                    row_start_index = _refresh_row_start_index(row_index)
+                    self._docs_client.batch_update(
+                        document_id=document_id,
+                        requests_payload=[
+                            {
+                                "insertInlineImage": {
+                                    "location": {
+                                        "index": row_start_index + len(link_text)
+                                    },
+                                    "uri": image_uri,
+                                    "objectSize": {
+                                        "height": {"magnitude": 120, "unit": "PT"},
+                                        "width": {"magnitude": 210, "unit": "PT"},
+                                    },
+                                }
+                            },
+                        ],
+                    )
+                    inserted = True
+                    break
+                except Exception:
+                    continue
+            if not inserted:
+                LOGGER.warning(
+                    "Preview image insert skipped for row %d in language %s.",
+                    video.row_number,
+                    language,
+                )
+ 
+    def _apply_language_table_visual_style(
+        self,
+        document_id: str,
+        rows: int,
+        columns: int,
+        row_values: List[Tuple[str, bool]],
+    ) -> None:
+        # Calm palette for header rows in each language table.
+        row_to_rgb: Dict[int, Tuple[float, float, float]] = {
+            0: (0.78, 0.84, 0.94),  # language row: muted blue
+            1: (0.85, 0.91, 0.83),  # title row: soft green
+            3: (0.81, 0.86, 0.78),  # description row: sage
+            5: (0.87, 0.83, 0.76),  # preview row: warm sand
+        }
+
+        doc: Dict[str, Any] = self._docs_client.get_document(document_id=document_id)
+        table_start_index: int = _find_last_table_start_index(doc=doc)
+        cell_start_indices: List[int] = _find_last_table_cell_paragraph_start_indices(
+            doc=doc,
+            rows=rows,
+            columns=columns,
+        )
+
+        requests_payload: List[Dict[str, Any]] = []
+        for row_index, (red, green, blue) in row_to_rgb.items():
+            if row_index >= rows:
+                continue
+
+            requests_payload.append(
+                {
+                    "updateTableCellStyle": {
+                        "tableRange": {
+                            "tableCellLocation": {
+                                "tableStartLocation": {"index": table_start_index},
+                                "rowIndex": row_index,
+                                "columnIndex": 0,
+                            },
+                            "rowSpan": 1,
+                            "columnSpan": 1,
+                        },
+                        "tableCellStyle": {
+                            "backgroundColor": {
+                                "color": {
+                                    "rgbColor": {
+                                        "red": red,
+                                        "green": green,
+                                        "blue": blue,
+                                    }
+                                }
+                            }
+                        },
+                        "fields": "backgroundColor",
+                    }
+                }
+            )
+
+            cell_idx: int = _cell_index(row=row_index, col=0, columns=columns)
+            paragraph_start: int = cell_start_indices[cell_idx] + 1
+            paragraph_end: int = paragraph_start + len(row_values[row_index][0]) + 1
+            requests_payload.append(
+                {
+                    "updateParagraphStyle": {
+                        "range": {
+                            "startIndex": paragraph_start,
+                            "endIndex": paragraph_end,
+                        },
+                        "paragraphStyle": {"alignment": "CENTER"},
+                        "fields": "alignment",
+                    }
+                }
+            )
+
+        if requests_payload:
+            self._docs_client.batch_update(
+                document_id=document_id,
+                requests_payload=requests_payload,
+            )
+
+    def _apply_language_table_content_style(
+        self,
+        document_id: str,
+        rows: int,
+        columns: int,
+        row_values: List[Tuple[str, bool]],
+    ) -> None:
+        # Content rows: titles and descriptions.
+        title_text_row: int = 2
+        description_text_row: int = 4
+        if rows <= description_text_row:
+            return
+
+        doc: Dict[str, Any] = self._docs_client.get_document(document_id=document_id)
+        cell_start_indices: List[int] = _find_last_table_cell_paragraph_start_indices(
+            doc=doc,
+            rows=rows,
+            columns=columns,
+        )
+
+        def _row_range(row_index: int) -> Tuple[int, int]:
+            cell_idx: int = _cell_index(row=row_index, col=0, columns=columns)
+            # Text can be inserted either at paragraph boundary or +1 fallback.
+            # Start from paragraph boundary to avoid losing the first character style.
+            start_index: int = cell_start_indices[cell_idx]
+            end_index: int = start_index + len(row_values[row_index][0]) + 1
+            return start_index, end_index
+
+        title_start, title_end = _row_range(title_text_row)
+        desc_start, desc_end = _row_range(description_text_row)
+
+        requests_payload: List[Dict[str, Any]] = [
+            {
+                "updateTextStyle": {
+                    "range": {"startIndex": title_start, "endIndex": title_end},
+                    "textStyle": {"bold": True},
+                    "fields": "bold",
+                }
+            },
+            {
+                "updateTextStyle": {
+                    "range": {"startIndex": desc_start, "endIndex": desc_end},
+                    "textStyle": {"bold": False},
+                    "fields": "bold",
+                }
+            },
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": title_start, "endIndex": title_end},
+                    "paragraphStyle": {"alignment": "JUSTIFIED"},
+                    "fields": "alignment",
+                }
+            },
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": desc_start, "endIndex": desc_end},
+                    "paragraphStyle": {"alignment": "START"},
+                    "fields": "alignment",
+                }
+            },
+        ]
+        self._docs_client.batch_update(
+            document_id=document_id,
+            requests_payload=requests_payload,
+        )
 
     def write_video_table(
         self,
@@ -725,15 +1300,73 @@ def _cell_index(row: int, col: int, columns: int) -> int:
 
 
 def _build_safe_entity_name(video_title: str) -> str:
-    timestamp_part: str = datetime.now().strftime("%d%m%y_%H%M")
-    normalized_title: str = re.sub(r"\s+", "_", video_title.strip())
-    clean_title: str = "".join(
-        ch for ch in normalized_title if ch.isalnum() or ch == "_"
-    )
+    transliterated: str = _transliterate_cyrillic_to_latin(video_title)
+    normalized_title: str = re.sub(r"\s+", "_", transliterated.strip().lower())
+    clean_title: str = re.sub(r"[^a-z0-9_]+", "_", normalized_title)
     clean_title = re.sub(r"_+", "_", clean_title).strip("_")
     if not clean_title:
         clean_title = "video"
-    return f"{timestamp_part}_{clean_title}"
+    return clean_title[:120]
+
+
+def _transliterate_cyrillic_to_latin(value: str) -> str:
+    mapping: Dict[str, str] = {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "h",
+        "ґ": "g",
+        "д": "d",
+        "е": "e",
+        "є": "ie",
+        "ж": "zh",
+        "з": "z",
+        "и": "y",
+        "і": "i",
+        "ї": "yi",
+        "й": "i",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "kh",
+        "ц": "ts",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "shch",
+        "ь": "",
+        "ю": "iu",
+        "я": "ia",
+        "ё": "yo",
+        "э": "e",
+        "ъ": "",
+    }
+    output: List[str] = []
+    for char in value.lower():
+        if char in mapping:
+            output.append(mapping[char])
+            continue
+        if ("a" <= char <= "z") or ("0" <= char <= "9"):
+            output.append(char)
+            continue
+        if char.isspace() or char in {"-", "_"}:
+            output.append("_")
+            continue
+        output.append("_")
+    return "".join(output)
+
+
+def _display_language_code(language: str) -> str:
+    if language == "uk":
+        return "ua"
+    return language
 
 
 def _guess_image_extension_and_mime(image_bytes: bytes) -> Tuple[str, str]:
@@ -847,23 +1480,457 @@ def _find_last_table_cell_paragraph_start_indices(
     return result
 
 
+def _find_last_table_start_index(doc: Dict[str, Any]) -> int:
+    body: Dict[str, Any] = doc.get("body", {})
+    content: List[Dict[str, Any]] = body.get("content", [])
+    table_items: List[Dict[str, Any]] = [item for item in content if "table" in item]
+    if not table_items:
+        raise RuntimeError("Не найдена таблица в документе.")
+    start_index_raw: Optional[Any] = table_items[-1].get("startIndex")
+    if start_index_raw is None:
+        raise RuntimeError("Не найден startIndex последней таблицы.")
+    return int(start_index_raw)
+
+
+def _value_from_row(row_values: List[str], index: int) -> str:
+    if index >= len(row_values):
+        return ""
+    return str(row_values[index]).strip()
+
+
+def _normalize_header_name(value: str) -> str:
+    return re.sub(r"[^a-zа-я0-9]+", "", value.strip().lower(), flags=re.IGNORECASE)
+
+
+def _find_header_index(
+    normalized_header: List[str],
+    aliases: Tuple[str, ...],
+) -> Optional[int]:
+    normalized_aliases: Tuple[str, ...] = tuple(
+        _normalize_header_name(alias) for alias in aliases
+    )
+    for index, name in enumerate(normalized_header):
+        if name in normalized_aliases:
+            return index
+    for index, name in enumerate(normalized_header):
+        if any(alias in name for alias in normalized_aliases if alias):
+            return index
+    return None
+
+
+def _parse_sheet_datetime(date_raw: str, time_raw: str, tz: ZoneInfo) -> datetime:
+    date_clean: str = date_raw.strip()
+    time_clean: str = time_raw.strip()
+    date_formats: Tuple[str, ...] = (
+        "%d.%m.%Y",
+        "%d.%m.%y",
+        "%d/%m/%Y",
+        "%d/%m/%y",
+        "%Y-%m-%d",
+        "%d%m%y",
+        "%d%m%Y",
+    )
+    time_formats: Tuple[str, ...] = (
+        "%H:%M",
+        "%H.%M",
+        "%H%M",
+        "%H:%M:%S",
+        "%I:%M %p",
+        "%I %p",
+    )
+
+    parsed_date: Optional[datetime] = None
+    for fmt in date_formats:
+        try:
+            parsed_date = datetime.strptime(date_clean, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed_date is None:
+        raise ValueError(f"Unsupported Date format: {date_raw!r}")
+
+    parsed_time: Optional[datetime] = None
+    for fmt in time_formats:
+        try:
+            parsed_time = datetime.strptime(time_clean, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed_time is None:
+        raise ValueError(f"Unsupported Time format: {time_raw!r}")
+
+    return datetime(
+        year=parsed_date.year,
+        month=parsed_date.month,
+        day=parsed_date.day,
+        hour=parsed_time.hour,
+        minute=parsed_time.minute,
+        tzinfo=tz,
+    )
+
+
+def _normalize_language(raw_language: Optional[str]) -> Optional[str]:
+    if not raw_language:
+        return None
+    normalized: str = raw_language.strip().lower()
+    if normalized.startswith(("uk", "ua")):
+        return "uk"
+    if normalized.startswith("en"):
+        return "en"
+    if normalized.startswith("ru"):
+        return "ru"
+    return None
+
+
+def _detect_language_from_text(text: str) -> str:
+    low: str = text.lower()
+    if not low:
+        return "other"
+    if any(ch in low for ch in "іїєґ"):
+        return "uk"
+
+    cyrillic_count: int = len(re.findall(r"[а-яё]", low))
+    latin_count: int = len(re.findall(r"[a-z]", low))
+    if cyrillic_count > 0 and latin_count == 0:
+        return "ru"
+    if latin_count >= cyrillic_count and latin_count > 0:
+        return "en"
+    if cyrillic_count > latin_count:
+        return "ru"
+    return "other"
+
+
+def _detect_language(metadata: VideoMetadata) -> str:
+    from_youtube: Optional[str] = _normalize_language(metadata.youtube_language)
+    if from_youtube:
+        return from_youtube
+    return _detect_language_from_text(
+        f"{metadata.title}\n{metadata.description}".strip()
+    )
+
+
+def _language_index(language: str) -> int:
+    order: Tuple[str, ...] = ("uk", "en", "ru", "other")
+    try:
+        return order.index(language)
+    except ValueError:
+        return len(order)
+
+
+def _language_heading(language: str) -> str:
+    labels: Dict[str, str] = {
+        "uk": "UA",
+        "en": "ENG",
+        "ru": "RU",
+        "other": "OTHER",
+    }
+    return labels.get(language, "OTHER")
+
+
+def _build_titles_summary(videos: List[PlannedVideo]) -> str:
+    if not videos:
+        return "1) ..."
+    use_numbers: bool = len(videos) > 1
+    lines: List[str] = []
+    for index, video in enumerate(videos, start=1):
+        if use_numbers:
+            lines.append(f"{index}) {video.metadata.title}")
+        else:
+            lines.append(video.metadata.title)
+    return "\n".join(lines)
+
+
+def _build_doc_header_text(
+    context: Dict[str, str],
+    language_groups: Dict[str, List[PlannedVideo]],
+) -> str:
+    return (
+        "Ежедневные стримы / Everyday streams\n"
+        f"{context['time_cet']} CET/CEST ({context['time_kiev']} Kiev, {context['time_gmt']} GMT)\n\n"
+        f"❇️ Эфир {context['date']}  Скинуть ключи до {context['time_kiev_minus_1']} по Киеву\n"
+        f"Drop the keys off before {context['time_gmt_minus_1']} GMT\n\n"
+        "❇️ Форма для ключей /  Form for keys\n"
+        f"{context['form_url']}\n\n"
+        "При технических проблемах / In case of technical problems\n"
+        f"Contact: {context['contacts']}\n\n"
+        "❇️ Опис / Description / Описание\n"
+        f"\nUA - {context['time_ukr']}\n"
+        f"{_build_titles_summary(language_groups.get('uk', []))}\n"
+        f"\nENG - {context['time_eng']}\n"
+        f"{_build_titles_summary(language_groups.get('en', []))}\n"
+        f"\nRU - {context['time_ru']}\n"
+        f"{_build_titles_summary(language_groups.get('ru', []))}"
+    )
+
+
+def _build_descriptions_summary(videos: List[PlannedVideo]) -> str:
+    if not videos:
+        return "1) ..."
+    use_numbers: bool = len(videos) > 1
+    lines: List[str] = []
+    for index, video in enumerate(videos, start=1):
+        description_text: str = video.metadata.description.strip() or "(no description)"
+        if use_numbers:
+            lines.append(f"{index}) {description_text}")
+        else:
+            lines.append(description_text)
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _build_preview_placeholder_rows(
+    videos: List[PlannedVideo],
+) -> List[Tuple[str, bool]]:
+    if not videos:
+        return [(" ", False)]
+    return [(" ", False) for _ in videos]
+
+
+def _youtube_video_id_from_url(video_url: str) -> Optional[str]:
+    match: Optional[re.Match[str]] = re.search(
+        r"(?:youtu\.be/|v=|embed/|shorts/)([A-Za-z0-9_-]{11})",
+        video_url,
+    )
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _thumbnail_candidates(video: PlannedVideo) -> List[str]:
+    candidates: List[str] = []
+    video_id: Optional[str] = _youtube_video_id_from_url(video.normalized_link)
+    if video_id:
+        candidates.append(f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")
+        candidates.append(f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg")
+    candidates.append(video.metadata.thumbnail_url)
+    # Keep order and remove duplicates/empty values.
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key: str = item.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return deduped
+
+
+def _build_language_table_rows(
+    language: str,
+    videos: List[PlannedVideo],
+) -> List[Tuple[str, bool]]:
+    labels: Dict[str, Tuple[str, str, str]] = {
+        "uk": ("НАЗВА", "ОПИС", "ПРЕВ'Ю"),
+        "en": ("TITLE", "DESCRIPTION", "PREVIEW"),
+        "ru": ("НАЗВАНИЕ", "ОПИСАНИЕ", "ПРЕВЬЮ"),
+        "other": ("TITLE", "DESCRIPTION", "PREVIEW"),
+    }
+    title_label, desc_label, preview_label = labels.get(
+        language,
+        labels["other"],
+    )
+    rows: List[Tuple[str, bool]] = [
+        (_language_heading(language), True),
+        (title_label, True),
+        (_build_titles_summary(videos), False),
+        (desc_label, True),
+        (_build_descriptions_summary(videos), False),
+        (preview_label, True),
+    ]
+    rows.extend(_build_preview_placeholder_rows(videos))
+    return rows
+
+
+def _build_telegram_header_text(
+    context: Dict[str, str],
+    generated_doc_url: str,
+    config: "AppConfig",
+) -> str:
+    time_cet: str = _telegram_safe_time(context["time_cet"])
+    time_kiev: str = _telegram_safe_time(context["time_kiev"])
+    time_gmt: str = _telegram_safe_time(context["time_gmt"])
+    return (
+        "Ежедневные стримы / Everyday streams\n"
+        f"{time_cet} CET/CEST ({time_kiev} Kiev, {time_gmt} GMT)\n\n"
+        f"{config.telegram_symbol_broadcast} Эфир {config.telegram_symbol_alert} {context['date']} / Скинуть ключи за час до эфира\n"
+        "Broadcast / Drop the keys off 1 hour before the stream\n\n"
+        f"{config.telegram_symbol_form} Форма для ключей / Form for keys\n"
+        f"{context['form_url']}\n\n"
+        f"{config.telegram_symbol_description} Описание / Description\n"
+        f"{generated_doc_url}"
+    )
+
+
+def _telegram_language_flag(language: str, config: "AppConfig") -> str:
+    flag_by_language: Dict[str, str] = {
+        "uk": config.telegram_flag_uk,
+        "en": config.telegram_flag_en,
+        "ru": config.telegram_flag_ru,
+        "other": config.telegram_flag_other,
+    }
+    return flag_by_language.get(language, config.telegram_flag_other)
+
+
+def _telegram_language_flags(language: str, config: "AppConfig") -> str:
+    return _telegram_language_flag(language, config) * max(
+        1, int(config.telegram_flag_repeat_count)
+    )
+
+
+def _telegram_language_name(language: str, config: "AppConfig") -> str:
+    name_by_language: Dict[str, str] = {
+        "uk": config.telegram_language_name_uk,
+        "en": config.telegram_language_name_en,
+        "ru": config.telegram_language_name_ru,
+        "other": config.telegram_language_name_other,
+    }
+    return name_by_language.get(language, config.telegram_language_name_other)
+
+
+def _build_telegram_language_block(video: PlannedVideo, config: "AppConfig") -> str:
+    description_text: str = video.metadata.description.strip() or "(no description)"
+    time_kiev_safe: str = _telegram_safe_time(
+        video.scheduled_at_kiev.strftime("%H:%M")
+    )
+    return (
+        f"{video.date_display} на {time_kiev_safe} по Киеву\n\n"
+        f"{config.telegram_symbol_pin}Название и описание эфира {_telegram_language_flags(video.language, config)}\n"
+        "Name and description of stream\n\n"
+        f"{video.metadata.title}\n\n"
+        f"{description_text}"
+    )
+
+
+def _build_telegram_language_digest_block(
+    language: str,
+    videos: List[PlannedVideo],
+    context: Dict[str, str],
+    config: "AppConfig",
+) -> str:
+    lines: List[str] = [
+        f"{_telegram_language_flags(language, config)}{_telegram_language_name(language, config)} на {context['date']}",
+        "",
+    ]
+    for video in videos:
+        lines.append(f"{config.telegram_symbol_done} {video.metadata.title}")
+        lines.append(video.normalized_link)
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _build_header_context(
+    videos: List[PlannedVideo],
+    form_url: str,
+    contacts: str,
+    cet_tz: ZoneInfo,
+) -> Dict[str, str]:
+    if not videos:
+        raise ValueError("videos must not be empty")
+
+    first_stream: PlannedVideo = min(
+        videos,
+        key=lambda item: (item.scheduled_at_kiev.time(), item.row_number),
+    )
+    stream_dt_kiev: datetime = first_stream.scheduled_at_kiev
+    stream_dt_cet: datetime = stream_dt_kiev.astimezone(cet_tz)
+    stream_dt_gmt: datetime = stream_dt_kiev.astimezone(timezone.utc)
+    kiev_minus_1: datetime = stream_dt_kiev - timedelta(hours=1)
+    gmt_minus_1: datetime = stream_dt_gmt - timedelta(hours=1)
+
+    times_by_language: Dict[str, str] = {"uk": "--:--", "en": "--:--", "ru": "--:--"}
+    for language in ("uk", "en", "ru"):
+        same_language: List[PlannedVideo] = [
+            item for item in videos if item.language == language
+        ]
+        if not same_language:
+            continue
+        unique_times: List[str] = sorted(
+            {item.scheduled_at_kiev.strftime("%H:%M") for item in same_language}
+        )
+        times_by_language[language] = ", ".join(unique_times)
+
+    return {
+        "date": stream_dt_kiev.strftime("%d.%m.%Y"),
+        "time_cet": stream_dt_cet.strftime("%H:%M"),
+        "time_kiev": stream_dt_kiev.strftime("%H:%M"),
+        "time_gmt": stream_dt_gmt.strftime("%H:%M"),
+        "time_kiev_minus_1": kiev_minus_1.strftime("%H:%M"),
+        "time_gmt_minus_1": gmt_minus_1.strftime("%H:%M"),
+        "time_ukr": times_by_language["uk"],
+        "time_eng": times_by_language["en"],
+        "time_ru": times_by_language["ru"],
+        "form_url": form_url,
+        "contacts": contacts,
+    }
+
+
 # ----------------------------
 # Оркестратор (приложение)
 # ----------------------------
+
+
+class NamePathBuilder:
+    def __init__(self, local_image_dir_template: str) -> None:
+        self._local_image_dir_template: str = local_image_dir_template
+
+    def build_doc_title(self, date_key: str, created_at: datetime) -> str:
+        creation_stamp: str = created_at.strftime("%H%M_%d%m%y")
+        return f"{date_key} Ежедневные стримы / Everyday streams {creation_stamp}"
+
+    def build_image_path(
+        self,
+        language: str,
+        date_key: str,
+        language_index: int,
+        title: str,
+        extension: str,
+    ) -> Path:
+        display_language: str = _display_language_code(language)
+        base_dir: str = self._local_image_dir_template.format(
+            language=display_language,
+            date=date_key,
+        )
+        safe_title: str = _build_safe_entity_name(title)
+        return Path(base_dir) / f"{language_index}_{safe_title}{extension}"
 
 
 @dataclass(frozen=True)
 class AppConfig:
     telegram_bot_token: str
     telegram_chat_id: str
+    telegram_enabled: bool
     google_enabled: bool
     google_credentials_path: Optional[Path]
     google_token_path: Optional[Path]
     google_drive_folder_id: Optional[str]
     google_doc_share_mode: str
+    google_sheets_id: str
+    google_sheets_range: str
+    google_form_url: str
+    google_contacts: str
+    local_image_dir_template: str
+    timezone_kiev: str
+    timezone_cet: str
+    telegram_symbol_separator: str
+    telegram_separator_repeat_count: int
+    telegram_symbol_broadcast: str
+    telegram_symbol_alert: str
+    telegram_symbol_form: str
+    telegram_symbol_description: str
+    telegram_symbol_pin: str
+    telegram_symbol_done: str
+    telegram_flag_uk: str
+    telegram_flag_en: str
+    telegram_flag_ru: str
+    telegram_flag_other: str
+    telegram_flag_repeat_count: int
+    telegram_language_name_uk: str
+    telegram_language_name_en: str
+    telegram_language_name_ru: str
+    telegram_language_name_other: str
 
 
-class YouTubeToTelegramAndDocsApp:
+class StreamPipelineApp:
     def __init__(
         self,
         config: AppConfig,
@@ -871,66 +1938,17 @@ class YouTubeToTelegramAndDocsApp:
         http_client: HttpClient,
         telegram_client: TelegramBotClient,
     ) -> None:
-        self._config: AppConfig = config
-        self._metadata_fetcher: YouTubeMetadataFetcher = metadata_fetcher
-        self._http_client: HttpClient = http_client
-        self._telegram_client: TelegramBotClient = telegram_client
+        self._config = config
+        self._metadata_fetcher = metadata_fetcher
+        self._http_client = http_client
+        self._telegram_client = telegram_client
+        self._kiev_tz = _load_zoneinfo(config.timezone_kiev)
+        self._cet_tz = _load_zoneinfo(config.timezone_cet)
+        self._name_builder = NamePathBuilder(config.local_image_dir_template)
 
-    def run(self, video_url: str, create_google_doc: bool) -> None:
-        if not re.match(r"^https?://", video_url):
-            raise ValueError("Ожидался URL с http:// или https://")
-
-        normalized_video_url: str = _normalize_youtube_video_url(video_url)
-        if normalized_video_url != video_url:
-            LOGGER.debug(
-                "Normalized YouTube URL from %s to %s",
-                video_url,
-                normalized_video_url,
-            )
-
-        LOGGER.info("Processing video URL: %s", normalized_video_url)
-        video: VideoMetadata = self._metadata_fetcher.fetch(
-            video_url=normalized_video_url
-        )
-        safe_entity_name: str = _build_safe_entity_name(video.title)
-        LOGGER.debug("Generated safe entity name: %s", safe_entity_name)
-
-        thumbnail_bytes: bytes = self._http_client.get_bytes(video.thumbnail_url)
-        normalized_thumbnail: NormalizedImage = _normalize_thumbnail(thumbnail_bytes)
-
-        message_text: str = self._compose_message(video=video)
-        self._telegram_client.send_text(text=message_text)
-        self._telegram_client.send_photo_bytes(
-            photo_bytes=normalized_thumbnail.bytes_data,
-            filename=f"{safe_entity_name}{normalized_thumbnail.extension}",
-            mime_type=normalized_thumbnail.mime_type,
-            caption=video.title[:900] if video.title else None,
-        )
-
-        if create_google_doc and self._config.google_enabled:
-            self._create_google_doc_with_table(
-                video=video,
-                normalized_thumbnail=normalized_thumbnail,
-                safe_entity_name=safe_entity_name,
-            )
-
-    def _compose_message(self, video: VideoMetadata) -> str:
-        description_trimmed: str = video.description.strip()
-        if not description_trimmed:
-            description_trimmed = "(no description)"
-
-        return (
-            f"Title:\n{video.title}\n\n"
-            f"Description:\n{description_trimmed}\n\n"
-            f"URL:\n{video.url}\n"
-        )
-
-    def _create_google_doc_with_table(
-        self,
-        video: VideoMetadata,
-        normalized_thumbnail: NormalizedImage,
-        safe_entity_name: str,
-    ) -> None:
+    def run_batch(self, dry_run: bool) -> None:
+        if not self._config.google_enabled:
+            raise RuntimeError("Для batch режима GOOGLE_ENABLED должен быть включен.")
         if (
             not self._config.google_credentials_path
             or not self._config.google_token_path
@@ -943,73 +1961,322 @@ class YouTubeToTelegramAndDocsApp:
             credentials_path=self._config.google_credentials_path,
             token_path=self._config.google_token_path,
         )
-        docs_service: Any = services_factory.create_docs_service()
-        drive_service: Any = services_factory.create_drive_service()
-
-        docs_client: GoogleDocsClient = GoogleDocsClient(docs_service=docs_service)
-        drive_client: GoogleDriveClient = GoogleDriveClient(drive_service=drive_service)
+        sheets_client: GoogleSheetsClient = GoogleSheetsClient(
+            sheets_service=services_factory.create_sheets_service()
+        )
+        docs_client: GoogleDocsClient = GoogleDocsClient(
+            docs_service=services_factory.create_docs_service()
+        )
+        drive_client: GoogleDriveClient = GoogleDriveClient(
+            drive_service=services_factory.create_drive_service()
+        )
         report_writer: GoogleDocsReportWriter = GoogleDocsReportWriter(
             docs_client=docs_client
         )
 
-        doc_title: str = safe_entity_name
-        document_id: str = docs_client.create_document(title=doc_title)
+        LOGGER.info(
+            "Reading Google Sheets: spreadsheet=%s range=%s",
+            self._config.google_sheets_id,
+            self._config.google_sheets_range,
+        )
+        rows: List[SheetRow] = sheets_client.read_rows(
+            spreadsheet_id=self._config.google_sheets_id,
+            range_name=self._config.google_sheets_range,
+        )
+        LOGGER.info("Rows loaded from sheet: %d", len(rows))
 
-        if self._config.google_doc_share_mode != "private":
-            role_by_mode: Dict[str, str] = {
-                "anyone_reader": "reader",
-                "anyone_commenter": "commenter",
-                "anyone_writer": "writer",
-            }
-            role: str = role_by_mode[self._config.google_doc_share_mode]
-            drive_client.set_anyone_permission(file_id=document_id, role=role)
-            LOGGER.info(
-                "Google Doc sharing enabled: mode=%s (anyone role=%s).",
-                self._config.google_doc_share_mode,
-                role,
-            )
-        else:
-            LOGGER.info("Google Doc sharing mode=private (no anyone-link access).")
-
-        # Перемещаем документ в папку (опционально).
-        if self._config.google_drive_folder_id:
-            drive_client.move_file_to_folder(
-                file_id=document_id, folder_id=self._config.google_drive_folder_id
-            )
-
-        # Сохраняем thumbnail в Drive только как хранилище.
-        drive_public_thumbnail_url: Optional[str] = None
-        with tempfile.TemporaryDirectory() as temp_dir:
-            thumbnail_path: Path = (
-                Path(temp_dir) / f"{safe_entity_name}{normalized_thumbnail.extension}"
-            )
-            thumbnail_path.write_bytes(normalized_thumbnail.bytes_data)
+        now_kiev: datetime = datetime.now(self._kiev_tz)
+        processed: List[PlannedVideo] = []
+        for row in rows:
+            LOGGER.info("Row %d: read", row.row_number)
+            if not row.link:
+                LOGGER.warning("Row %d: skipped, empty Links", row.row_number)
+                continue
+            if not row.date_raw or not row.time_raw:
+                LOGGER.warning("Row %d: skipped, missing Date/Time", row.row_number)
+                continue
 
             try:
-                _, drive_public_thumbnail_url = (
-                    drive_client.upload_image_and_make_public(
-                        image_path=thumbnail_path,
-                        folder_id=self._config.google_drive_folder_id,
-                        mime_type=normalized_thumbnail.mime_type,
+                scheduled_at: datetime = _parse_sheet_datetime(
+                    date_raw=row.date_raw,
+                    time_raw=row.time_raw,
+                    tz=self._kiev_tz,
+                )
+                if scheduled_at < now_kiev:
+                    LOGGER.info(
+                        "Row %d: skipped, already in the past (%s)",
+                        row.row_number,
+                        scheduled_at.isoformat(),
+                    )
+                    continue
+
+                normalized_link: str = _normalize_youtube_video_url(row.link)
+                LOGGER.info("Row %d: normalized URL", row.row_number)
+                metadata: VideoMetadata = self._metadata_fetcher.fetch(
+                    video_url=normalized_link
+                )
+                LOGGER.info("Row %d: metadata fetched", row.row_number)
+                language: str = _detect_language(metadata)
+                LOGGER.info("Row %d: language=%s", row.row_number, language)
+
+                thumbnail_bytes: bytes = self._http_client.get_bytes(
+                    metadata.thumbnail_url
+                )
+                normalized_thumbnail: NormalizedImage = _normalize_thumbnail(
+                    thumbnail_bytes
+                )
+                date_key: str = scheduled_at.strftime("%d%m%y")
+
+                processed.append(
+                    PlannedVideo(
+                        row_number=row.row_number,
+                        original_link=row.link,
+                        normalized_link=normalized_link,
+                        scheduled_at_kiev=scheduled_at,
+                        date_key=date_key,
+                        date_display=scheduled_at.strftime("%d.%m.%Y"),
+                        language=language,
+                        metadata=metadata,
+                        thumbnail=normalized_thumbnail,
+                        local_thumbnail_path=None,
                     )
                 )
-            except Exception as drive_error:
-                LOGGER.warning(
-                    "Drive thumbnail upload failed (storage only). Continuing without Drive link. Error: %s",
-                    drive_error,
+            except Exception as error:
+                LOGGER.exception(
+                    "Row %d: processing failed. reason=%s",
+                    row.row_number,
+                    error,
                 )
 
-        report_writer.write_video_table(
-            document_id=document_id,
-            video=video,
-            docs_thumbnail_url=(drive_public_thumbnail_url or video.thumbnail_url),
-            fallback_external_thumbnail_url=(
-                drive_public_thumbnail_url or video.thumbnail_url
-            ),
-        )
+        if not processed:
+            LOGGER.warning("No videos to process after filtering.")
+            return
 
-        self._telegram_client.send_text(
-            text=f"Google Doc created:\nhttps://docs.google.com/document/d/{document_id}/edit"
+        videos_by_date: Dict[str, List[PlannedVideo]] = {}
+        for video in processed:
+            videos_by_date.setdefault(video.date_key, []).append(video)
+
+        for date_key in sorted(videos_by_date.keys()):
+            day_videos: List[PlannedVideo] = sorted(
+                videos_by_date[date_key],
+                key=lambda item: (
+                    _language_index(item.language),
+                    item.scheduled_at_kiev.time(),
+                    item.row_number,
+                ),
+            )
+            language_groups: Dict[str, List[PlannedVideo]] = {
+                "uk": [],
+                "en": [],
+                "ru": [],
+                "other": [],
+            }
+            updated_day_videos: List[PlannedVideo] = []
+            for language in ("uk", "en", "ru", "other"):
+                language_items: List[PlannedVideo] = [
+                    item for item in day_videos if item.language == language
+                ]
+                for language_index, video in enumerate(language_items, start=1):
+                    local_image_path: Path = self._name_builder.build_image_path(
+                        language=language,
+                        date_key=date_key,
+                        language_index=language_index,
+                        title=video.metadata.title,
+                        extension=video.thumbnail.extension,
+                    )
+                    local_image_path.parent.mkdir(parents=True, exist_ok=True)
+                    local_image_path.write_bytes(video.thumbnail.bytes_data)
+                    LOGGER.info(
+                        "Row %d: thumbnail saved to %s",
+                        video.row_number,
+                        local_image_path,
+                    )
+                    updated_video: PlannedVideo = dataclasses.replace(
+                        video,
+                        local_thumbnail_path=local_image_path,
+                    )
+                    language_groups[language].append(updated_video)
+                    updated_day_videos.append(updated_video)
+
+            day_videos = updated_day_videos
+
+            header_context: Dict[str, str] = _build_header_context(
+                videos=day_videos,
+                form_url=self._config.google_form_url,
+                contacts=self._config.google_contacts,
+                cet_tz=self._cet_tz,
+            )
+            doc_title: str = self._name_builder.build_doc_title(
+                date_key=date_key,
+                created_at=datetime.now(self._kiev_tz),
+            )
+            doc_url: str = "DRY_RUN_DOC_URL"
+            if not dry_run:
+                document_id: str = docs_client.create_document(title=doc_title)
+                if self._config.google_doc_share_mode != "private":
+                    role_by_mode: Dict[str, str] = {
+                        "anyone_reader": "reader",
+                        "anyone_commenter": "commenter",
+                        "anyone_writer": "writer",
+                    }
+                    role: str = role_by_mode[self._config.google_doc_share_mode]
+                    drive_client.set_anyone_permission(file_id=document_id, role=role)
+                if self._config.google_drive_folder_id:
+                    drive_client.move_file_to_folder(
+                        file_id=document_id,
+                        folder_id=self._config.google_drive_folder_id,
+                    )
+                report_writer.write_daily_document(
+                    document_id=document_id,
+                    header_text=_build_doc_header_text(
+                        header_context,
+                        language_groups=language_groups,
+                    ),
+                    language_groups=language_groups,
+                )
+                doc_url = f"https://docs.google.com/document/d/{document_id}/edit"
+            LOGGER.info("Date %s: Google Doc created: %s", date_key, doc_url)
+            self._send_telegram_for_date(
+                day_videos=day_videos,
+                header_context=header_context,
+                doc_url=doc_url,
+                dry_run=dry_run,
+            )
+
+    def _send_telegram_for_date(
+        self,
+        day_videos: List[PlannedVideo],
+        header_context: Dict[str, str],
+        doc_url: str,
+        dry_run: bool,
+    ) -> None:
+        if not self._config.telegram_enabled:
+            LOGGER.info("Telegram disabled by TELEGRAM_ENABLED=0.")
+            return
+
+        date_separator: str = (
+            self._config.telegram_symbol_separator
+            * max(1, int(self._config.telegram_separator_repeat_count))
+        )
+        header_message: str = _build_telegram_header_text(
+            context=header_context,
+            generated_doc_url=doc_url,
+            config=self._config,
+        )
+        if dry_run:
+            LOGGER.info("DRY RUN Telegram date separator start:\n%s", date_separator)
+            LOGGER.info("DRY RUN Telegram header:\n%s", header_message)
+        else:
+            self._telegram_client.send_text(date_separator)
+            self._telegram_client.send_text(header_message)
+
+        grouped: Dict[str, List[PlannedVideo]] = {
+            "uk": [],
+            "en": [],
+            "ru": [],
+            "other": [],
+        }
+        for video in day_videos:
+            grouped[video.language].append(video)
+
+        for language in ("uk", "en", "ru", "other"):
+            items: List[PlannedVideo] = sorted(
+                grouped[language],
+                key=lambda item: (item.scheduled_at_kiev.time(), item.row_number),
+            )
+            for item in items:
+                block_text = _build_telegram_language_block(item, config=self._config)
+                if dry_run:
+                    LOGGER.info(
+                        "DRY RUN Telegram block for row %d:\n%s",
+                        item.row_number,
+                        block_text,
+                    )
+                    continue
+                if item.local_thumbnail_path is None:
+                    raise RuntimeError(
+                        f"Row {item.row_number}: local thumbnail path is not set."
+                    )
+                self._telegram_client.send_text(block_text)
+                self._telegram_client.send_photo_as_file_bytes(
+                    photo_bytes=item.thumbnail.bytes_data,
+                    filename=item.local_thumbnail_path.name,
+                    mime_type=item.thumbnail.mime_type,
+                )
+
+        post_header_message: str = (
+            f"{self._config.telegram_symbol_broadcast} Эфир {header_context['date']}"
+        )
+        if dry_run:
+            LOGGER.info(
+                "DRY RUN Telegram post-date header block:\n%s",
+                post_header_message,
+            )
+        else:
+            self._telegram_client.send_text(post_header_message)
+
+        for language in ("uk", "en", "ru", "other"):
+            items = sorted(
+                grouped[language],
+                key=lambda item: (item.scheduled_at_kiev.time(), item.row_number),
+            )
+            if not items:
+                continue
+            digest_text: str = _build_telegram_language_digest_block(
+                language=language,
+                videos=items,
+                context=header_context,
+                config=self._config,
+            )
+            if dry_run:
+                LOGGER.info(
+                    "DRY RUN Telegram language digest block (%s):\n%s",
+                    language,
+                    digest_text,
+                )
+                continue
+            self._telegram_client.send_text(digest_text)
+            for item in items:
+                if item.local_thumbnail_path is None:
+                    raise RuntimeError(
+                        f"Row {item.row_number}: local thumbnail path is not set."
+                    )
+                self._telegram_client.send_photo_as_file_bytes(
+                    photo_bytes=item.thumbnail.bytes_data,
+                    filename=item.local_thumbnail_path.name,
+                    mime_type=item.thumbnail.mime_type,
+                )
+
+        if dry_run:
+            LOGGER.info("DRY RUN Telegram date separator end:\n%s", date_separator)
+        else:
+            self._telegram_client.send_text(date_separator)
+
+    def run_single(self, video_url: str, dry_run: bool) -> None:
+        if not re.match(r"^https?://", video_url):
+            raise ValueError("Ожидался URL с http:// или https://")
+        normalized_video_url: str = _normalize_youtube_video_url(video_url)
+        metadata: VideoMetadata = self._metadata_fetcher.fetch(
+            video_url=normalized_video_url
+        )
+        language: str = _detect_language(metadata)
+        thumbnail_bytes: bytes = self._http_client.get_bytes(metadata.thumbnail_url)
+        normalized_thumbnail: NormalizedImage = _normalize_thumbnail(thumbnail_bytes)
+        message_text: str = (
+            f"Title:\n{metadata.title}\n\n"
+            f"Language:\n{language}\n\n"
+            f"Description:\n{(metadata.description or '(no description)')}\n\n"
+            f"URL:\n{metadata.url}\n"
+        )
+        if dry_run:
+            LOGGER.info("DRY RUN single mode message:\n%s", message_text)
+            return
+        self._telegram_client.send_text(text=message_text)
+        self._telegram_client.send_photo_as_file_bytes(
+            photo_bytes=normalized_thumbnail.bytes_data,
+            filename=f"{_build_safe_entity_name(metadata.title)}{normalized_thumbnail.extension}",
+            mime_type=normalized_thumbnail.mime_type,
+            caption=metadata.title[:900] if metadata.title else None,
         )
 
 
@@ -1019,33 +2286,77 @@ class YouTubeToTelegramAndDocsApp:
 
 
 def _load_config_from_env() -> AppConfig:
-    telegram_bot_token: str = _must_get_env("TELEGRAM_BOT_TOKEN")
-    telegram_chat_id: str = _must_get_env("TELEGRAM_CHAT_ID")
-
-    google_enabled_raw: str = os.getenv("GOOGLE_ENABLED", "0").strip()
-    google_enabled: bool = google_enabled_raw in {"1", "true", "True", "yes", "YES"}
-    google_doc_share_mode: str = _load_google_doc_share_mode_from_env()
-
-    google_credentials_path_str: Optional[str] = os.getenv("GOOGLE_CREDENTIALS_PATH")
-    google_token_path_str: Optional[str] = os.getenv("GOOGLE_TOKEN_PATH")
-    google_drive_folder_id: Optional[str] = os.getenv("GOOGLE_DRIVE_FOLDER_ID") or None
-
-    google_credentials_path: Optional[Path] = (
-        Path(google_credentials_path_str) if google_credentials_path_str else None
-    )
-    google_token_path: Optional[Path] = (
-        Path(google_token_path_str) if google_token_path_str else None
-    )
-
     return AppConfig(
-        telegram_bot_token=telegram_bot_token,
-        telegram_chat_id=telegram_chat_id,
-        google_enabled=google_enabled,
-        google_credentials_path=google_credentials_path,
-        google_token_path=google_token_path,
-        google_drive_folder_id=google_drive_folder_id,
-        google_doc_share_mode=google_doc_share_mode,
+        telegram_bot_token=_must_get_env("TELEGRAM_BOT_TOKEN"),
+        telegram_chat_id=_must_get_env("TELEGRAM_CHAT_ID"),
+        telegram_enabled=_load_bool_env("TELEGRAM_ENABLED", default=True),
+        google_enabled=_load_bool_env("GOOGLE_ENABLED", default=False),
+        google_credentials_path=Path(_must_get_env("GOOGLE_CREDENTIALS_PATH")),
+        google_token_path=Path(_must_get_env("GOOGLE_TOKEN_PATH")),
+        google_drive_folder_id=os.getenv("GOOGLE_DRIVE_FOLDER_ID") or None,
+        google_doc_share_mode=_load_google_doc_share_mode_from_env(),
+        google_sheets_id=_must_get_env("GOOGLE_SHEETS_ID"),
+        google_sheets_range=_must_get_env("GOOGLE_SHEETS_RANGE"),
+        google_form_url=_must_get_env("GOOGLE_FORM_URL"),
+        google_contacts=_must_get_env("GOOGLE_CONTACTS"),
+        local_image_dir_template=_must_get_env("LOCAL_IMAGE_DIR_TEMPLATE"),
+        timezone_kiev=os.getenv("TIMEZONE_KIEV", "Europe/Kyiv").strip(),
+        timezone_cet=os.getenv("TIMEZONE_CET", "Europe/Berlin").strip(),
+        telegram_symbol_separator=os.getenv("TELEGRAM_SYMBOL_SEPARATOR", "🎬").strip(),
+        telegram_separator_repeat_count=_load_int_env(
+            "TELEGRAM_SEPARATOR_REPEAT_COUNT", default=8
+        ),
+        telegram_symbol_broadcast=os.getenv("TELEGRAM_SYMBOL_BROADCAST", "❇️").strip(),
+        telegram_symbol_alert=os.getenv("TELEGRAM_SYMBOL_ALERT", "🚨").strip(),
+        telegram_symbol_form=os.getenv("TELEGRAM_SYMBOL_FORM", "❇️").strip(),
+        telegram_symbol_description=os.getenv(
+            "TELEGRAM_SYMBOL_DESCRIPTION", "❇️"
+        ).strip(),
+        telegram_symbol_pin=os.getenv("TELEGRAM_SYMBOL_PIN", "📌").strip(),
+        telegram_symbol_done=os.getenv("TELEGRAM_SYMBOL_DONE", "✅").strip(),
+        telegram_flag_uk=os.getenv("TELEGRAM_FLAG_UK", "🇺🇦").strip(),
+        telegram_flag_en=os.getenv("TELEGRAM_FLAG_EN", "🇬🇧").strip(),
+        telegram_flag_ru=os.getenv("TELEGRAM_FLAG_RU", "🇷🇺").strip(),
+        telegram_flag_other=os.getenv("TELEGRAM_FLAG_OTHER", "🌐").strip(),
+        telegram_flag_repeat_count=_load_int_env(
+            "TELEGRAM_FLAG_REPEAT_COUNT", default=3
+        ),
+        telegram_language_name_uk=os.getenv("TELEGRAM_LANGUAGE_NAME_UK", "Укр").strip(),
+        telegram_language_name_en=os.getenv("TELEGRAM_LANGUAGE_NAME_EN", "Eng").strip(),
+        telegram_language_name_ru=os.getenv("TELEGRAM_LANGUAGE_NAME_RU", "Ru").strip(),
+        telegram_language_name_other=os.getenv(
+            "TELEGRAM_LANGUAGE_NAME_OTHER", "Other"
+        ).strip(),
     )
+
+
+def _load_bool_env(name: str, default: bool) -> bool:
+    raw: Optional[str] = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_int_env(name: str, default: int) -> int:
+    raw: Optional[str] = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError as error:
+        raise RuntimeError(f"Env var {name} must be int, got: {raw!r}") from error
+
+
+def _load_zoneinfo(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError as error:
+        raise RuntimeError(
+            "Timezone database is unavailable for this Python environment. "
+            "Install tzdata in the active venv: "
+            r"'.venv_streamertg\Scripts\python.exe -m pip install tzdata'. "
+            f"Missing zone: {name}"
+        ) from error
 
 
 def _load_google_doc_share_mode_from_env() -> str:
@@ -1141,15 +2452,20 @@ def main(argv: Sequence[str]) -> int:
 
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
         description=(
-            "Fetch YouTube metadata and send to Telegram. "
-            "Optionally create Google Doc with table."
+            "Batch pipeline from Google Sheets to Google Docs and Telegram "
+            "with local thumbnail saving."
         )
     )
-    parser.add_argument("url", type=str, help="YouTube video URL")
+    parser.add_argument("url", nargs="?", help="YouTube video URL for --single mode")
     parser.add_argument(
-        "--google-doc",
+        "--single",
         action="store_true",
-        help="Create Google Doc with table (requires Google setup)",
+        help="Run single URL mode (debug only).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do not send to Telegram and do not create Google Docs.",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args(list(argv))
@@ -1179,14 +2495,19 @@ def main(argv: Sequence[str]) -> int:
         chat_id=config.telegram_chat_id,
     )
 
-    app: YouTubeToTelegramAndDocsApp = YouTubeToTelegramAndDocsApp(
+    app: StreamPipelineApp = StreamPipelineApp(
         config=config,
         metadata_fetcher=metadata_fetcher,
         http_client=http_client,
         telegram_client=telegram_client,
     )
 
-    app.run(video_url=str(args.url), create_google_doc=bool(args.google_doc))
+    if bool(args.single):
+        if not args.url:
+            raise RuntimeError("For --single mode URL is required.")
+        app.run_single(video_url=str(args.url), dry_run=bool(args.dry_run))
+    else:
+        app.run_batch(dry_run=bool(args.dry_run))
     return 0
 
 
