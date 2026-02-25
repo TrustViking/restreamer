@@ -1,0 +1,58 @@
+# Template config: copy this file to app_config.yaml and fill real values.
+# app_config.example.yaml should stay free of environment-specific secrets/ids.
+# Environment toggles (.env):
+# STG_SHEETS_LINK_WRITEBACK=True
+# STG_STRIP_CHAPTER_TIMESTAMPS=True
+app:
+  templates_path: templates.yaml
+  processing:
+    mode: merge
+
+  google:
+    enabled: true
+    drive_folder_id: "PUT_DRIVE_DOCS_FOLDER_ID_HERE"
+    drive_preview_folder_id: "PUT_DRIVE_PREVIEW_FOLDER_ID_HERE"
+    drive_preview_path_template: "{streamertg}/{preview}/{language}/{date}"
+    doc_share_mode: anyone_writer
+    sheets_id: "PUT_GOOGLE_SHEETS_ID_HERE"
+    sheets_range: "A:F"
+    form_url: "https://forms.gle/REPLACE_ME"
+    contacts: "@contact1 @contact2"
+
+  paths:
+    local_image_dir_template: "D:\\_Download\\_stream\\y2b\\{language}\\{date}"
+
+  timezones:
+    kiev: "Europe/Kyiv"
+    cet: "Europe/Berlin"
+
+  telegram:
+    enabled: true
+    use_audit: false
+    symbol_separator: "🎬"
+    separator_repeat_count: 8
+    symbol_broadcast: "❇️"
+    symbol_alert: "🚨"
+    symbol_form: "❇️"
+    symbol_description: "❇️"
+    symbol_pin: "📌"
+    symbol_done: "✅"
+    flag_uk: "🇺🇦"
+    flag_en: "🇬🇧"
+    flag_ru: "🇷🇺"
+    flag_other: "🌐"
+    flag_repeat_count: 3
+    language_name_uk: "Укр"
+    language_name_en: "Англ"
+    language_name_ru: "Рус"
+    language_name_other: "Other"
+
+  gemini:
+    # Runtime is pinned to gemini-2.5-flash in code to protect free-tier quota.
+    model: "gemini-2.5-flash"
+    timeout_sec: 120.0
+    temperature: 0.0
+    max_output_tokens: 2048
+
+  files:
+    preview_filename_max_stem: 120

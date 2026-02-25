@@ -1,0 +1,150 @@
+google_doc:
+  header: |
+    Ежедневные стримы / Everyday streams
+    {time_cet} CET/CEST ({time_kiev} Kiev, {time_gmt} GMT)
+
+    ❇️ Эфир {date}  Скинуть ключи до {time_kiev_minus_1} по Киеву
+    Drop the keys off before {time_gmt_minus_1} GMT
+
+    ❇️ Форма для ключей /  Form for keys
+    {form_url}
+
+    При технических проблемах / In case of technical problems
+    Contact: {contacts}
+
+    ❇️ Опис / Description / Описание
+
+    {language_time_titles}
+  table_labels:
+    uk: ["НАЗВА", "ОПИС", "ПРЕВ'Ю"]
+    en: ["TITLE", "DESCRIPTION", "PREVIEW"]
+    ru: ["НАЗВАНИЕ", "ОПИСАНИЕ", "ПРЕВЬЮ"]
+    other: ["TITLE", "DESCRIPTION", "PREVIEW"]
+  bold_line_prefixes:
+    - "Ежедневные стримы / Everyday streams"
+    - "❇️ Эфир"
+    - "❇️ Форма для ключей"
+    - "При технических проблемах / In case of technical problems"
+    - "❇️ Опис / Description / Описание"
+    - "UA - "
+    - "ENG - "
+    - "RU - "
+    - "OTHER - "
+  language_headings:
+    uk: "UA"
+    en: "ENG"
+    ru: "RU"
+    other: "OTHER"
+
+telegram:
+  header: |
+    Ежедневные стримы / Everyday streams
+    {time_cet} CET/CEST ({time_kiev} Kiev, {time_gmt} GMT)
+
+    {symbol_broadcast} Эфир {symbol_alert} {date} / Скинуть ключи за час до эфира
+    Broadcast / Drop the keys off 1 hour before the stream
+
+    {symbol_form} Форма для ключей / Form for keys
+    {form_url}
+
+    {symbol_description} Описание / Description
+    {generated_doc_url}
+  language_block: |
+    {date_display} на {time_kiev} по Киеву
+
+    {symbol_pin}Название и описание эфира {language_flags}
+    Name and description of stream
+
+    {title}
+
+    {description}
+  language_merged_block: |
+    {date_display} на {time_kiev} по Киеву
+
+    {symbol_pin}Название и описание эфира {language_flags}
+    Name and description of stream
+
+    {title}
+
+    {description}
+  key_form_reminder: |
+    📌📌📌 Форма для ключей 🔑 ( Key registration form) 📍
+    {form_url}
+  sparkle_separator: |
+    ✨✨✨✨✨✨✨
+  post_header: |
+    {symbol_broadcast} Эфир {date} {time_kiev} по Киеву
+  language_digest_header: |
+    {language_flags}{language_name} на {date} в {time_kiev} по Киеву
+
+llm:
+  language_names:
+    uk: "Ukrainian"
+    en: "English"
+    ru: "Russian"
+    other: "the original language of sources"
+  startup_ping_prompt: |
+    You are a health-check responder for Gemini API.
+    If you can read this prompt, return strict JSON only.
+    Required JSON keys: status, provider, model, version.
+    Rules:
+    1) status must be "ok".
+    2) provider must be "gemini".
+    3) model must be a short non-empty string.
+    4) version must be a short non-empty string (use "unknown" if exact version is unavailable).
+    5) Do not add markdown or extra text.
+    Context:
+    expected_model={model_name}
+    utc_now={utc_now}
+  merge_title_description_prompt: |
+    You are a strict YouTube editor.
+    Write output only in {language_name}.
+    Task: Merge all source videos into one title and one description.
+    Rules:
+    1) Keep factual details from sources and do not invent facts.
+    2) merged_title must be concise, 1..98 chars, no emoji.
+    3) If there are N source descriptions, DESCRIPTION must contain exactly N paragraphs in the same source order.
+    4) Paragraph i must summarize source i only (same order), preserving factual anchors from that source.
+    5) Do not mix facts across sources, do not use markdown, and do not use code fences.
+    6) Return plain text exactly in this format:
+    TITLE: <merged title>
+    DESCRIPTION: <paragraph 1 for source 1>
+
+    <paragraph 2 for source 2>
+    ...
+    <paragraph N for source N>
+    <CTA line without prefix>
+    <HASHTAGS line without prefix, space-separated hashtags>
+    <source_url_1>
+    <source_url_2>
+    ...
+    <source_url_N>
+    7) Do not print labels "CTA:", "HASHTAGS:", "SOURCES:".
+    8) Output only these blocks, no explanations before or after.
+
+    {sources_block}
+
+files:
+  doc_title_template: "{date} Ежедневные стримы / Everyday streams {creation_stamp}"
+  preview_name_template: "{index}_{language}_{title}"
+  language_codes:
+    uk: "UA"
+    en: "EN"
+    ru: "RU"
+    other: "OT"
+
+common:
+  no_description_text: "(no description)"
+  single_mode_message: |
+    Title:
+    {title}
+
+    Language:
+    {language}
+
+    Description:
+    {description}
+
+    URL:
+    {url}
+

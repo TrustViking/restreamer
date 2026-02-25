@@ -1,5 +1,5 @@
 ########################################
-# restreamer: privacy + clean repo
+# streamertg: privacy + clean repo
 ########################################
 
 ########################################
@@ -8,14 +8,21 @@
 .env
 .env.*
 *.env
+# если хочешь хранить шаблон:
+!.env.example
 
-# Google OAuth / API (обычно это супер-секреты)
+# Google OAuth / API
 credentials*.json
+credentials_bot.json
+.credentials_bot.json
 token*.json
 client_secret*.json
 *oauth*.json
+*service_account*.json
+*service-account*.json
+streamertg-*.json
 
-# Keys / certs (на всякий)
+# Keys / certs
 *.pem
 *.key
 *.p12
@@ -49,7 +56,11 @@ dist/
 .venv/
 venv/
 ENV/
-.venv_restreamer/
+.venv_*/
+# на всякий случай (если вдруг создашь так)
+.venv-*/
+# если используешь poetry:
+.poetry/
 
 ########################################
 # Logs / temp / outputs
@@ -70,17 +81,22 @@ data/
 .vscode/
 *.code-workspace
 
-# Windows / macOS мусор
 Thumbs.db
 Desktop.ini
 .DS_Store
 
 ########################################
 # Optional: local launcher scripts with absolute paths
-# (если restreamer.bat содержит D:\_projects\... и т.п.)
 ########################################
-restreamer.bat
+*.bat
+!*.example.bat
+########################################
+# Local app config (keep only example)
+########################################
+app_config.yaml
+app_config.*.yaml
+!app_config.example.yaml
 
-# Local debug artifacts for Google Docs comparisons
-doc_*.html
-doc_*.txt
+.gpt.txt
+.gpt.local.txt
+.openai.admin.local.txt
