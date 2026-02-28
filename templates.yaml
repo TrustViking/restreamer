@@ -84,12 +84,12 @@ llm:
     ru: "Russian"
     other: "the original language of sources"
   startup_ping_prompt: |
-    You are a health-check responder for Gemini API.
+    You are a health-check responder for the LLM API.
     If you can read this prompt, return strict JSON only.
     Required JSON keys: status, provider, model, version.
     Rules:
     1) status must be "ok".
-    2) provider must be "gemini".
+    2) provider must be a short non-empty string.
     3) model must be a short non-empty string.
     4) version must be a short non-empty string (use "unknown" if exact version is unavailable).
     5) Do not add markdown or extra text.
@@ -125,7 +125,7 @@ llm:
     {sources_block}
 
 files:
-  doc_title_template: "{date} Ежедневные стримы / Everyday streams {creation_stamp}"
+  doc_title_template: "{date} ({processing_mode}) Ежедневные стримы / Everyday streams {creation_stamp}"
   preview_name_template: "{index}_{language}_{title}"
   language_codes:
     uk: "UA"
@@ -147,4 +147,3 @@ common:
 
     URL:
     {url}
-

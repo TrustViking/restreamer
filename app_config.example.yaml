@@ -21,6 +21,7 @@ app:
 
   paths:
     local_image_dir_template: "D:\\_Download\\_stream\\y2b\\{language}\\{date}"
+    local_doc_dir_template: "D:\\_Download\\_stream\\y2b\\docs\\{date}"
 
   timezones:
     kiev: "Europe/Kyiv"
@@ -46,13 +47,6 @@ app:
     language_name_en: "Англ"
     language_name_ru: "Рус"
     language_name_other: "Other"
-
-  gemini:
-    # Runtime is pinned to gemini-2.5-flash in code to protect free-tier quota.
-    model: "gemini-2.5-flash"
-    timeout_sec: 120.0
-    temperature: 0.0
-    max_output_tokens: 2048
 
   files:
     preview_filename_max_stem: 120
