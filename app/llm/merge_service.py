@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppConfig
@@ -12,28 +13,72 @@ from app.core.models import LanguageMergeAttempt, MergedLanguageContent, Planned
 from app.llm.merge_parser import (
     build_plain_merged_content_or_raise,
     clean_and_validate_llm_description,
-    enforce_merged_paragraphs_for_group,
-    extract_title_and_description_payload_or_none,
-    extract_valid_title_from_raw_or_none,
-    parse_llm_merge_raw_or_raise,
-    sanitize_title,
+    normalize_filtered_links,
+    normalize_hashtags_line,
+    normalize_single_line_text,
+    parse_merge_response_or_raise,
 )
 from app.llm.merge_run_summary import MergeRunSummary
-from app.llm.openai_client import OpenAITransportResult, openai_request_merge
+from app.llm.openai_client import LlmTraceContext, OpenAITransportResult, openai_request_merge
 
 LOGGER = _get_logger_impl(__name__)
+PRIMARY_ATTEMPTS: int = 2
 
 
 @dataclass(frozen=True)
-class _MergeCallResult:
-    raw_text: str
-    structured_attempted: bool
-    structured_used: bool
-    structured_failure_reason: Optional[str] = None
+class MergeAttemptFailure(RuntimeError):
+    reason_code: str
+    reason: str
+    model_name: str
+    attempt_stage: str
+    raw_response_text: str
+
+    def __str__(self) -> str:
+        return self.reason
+
+
+@dataclass(frozen=True)
+class ParagraphEnforcementResult:
+    description_text: str
+    cta_text: Optional[str]
+    hashtags_line: Optional[str]
+    links: Tuple[str, ...]
+    mutated: bool
+    recovery_applied: bool
+    note: str
+    body_paragraphs_before: int
+    body_paragraphs_after: int
+    cta_present_before: bool
+    cta_present_after: bool
+    links_count_after: int
+    hashtags_count_after: int
+
+
+def _reason_code_from_error(error: Exception) -> str:
+    error_text: str = str(error or "")
+    if "not a valid single JSON object" in error_text:
+        return "not_json_object"
+    if error_text.startswith("missing_keys:"):
+        return "missing_keys"
+    if error_text.startswith("extra_keys:"):
+        return "extra_keys"
+    if "forbidden_key:" in error_text:
+        return "forbidden_variants"
+    if "title must be a non-empty string" in error_text or "title is invalid" in error_text:
+        return "invalid_title"
+    if "description must be a non-empty string" in error_text or "description paragraph count" in error_text or "description validation failed" in error_text:
+        return "invalid_description"
+    if "cta must be a non-empty string" in error_text:
+        return "invalid_cta"
+    if "hashtags must be a list of strings" in error_text:
+        return "invalid_hashtags"
+    if "links must be a list of strings" in error_text:
+        return "invalid_links"
+    return "unexpected_error"
 
 
 def _language_name_for_merge_prompt(language: str, llm_language_names_json: str) -> str:
-    default_names: Dict[str, str] = {
+    default_names: dict[str, str] = {
         "uk": "Ukrainian",
         "en": "English",
         "ru": "Russian",
@@ -42,7 +87,7 @@ def _language_name_for_merge_prompt(language: str, llm_language_names_json: str)
     try:
         import json
 
-        payload: Any = json.loads(llm_language_names_json)
+        payload = json.loads(llm_language_names_json)
         if isinstance(payload, dict):
             return str(payload.get(language, payload.get("other", default_names["other"])))
     except Exception:
@@ -53,404 +98,734 @@ def _language_name_for_merge_prompt(language: str, llm_language_names_json: str)
 def _strip_urls(text: str) -> str:
     without_urls: str = URL_PATTERN.sub("", str(text or ""))
     normalized: str = without_urls.replace("\r\n", "\n").replace("\r", "\n")
-    normalized = re.sub(r"\s+\n", "\n", normalized)
-    normalized = re.sub(r"\n\s+", "\n", normalized)
-    normalized = re.sub(r"[ \t]{2,}", " ", normalized)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.strip()
 
 
-def _truncate_head_tail(text: str, *, limit: int) -> str:
-    if limit <= 0:
-        return ""
-    if len(text) <= limit:
-        return text
-    if limit <= 2:
-        return "…"
-    body_limit: int = limit - 1
-    head_len: int = max(1, int(body_limit * 0.7))
-    tail_len: int = max(1, body_limit - head_len)
-    head_part: str = text[:head_len].rstrip()
-    tail_part: str = text[-tail_len:].lstrip()
-    if not head_part or not tail_part:
-        return text[: limit - 1].rstrip() + "…"
-    return f"{head_part}…{tail_part}"
+def _truncate_text(text: str, *, limit: int) -> str:
+    normalized: str = normalize_single_line_text(text)
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 1].rstrip() + "…"
 
 
-def build_llm_merge_prompt_text(*, language: str, videos: List[PlannedVideo], config: AppConfig, no_description_text: str) -> str:
+def build_llm_merge_prompt_text(
+    *,
+    language: str,
+    videos: List[PlannedVideo],
+    config: AppConfig,
+    no_description_text: str,
+) -> str:
     if len(videos) < 2:
         raise ValueError("Expected at least 2 videos for merged generation.")
-    unique_dates: List[str] = sorted({video.date_display for video in videos if video.date_display})
-    date_or_period: str = ", ".join(unique_dates) if unique_dates else "n/a"
-    language_name: str = _language_name_for_merge_prompt(language, config.templates.llm_language_names_json)
-    sources_blocks: List[str] = []
+    language_name: str = _language_name_for_merge_prompt(
+        language,
+        config.templates.llm_language_names_json,
+    )
+    source_blocks: List[str] = []
     for index, video in enumerate(videos, start=1):
-        title_text: str = video.metadata.title.strip()
-        source_description: str = video.metadata.description.strip() or no_description_text
-        description_text_raw: str = _strip_urls(source_description)
-        description_text: str = _truncate_head_tail(description_text_raw, limit=config.llm_source_desc_max_chars)
-        source_url: str = video.normalized_link.strip()
-        sources_blocks.append(f"VIDEO {index}:\nURL: {source_url}\nTITLE: {title_text}\nDESCRIPTION: {description_text}")
-
-    base_prompt: str = config.templates.llm_merge_title_description_prompt.format(
-        language_name=language_name,
-        sources_block="\n\n".join(sources_blocks),
-    )
-    strict_prompt: str = (
-        "You are a careful editor. You MUST use ONLY facts explicitly present in source content.\n"
-        "Do NOT invent names, dates, places, numbers, quotes, or events.\n\n"
-        "OUTPUT FORMAT (STRICT):\n"
-        "Line 1: TITLE: <title>\n"
-        "Line 2+: DESCRIPTION: <description text; may contain newlines>\n"
-        "No other headers. No JSON. No markdown. No code fences.\n\n"
-        f"LANGUAGE:\nWrite in: {language_name}.\n\n"
-        f"Date/period (optional): {date_or_period}\n"
-    )
-    return f"{base_prompt}\n\n{strict_prompt}".strip()
-
-
-def _build_llm_merge_repair_prompt_text(*, language: str, videos: List[PlannedVideo], config: AppConfig, previous_output: str, parse_error: str, no_description_text: str) -> str:
-    base_prompt: str = build_llm_merge_prompt_text(language=language, videos=videos, config=config, no_description_text=no_description_text)
+        source_blocks.append(
+            "\n".join(
+                [
+                    f"SOURCE {index}",
+                    f"TITLE: {video.metadata.title.strip()}",
+                    (
+                        "DESCRIPTION: "
+                        f"{_truncate_text(_strip_urls(video.metadata.description.strip() or no_description_text), limit=config.llm_source_desc_max_chars)}"
+                    ),
+                    f"URL: {video.normalized_link.strip()}",
+                ]
+            )
+        )
+    template_prompt: str = str(config.templates.llm_merge_title_description_prompt or "").strip()
+    if template_prompt:
+        return template_prompt.format(
+            language_name=language_name,
+            sources_block="\n\n".join(source_blocks),
+        ).strip()
     return (
-        f"{base_prompt}\n\n"
-        "Your previous output was invalid. Rewrite the full answer from scratch.\n"
-        "Do not explain errors. Return only TITLE and DESCRIPTION blocks.\n"
-        "Keep one DESCRIPTION paragraph per source, in source order.\n\n"
-        f"Validation error: {parse_error}\n\n"
-        "Previous invalid output:\n"
-        f"{previous_output.strip()}"
+        "You are a careful editorial writer.\n"
+        f"Write output only in {language_name}.\n"
+        "Use only facts explicitly present in the sources.\n"
+        "Produce one final stream summary, not a per-source enumeration.\n"
+        "Description must be a cohesive summary in 2 to 4 paragraphs.\n"
+        "CTA must be moderate and concise.\n"
+        "links must contain only valid external URLs worth showing to users; use [] if none.\n"
+        "hashtags must be an array of hashtag strings.\n"
+        'Output only one strict JSON object with exactly these keys: title, description, cta, hashtags, links.\n\n'
+        f"{'\n\n'.join(source_blocks)}"
     ).strip()
 
 
-def _build_plain_description_repair_prompt_text(*, target_language: str, invalid_text: str) -> str:
-    return (
-        "Remove any labels/headings/meta lines. "
-        f"Return ONLY plain paragraph text in {target_language}.\n"
-        "No TITLE/DESCRIPTION/CTA/HASHTAGS/PREVIEW labels.\n"
-        "No markdown. No JSON. No commentary.\n\n"
-        "Text:\n"
-        f"{str(invalid_text or '').strip()}"
-    ).strip()
+def _structured_merge_schema() -> dict[str, object]:
+    return {
+        "name": "restreamer_merge_summary_v2",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["title", "description", "cta", "hashtags", "links"],
+            "properties": {
+                "title": {"type": "string", "minLength": 1, "maxLength": 98},
+                "description": {"type": "string", "minLength": 1},
+                "cta": {"type": "string", "minLength": 1},
+                "hashtags": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "links": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+    }
 
 
-def _build_single_source_translate_prompt_text(*, source_language: str, target_language: str, source_description: str) -> str:
+def _single_source_translate_prompt(
+    *,
+    source_language: str,
+    target_language: str,
+    source_description: str,
+) -> str:
     return (
         "You are a precise editor and translator.\n"
         f"Source language: {source_language}.\n"
         f"Target language: {target_language}.\n"
         "Task: translate and lightly rewrite for readability while preserving facts.\n"
-        "Return ONLY plain paragraph text in target language.\n"
-        "No labels/headings/meta lines.\n"
-        "No TITLE/DESCRIPTION/CTA/HASHTAGS/PREVIEW.\n"
-        "No markdown. No JSON.\n\n"
-        "Source description:\n"
-        f"{str(source_description or '').strip()}"
+        "Return only plain paragraph text.\n"
+        "No headings, JSON, markdown, CTA, links, or hashtags.\n\n"
+        f"{source_description.strip()}"
     ).strip()
 
 
-def _build_hashtags_repair_prompt_text(*, invalid_hashtags_line: str) -> str:
-    return (
-        "You are a strict hashtag formatter.\n"
-        "Return exactly one line with only space-separated hashtags.\n"
-        "Rules:\n"
-        "1) Keep existing hashtag words if possible.\n"
-        "2) Remove all non-hashtag tokens.\n"
-        "3) Do not output labels like 'HASHTAGS:'.\n"
-        "4) No extra commentary.\n\n"
-        "Invalid hashtags line:\n"
-        f"{invalid_hashtags_line.strip()}"
-    ).strip()
+def _request_plain_text(
+    *,
+    prompt_text: str,
+    config: AppConfig,
+    model_name: str,
+    attempt_label: str,
+    trace_context: LlmTraceContext,
+) -> str:
+    if config.openai_pre_delay_sec > 0:
+        time.sleep(max(0.0, float(config.openai_pre_delay_sec)))
+    response: OpenAITransportResult = openai_request_merge(
+        prompt_text=prompt_text,
+        model_name=model_name,
+        timeout_sec=config.openai_timeout_sec,
+        attempt_label=attempt_label,
+        max_output_tokens=config.openai_max_output_tokens,
+        structured_schema=None,
+        temperature=0.0,
+        trace_context=trace_context,
+    )
+    return response.raw_text
 
 
-def _openai_merge_call_raw(*, language: str, videos: List[PlannedVideo], config: AppConfig, attempt_label: str, model_name: str, prompt_text_override: Optional[str] = None, no_description_text: str = "no description", merge_run_summary: Optional[MergeRunSummary] = None) -> _MergeCallResult:
-    prompt_text: str = str(prompt_text_override or "").strip() or build_llm_merge_prompt_text(
+def attempt_openai_single_source_translate_with_audit(
+    *,
+    language: str,
+    videos: List[PlannedVideo],
+    config: AppConfig,
+    attempt_label: str,
+    summarize_error: Callable[[Exception], str],
+    no_description_text: str,
+    merge_run_summary: Optional[MergeRunSummary] = None,
+    branch_label: str = "unknown",
+    date_key: str = "unknown",
+    slot_key: str = "unknown",
+) -> LanguageMergeAttempt:
+    del merge_run_summary
+    if len(videos) != 1:
+        raise RuntimeError("single-source translate expects exactly one video")
+    source_video: PlannedVideo = videos[0]
+    model_name: str = str(config.openai_model_primary or "").strip() or "gpt-5.1"
+    try:
+        raw_text: str = _request_plain_text(
+            prompt_text=_single_source_translate_prompt(
+                source_language=source_video.language,
+                target_language=language,
+                source_description=source_video.metadata.description.strip() or no_description_text,
+            ),
+            config=config,
+            model_name=model_name,
+            attempt_label=attempt_label,
+            trace_context=LlmTraceContext(
+                branch_label=branch_label,
+                date_key=date_key,
+                slot_key=slot_key,
+                language=language,
+                provider="openai",
+                model_name=model_name,
+                attempt_index=1,
+                request_kind="single_source_plain",
+                source_count=1,
+            ),
+        )
+        cleaned_text, is_valid, reasons = clean_and_validate_llm_description(text=raw_text)
+        if not is_valid:
+            raise RuntimeError(
+                "single-source plain validation failed: " + ("; ".join(reasons) or "unknown")
+            )
+        merged_content: MergedLanguageContent = build_plain_merged_content_or_raise(
+            model_name=model_name,
+            title_text=source_video.metadata.title.strip() or "Untitled",
+            description_text=cleaned_text,
+        )
+        return LanguageMergeAttempt(
+            language=language,
+            model_name=model_name,
+            raw_response_text=raw_text,
+            merged=merged_content,
+            error_summary=None,
+            salvaged_title=merged_content.title,
+            publish_source_label="single_source_plain_ok",
+        )
+    except Exception as error:
+        return LanguageMergeAttempt(
+            language=language,
+            model_name=model_name,
+            raw_response_text="",
+            merged=None,
+            error_summary=summarize_error(error),
+            salvaged_title=source_video.metadata.title.strip() or "Untitled",
+            publish_source_label="single_source_plain_failed",
+        )
+
+
+def _log_merge_attempt_start(
+    *,
+    model_name: str,
+    attempt_index: int,
+    is_fallback: bool,
+    branch_label: str,
+    date_key: str,
+    slot_key: str,
+    language: str,
+) -> None:
+    stage_name: str = "fallback" if is_fallback else "primary"
+    if is_fallback:
+        LOGGER.info(
+            "merge_llm_fallback_start branch=%s date_key=%s slot_key=%s language=%s stage=%s attempt=%d model=%s",
+            branch_label,
+            date_key,
+            slot_key,
+            language,
+            stage_name,
+            attempt_index,
+            model_name,
+        )
+        return
+    LOGGER.info(
+        "merge_llm_primary_attempt branch=%s date_key=%s slot_key=%s language=%s stage=%s attempt=%d model=%s",
+        branch_label,
+        date_key,
+        slot_key,
+        language,
+        stage_name,
+        attempt_index,
+        model_name,
+    )
+
+
+def _log_merge_attempt_invalid(
+    *,
+    model_name: str,
+    attempt_index: int,
+    is_fallback: bool,
+    branch_label: str,
+    date_key: str,
+    slot_key: str,
+    language: str,
+    reason_code: str,
+    reason: str,
+    raw_response_text: str,
+) -> None:
+    stage_name: str = "fallback" if is_fallback else "primary"
+    LOGGER.info(
+        "merge_llm_response_invalid branch=%s date_key=%s slot_key=%s language=%s stage=%s model=%s attempt=%d code=%s raw_response_received=%s reason=%s raw_chars=%d",
+        branch_label,
+        date_key,
+        slot_key,
+        language,
+        stage_name,
+        model_name,
+        attempt_index,
+        reason_code,
+        "yes" if bool(str(raw_response_text or "").strip()) else "no",
+        reason,
+        len(str(raw_response_text or "")),
+    )
+
+
+def _normalize_merge_links(
+    *,
+    merged_content: MergedLanguageContent,
+    normalize_youtube_url: Callable[[str], str],
+) -> MergedLanguageContent:
+    link_stats = normalize_filtered_links(
+        links=tuple(merged_content.links),
+        normalize_link=normalize_youtube_url,
+    )
+    LOGGER.info(
+        "merge_links_normalized links_count=%d duplicates_dropped=%d invalid_dropped=%d",
+        len(link_stats.accepted_links),
+        link_stats.duplicates_dropped,
+        link_stats.invalid_dropped,
+    )
+    return dataclasses.replace(merged_content, links=link_stats.accepted_links)
+
+
+def _split_description_paragraphs(text: str) -> List[str]:
+    normalized_text: str = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized_text:
+        return []
+    return [
+        _normalize_paragraph_text(paragraph_text)
+        for paragraph_text in re.split(r"\n\s*\n", normalized_text)
+        if _normalize_paragraph_text(paragraph_text)
+    ]
+
+
+def _normalize_paragraph_text(text: str) -> str:
+    stripped_lines: List[str] = [line.strip() for line in str(text or "").split("\n") if line.strip()]
+    return re.sub(r"\s+", " ", " ".join(stripped_lines)).strip()
+
+
+def _count_hashtags(line: Optional[str]) -> int:
+    return len([token for token in str(line or "").split() if token.strip()])
+
+
+def _split_single_paragraph_safely(paragraph_text: str) -> Optional[List[str]]:
+    sentence_parts: List[str] = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?…])\s+", str(paragraph_text or "").strip())
+        if part.strip()
+    ]
+    if len(sentence_parts) < 4:
+        return None
+    split_index: int = max(2, len(sentence_parts) // 2)
+    left_part: str = " ".join(sentence_parts[:split_index]).strip()
+    right_part: str = " ".join(sentence_parts[split_index:]).strip()
+    if not left_part or not right_part:
+        return None
+    return [left_part, right_part]
+
+
+def _collapse_paragraphs_to_limit(
+    paragraphs: Sequence[str],
+    *,
+    max_paragraphs: int,
+) -> Optional[List[str]]:
+    cleaned_paragraphs: List[str] = [str(paragraph or "").strip() for paragraph in paragraphs if str(paragraph or "").strip()]
+    if not cleaned_paragraphs:
+        return None
+    if len(cleaned_paragraphs) <= max_paragraphs:
+        return cleaned_paragraphs
+    total_items: int = len(cleaned_paragraphs)
+    base_group_size: int = total_items // max_paragraphs
+    remainder: int = total_items % max_paragraphs
+    collapsed: List[str] = []
+    start_index: int = 0
+    for group_index in range(max_paragraphs):
+        group_size: int = base_group_size + (1 if group_index < remainder else 0)
+        next_index: int = start_index + max(1, group_size)
+        group_items: List[str] = cleaned_paragraphs[start_index:next_index]
+        if not group_items:
+            break
+        collapsed.append("\n".join(group_items).strip())
+        start_index = next_index
+    return collapsed if len(collapsed) <= max_paragraphs else None
+
+
+def _normalize_tail_fields(
+    merged_content: MergedLanguageContent,
+) -> tuple[Optional[str], Optional[str], Tuple[str, ...]]:
+    normalized_cta_text: Optional[str] = normalize_single_line_text(
+        str(merged_content.cta_text or "")
+    ) or None
+    normalized_hashtags_line: Optional[str] = normalize_hashtags_line(
+        str(merged_content.hashtags_line or "")
+    ) or None
+    normalized_links: Tuple[str, ...] = tuple(
+        str(link or "").strip() for link in merged_content.links if str(link or "").strip()
+    )
+    return (normalized_cta_text, normalized_hashtags_line, normalized_links)
+
+
+def _enforce_merged_description_structure(
+    *,
+    merged_content: MergedLanguageContent,
+) -> ParagraphEnforcementResult:
+    original_description: str = str(merged_content.description or "").strip()
+    normalized_cta_text, normalized_hashtags_line, normalized_links = _normalize_tail_fields(
+        merged_content
+    )
+    paragraphs_before: List[str] = _split_description_paragraphs(original_description)
+    body_paragraphs_before: int = len(paragraphs_before)
+    if not paragraphs_before:
+        return ParagraphEnforcementResult(
+            description_text=original_description,
+            cta_text=normalized_cta_text,
+            hashtags_line=normalized_hashtags_line,
+            links=normalized_links,
+            mutated=False,
+            recovery_applied=False,
+            note="empty_description",
+            body_paragraphs_before=0,
+            body_paragraphs_after=0,
+            cta_present_before=bool(str(merged_content.cta_text or "").strip()),
+            cta_present_after=bool(normalized_cta_text),
+            links_count_after=len(normalized_links),
+            hashtags_count_after=_count_hashtags(normalized_hashtags_line),
+        )
+
+    enforced_paragraphs: List[str] = list(paragraphs_before)
+    note: str = "already_structurally_valid"
+    recovery_applied: bool = False
+
+    if len(paragraphs_before) == 1:
+        safely_split: Optional[List[str]] = _split_single_paragraph_safely(paragraphs_before[0])
+        if safely_split is not None:
+            enforced_paragraphs = safely_split
+            note = "split_single_paragraph_into_two"
+            recovery_applied = True
+        else:
+            note = "single_paragraph_not_safely_split"
+    elif len(paragraphs_before) > 4:
+        collapsed_paragraphs: Optional[List[str]] = _collapse_paragraphs_to_limit(
+            paragraphs_before,
+            max_paragraphs=4,
+        )
+        if collapsed_paragraphs is not None and len(collapsed_paragraphs) <= 4:
+            enforced_paragraphs = collapsed_paragraphs
+            note = "collapsed_excess_paragraphs_to_limit"
+            recovery_applied = True
+        else:
+            note = "excess_paragraphs_not_safely_collapsed"
+
+    normalized_description: str = "\n\n".join(paragraph for paragraph in enforced_paragraphs if paragraph).strip()
+    mutated: bool = (
+        normalized_description != original_description
+        or normalized_cta_text != (str(merged_content.cta_text or "").strip() or None)
+        or normalized_hashtags_line != (str(merged_content.hashtags_line or "").strip() or None)
+        or normalized_links != tuple(merged_content.links)
+    )
+    return ParagraphEnforcementResult(
+        description_text=normalized_description,
+        cta_text=normalized_cta_text,
+        hashtags_line=normalized_hashtags_line,
+        links=normalized_links,
+        mutated=mutated,
+        recovery_applied=recovery_applied and mutated,
+        note=note,
+        body_paragraphs_before=body_paragraphs_before,
+        body_paragraphs_after=len(_split_description_paragraphs(normalized_description)),
+        cta_present_before=bool(str(merged_content.cta_text or "").strip()),
+        cta_present_after=bool(normalized_cta_text),
+        links_count_after=len(normalized_links),
+        hashtags_count_after=_count_hashtags(normalized_hashtags_line),
+    )
+
+
+def _attempt_merge_once(
+    *,
+    language: str,
+    videos: List[PlannedVideo],
+    config: AppConfig,
+    model_name: str,
+    attempt_index: int,
+    attempt_label: str,
+    branch_label: str,
+    date_key: str,
+    slot_key: str,
+    no_description_text: str,
+    normalize_youtube_url: Callable[[str], str],
+) -> tuple[MergedLanguageContent, str]:
+    prompt_text: str = build_llm_merge_prompt_text(
         language=language,
         videos=videos,
         config=config,
         no_description_text=no_description_text,
     )
-    pre_delay_sec: float = max(0.0, float(config.openai_pre_delay_sec))
-    if pre_delay_sec > 0.0:
-        LOGGER.info("LLM merge: sleeping %.2fs before request ... provider=openai language=%s sources=%d", pre_delay_sec, language, len(videos))
-        time.sleep(pre_delay_sec)
-
-    structured_schema: Optional[Dict[str, Any]] = None
-    if prompt_text_override is None:
-        expected_source_count: int = len(videos)
-        structured_schema = {
-            "name": f"streamertg_merge_{language}_v1",
-            "schema": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["title", "paragraphs", "cta", "hashtags", "sources"],
-                "properties": {
-                    "title": {"type": "string", "minLength": 1, "maxLength": 98},
-                    "paragraphs": {
-                        "type": "array",
-                        "minItems": expected_source_count,
-                        "maxItems": expected_source_count,
-                        "items": {"type": "string", "minLength": 1},
-                    },
-                    "cta": {"type": "string", "minLength": 1},
-                    "hashtags": {"type": "string", "minLength": 1},
-                    "sources": {
-                        "type": "array",
-                        "minItems": expected_source_count,
-                        "maxItems": expected_source_count,
-                        "items": {"type": "string", "minLength": 1, "pattern": r"^https?://\\S+$"},
-                    },
-                },
-            },
-        }
-
-    try:
-        result: OpenAITransportResult = openai_request_merge(
-            prompt_text=prompt_text,
+    if config.openai_pre_delay_sec > 0:
+        time.sleep(max(0.0, float(config.openai_pre_delay_sec)))
+    response: OpenAITransportResult = openai_request_merge(
+        prompt_text=prompt_text,
+        model_name=model_name,
+        timeout_sec=config.openai_timeout_sec,
+        attempt_label=attempt_label,
+        max_output_tokens=config.openai_max_output_tokens,
+        structured_schema=_structured_merge_schema(),
+        temperature=0.0,
+        trace_context=LlmTraceContext(
+            branch_label=branch_label,
+            date_key=date_key,
+            slot_key=slot_key,
+            language=language,
+            provider="openai",
             model_name=model_name,
-            timeout_sec=config.openai_timeout_sec,
-            attempt_label=attempt_label,
-            max_output_tokens=config.openai_max_output_tokens,
-            structured_schema=structured_schema,
-            temperature=0.0,
-        )
-    except Exception:
-        if structured_schema is not None:
-            LOGGER.info(
-                "merge_path structured_failed lang=%s source_count=%d reason=api_error",
-                language,
-                len(videos),
-            )
-            if merge_run_summary is not None:
-                merge_run_summary.record_structured_failed()
-        raise
-
-    if structured_schema is not None and result.structured_payload is not None:
-        payload: Dict[str, Any] = result.structured_payload
-        title_raw: str = str(payload.get("title") or "").strip()
-        title_value: str = sanitize_title(title_raw, min_chars=1, max_chars=98, allow_emoji=False)
-        paragraphs: List[str] = [str(item or "").strip() for item in cast(List[Any], payload.get("paragraphs") or []) if str(item or "").strip()]
-        cta_line: str = str(payload.get("cta") or "").strip()
-        hashtags_line: str = str(payload.get("hashtags") or "").strip()
-        source_urls: List[str] = [str(item or "").strip() for item in cast(List[Any], payload.get("sources") or []) if str(item or "").strip()]
-        if title_value and paragraphs and cta_line and hashtags_line and source_urls:
-            description_text: str = "\n\n".join(paragraphs) + "\n" + cta_line + "\n" + hashtags_line + "\n" + "\n".join(source_urls)
-            return _MergeCallResult(
-                raw_text=f"TITLE: {title_value}\nDESCRIPTION:\n{description_text}".strip(),
-                structured_attempted=True,
-                structured_used=True,
-            )
-
-    if structured_schema is not None:
-        LOGGER.info(
-            "merge_path structured_failed lang=%s source_count=%d reason=unusable_structured_output",
-            language,
-            len(videos),
-        )
-        if merge_run_summary is not None:
-            merge_run_summary.record_structured_failed()
-    return _MergeCallResult(
-        raw_text=result.raw_text,
-        structured_attempted=structured_schema is not None,
-        structured_used=False,
-        structured_failure_reason=(
-            "unusable_structured_output" if structured_schema is not None else None
+            attempt_index=attempt_index,
+            request_kind="structured",
+            source_count=len(videos),
         ),
     )
-
-
-def _attempt_openai_plain_description_repair_once(*, language: str, videos: List[PlannedVideo], config: AppConfig, attempt_label: str, model_name: str, invalid_text: str, no_description_text: str, merge_run_summary: Optional[MergeRunSummary] = None) -> str:
-    prompt_text: str = _build_plain_description_repair_prompt_text(target_language=language, invalid_text=invalid_text)
-    repaired_result: _MergeCallResult = _openai_merge_call_raw(
-        language=language,
-        videos=videos,
-        config=config,
-        attempt_label=attempt_label,
-        model_name=model_name,
-        prompt_text_override=prompt_text,
-        no_description_text=no_description_text,
-        merge_run_summary=merge_run_summary,
-    )
-    cleaned_text, is_valid, reasons = clean_and_validate_llm_description(
-        text=repaired_result.raw_text
-    )
-    if not is_valid:
-        raise RuntimeError("repair output validation failed: " + ("; ".join(reasons) or "unknown"))
-    if not cleaned_text:
-        raise RuntimeError("repair output is empty")
-    return cleaned_text
-
-
-def attempt_openai_single_source_translate_with_audit(*, language: str, videos: List[PlannedVideo], config: AppConfig, attempt_label: str, summarize_error: Callable[[Exception], str], no_description_text: str, merge_run_summary: Optional[MergeRunSummary] = None) -> LanguageMergeAttempt:
-    if len(videos) != 1:
-        raise RuntimeError("single-source translate expects exactly one video.")
-    source_video: PlannedVideo = videos[0]
-    source_language: str = source_video.language
-    model_sequence: List[str] = [str(config.openai_model_primary or "").strip() or "gpt-5-nano", "gpt-5-mini"]
-    if model_sequence[1] == model_sequence[0]:
-        model_sequence = [model_sequence[0]]
-    source_description: str = source_video.metadata.description.strip() or no_description_text
-    base_title: str = source_video.metadata.title.strip() or "Untitled"
-    last_raw_response: str = ""
-    last_error_summary: Optional[str] = None
-    plain_repair_used: bool = False
-    for attempt_index, model_name in enumerate(model_sequence, start=1):
-        call_label: str = f"{attempt_label}_TRY{attempt_index}"
-        prompt_text: str = _build_single_source_translate_prompt_text(source_language=source_language, target_language=language, source_description=source_description)
-        try:
-            raw_result: _MergeCallResult = _openai_merge_call_raw(language=language, videos=videos, config=config, attempt_label=call_label, model_name=model_name, prompt_text_override=prompt_text, no_description_text=no_description_text, merge_run_summary=merge_run_summary)
-            last_raw_response = raw_result.raw_text
-            cleaned_description, is_valid, _ = clean_and_validate_llm_description(text=last_raw_response)
-            if not is_valid:
-                plain_repair_used = True
-                cleaned_description = _attempt_openai_plain_description_repair_once(
-                    language=language,
-                    videos=videos,
-                    config=config,
-                    attempt_label=f"{call_label}_REPAIR",
-                    model_name=model_name,
-                    invalid_text=last_raw_response,
-                    no_description_text=no_description_text,
-                    merge_run_summary=merge_run_summary,
-                )
-                LOGGER.info(
-                    "merge_path repair_used lang=%s repair=plain_description source_count=%d",
-                    language,
-                    len(videos),
-                )
-                if merge_run_summary is not None:
-                    merge_run_summary.record_repair_used()
-            merged_content: MergedLanguageContent = build_plain_merged_content_or_raise(model_name=model_name, title_text=base_title, description_text=cleaned_description)
-            return LanguageMergeAttempt(language=language, model_name=model_name, raw_response_text=last_raw_response, merged=merged_content, error_summary=None, salvaged_title=merged_content.title, plain_repair_used=plain_repair_used)
-        except Exception as error:
-            last_error_summary = summarize_error(error)
-            continue
-    return LanguageMergeAttempt(language=language, model_name=model_sequence[-1], raw_response_text=last_raw_response, merged=None, error_summary=last_error_summary or "unknown error", salvaged_title=base_title, plain_repair_used=plain_repair_used or None)
-
-
-def attempt_openai_merge_with_audit(*, language: str, videos: List[PlannedVideo], config: AppConfig, attempt_label: str, summarize_error: Callable[[Exception], str], normalize_youtube_url: Callable[[str], str], no_description_text: str, merge_run_summary: Optional[MergeRunSummary] = None) -> LanguageMergeAttempt:
-    model_sequence: List[str] = [str(config.openai_model_primary or "").strip() or "gpt-5-nano", str(config.openai_model_fallback or "").strip() or "gpt-5-mini"]
-    if model_sequence[1] == model_sequence[0]:
-        model_sequence = [model_sequence[0]]
-    last_raw_response: str = ""
-    last_error_summary: Optional[str] = None
-    source_urls: List[str] = [item.normalized_link for item in videos]
-    source_titles: List[str] = [item.metadata.title for item in videos]
-    best_salvaged_title: Optional[str] = None
-
-    for attempt_index, model_name in enumerate(model_sequence, start=1):
-        current_label: str = f"{attempt_label}_TRY{attempt_index}"
-        try:
-            raw_result: _MergeCallResult = _openai_merge_call_raw(language=language, videos=videos, config=config, attempt_label=current_label, model_name=model_name, no_description_text=no_description_text, merge_run_summary=merge_run_summary)
-            last_raw_response = raw_result.raw_text
-            maybe_title: Optional[str] = extract_valid_title_from_raw_or_none(last_raw_response)
-            if maybe_title:
-                best_salvaged_title = maybe_title
-        except Exception as error:
-            last_error_summary = summarize_error(error)
-            LOGGER.warning("OpenAI merge call failed language=%s model=%s reason=%s", language, model_name, last_error_summary)
-            continue
-        try:
-            merged_content: MergedLanguageContent = parse_llm_merge_raw_or_raise(
-                provider_name="openai",
-                model_name=model_name,
-                language=language,
-                raw_text=last_raw_response,
-                source_urls=source_urls,
-                source_titles=source_titles,
-                normalize_url=normalize_youtube_url,
-            )
-            if raw_result.structured_used:
-                LOGGER.info(
-                    "merge_path structured_ok lang=%s source_count=%d",
-                    language,
-                    len(videos),
-                )
-                if merge_run_summary is not None:
-                    merge_run_summary.record_structured_ok()
-            elif raw_result.structured_attempted:
-                LOGGER.info(
-                    "merge_path plain_fallback_ok lang=%s source_count=%d",
-                    language,
-                    len(videos),
-                )
-                if merge_run_summary is not None:
-                    merge_run_summary.record_plain_fallback_ok()
-            return LanguageMergeAttempt(language=language, model_name=model_name, raw_response_text=last_raw_response, merged=merged_content, error_summary=None, salvaged_title=merged_content.title)
-        except Exception as parse_error:
-            parse_error_summary: str = summarize_error(parse_error)
-            if raw_result.structured_used:
-                LOGGER.info(
-                    "merge_path structured_failed lang=%s source_count=%d reason=parse_validation_failed",
-                    language,
-                    len(videos),
-                )
-                if merge_run_summary is not None:
-                    merge_run_summary.record_structured_failed()
-            payload_pair: Optional[Tuple[str, str]] = extract_title_and_description_payload_or_none(last_raw_response)
-            if payload_pair is not None:
-                payload_title, payload_description = payload_pair
-                try:
-                    repaired_description: str = _attempt_openai_plain_description_repair_once(
-                        language=language,
-                        videos=videos,
-                        config=config,
-                        attempt_label=f"{current_label}_PLAIN_REPAIR",
-                        model_name=model_name,
-                        invalid_text=payload_description,
-                        no_description_text=no_description_text,
-                        merge_run_summary=merge_run_summary,
-                    )
-                    repaired_content: MergedLanguageContent = build_plain_merged_content_or_raise(
-                        model_name=model_name,
-                        title_text=payload_title,
-                        description_text=repaired_description,
-                    )
-                    LOGGER.info(
-                        "merge_path repair_used lang=%s repair=plain_description source_count=%d",
-                        language,
-                        len(videos),
-                    )
-                    if merge_run_summary is not None:
-                        merge_run_summary.record_repair_used()
-                    return LanguageMergeAttempt(language=language, model_name=model_name, raw_response_text=last_raw_response, merged=repaired_content, error_summary=None, salvaged_title=repaired_content.title, plain_repair_used=True)
-                except Exception:
-                    pass
-            repair_prompt: str = _build_llm_merge_repair_prompt_text(language=language, videos=videos, config=config, previous_output=last_raw_response, parse_error=parse_error_summary, no_description_text=no_description_text)
-            try:
-                repaired_result: _MergeCallResult = _openai_merge_call_raw(language=language, videos=videos, config=config, attempt_label=f"{current_label}_REPAIR", model_name=model_name, prompt_text_override=repair_prompt, no_description_text=no_description_text, merge_run_summary=merge_run_summary)
-                repaired_raw_text: str = repaired_result.raw_text
-                repaired_merged: MergedLanguageContent = parse_llm_merge_raw_or_raise(
-                    provider_name="openai",
-                    model_name=model_name,
-                    language=language,
-                    raw_text=repaired_raw_text,
-                    source_urls=source_urls,
-                    source_titles=source_titles,
-                    normalize_url=normalize_youtube_url,
-                )
-                LOGGER.info(
-                    "merge_path repair_used lang=%s repair=full_retry source_count=%d",
-                    language,
-                    len(videos),
-                )
-                if merge_run_summary is not None:
-                    merge_run_summary.record_repair_used()
-                return LanguageMergeAttempt(language=language, model_name=model_name, raw_response_text=repaired_raw_text, merged=repaired_merged, error_summary=None, salvaged_title=repaired_merged.title)
-            except Exception as repair_error:
-                last_error_summary = f"parse_error={parse_error_summary}; repair_error={summarize_error(repair_error)}"
-                LOGGER.warning("OpenAI merge attempt failed language=%s model=%s reason=%s", language, model_name, last_error_summary)
-                continue
-
-    return LanguageMergeAttempt(language=language, model_name=model_sequence[-1], raw_response_text=last_raw_response, merged=None, error_summary=last_error_summary or "unknown error", salvaged_title=best_salvaged_title)
-
-
-def enforce_openai_merged_paragraphs(*, language: str, merged_content: MergedLanguageContent, videos: List[PlannedVideo], config: AppConfig, no_description_text: str, merge_run_summary: Optional[MergeRunSummary] = None) -> MergedLanguageContent:
-    return enforce_merged_paragraphs_for_group(
-        provider_name="openai",
-        language=language,
+    raw_response_text: str = response.raw_text
+    try:
+        merged_content, _, paragraph_count = parse_merge_response_or_raise(
+            provider_name="openai",
+            model_name=model_name,
+            raw_text=raw_response_text,
+            structured_payload=response.structured_payload,
+        )
+    except Exception as error:
+        raise MergeAttemptFailure(
+            reason_code=_reason_code_from_error(error),
+            reason=str(error),
+            model_name=model_name,
+            attempt_stage="validation",
+            raw_response_text=raw_response_text,
+        ) from error
+    normalized_content: MergedLanguageContent = _normalize_merge_links(
         merged_content=merged_content,
-        videos=videos,
-        paragraph_limit=config.llm_source_desc_max_chars,
-        no_description_text=no_description_text,
-        merge_run_summary=merge_run_summary,
+        normalize_youtube_url=normalize_youtube_url,
     )
+    LOGGER.info(
+        "merge_llm_response_valid model=%s attempt=%d title_length=%d description_length=%d paragraph_count=%d links_count=%d hashtags_count=%d",
+        model_name,
+        attempt_index,
+        len(normalized_content.title),
+        len(normalized_content.description),
+        paragraph_count,
+        len(normalized_content.links),
+        len([token for token in str(normalized_content.hashtags_line or "").split() if token.strip()]),
+    )
+    return (normalized_content, raw_response_text)
+
+
+def attempt_openai_merge_with_audit(
+    *,
+    language: str,
+    videos: List[PlannedVideo],
+    config: AppConfig,
+    attempt_label: str,
+    summarize_error: Callable[[Exception], str],
+    normalize_youtube_url: Callable[[str], str],
+    no_description_text: str,
+    merge_run_summary: Optional[MergeRunSummary] = None,
+    branch_label: str = "unknown",
+    date_key: str = "unknown",
+    slot_key: str = "unknown",
+) -> LanguageMergeAttempt:
+    primary_model: str = str(config.openai_model_primary or "").strip() or "gpt-5.1"
+    fallback_model: str = str(config.openai_model_fallback or "").strip() or "gpt-5-mini"
+    last_raw_response: str = ""
+    last_error_summary: str = "unknown error"
+
+    for attempt_index in range(1, PRIMARY_ATTEMPTS + 1):
+        _log_merge_attempt_start(
+            model_name=primary_model,
+            attempt_index=attempt_index,
+            is_fallback=False,
+            branch_label=branch_label,
+            date_key=date_key,
+            slot_key=slot_key,
+            language=language,
+        )
+        if attempt_index > 1:
+            LOGGER.info("merge_llm_retry attempt=%d model=%s", attempt_index, primary_model)
+            if merge_run_summary is not None:
+                merge_run_summary.record_primary_retry_used()
+        try:
+            merged_content, raw_response_text = _attempt_merge_once(
+                language=language,
+                videos=videos,
+                config=config,
+                model_name=primary_model,
+                attempt_index=attempt_index,
+                attempt_label=f"{attempt_label}_PRIMARY_{attempt_index}",
+                branch_label=branch_label,
+                date_key=date_key,
+                slot_key=slot_key,
+                no_description_text=no_description_text,
+                normalize_youtube_url=normalize_youtube_url,
+            )
+            last_raw_response = raw_response_text
+            if merge_run_summary is not None:
+                merge_run_summary.record_primary_success()
+            return LanguageMergeAttempt(
+                language=language,
+                model_name=primary_model,
+                raw_response_text=raw_response_text,
+                merged=merged_content,
+                error_summary=None,
+                salvaged_title=merged_content.title,
+                publish_source_label="primary_success",
+            )
+        except MergeAttemptFailure as error:
+            last_raw_response = error.raw_response_text
+            last_error_summary = error.reason
+            _log_merge_attempt_invalid(
+                model_name=primary_model,
+                attempt_index=attempt_index,
+                is_fallback=False,
+                branch_label=branch_label,
+                date_key=date_key,
+                slot_key=slot_key,
+                language=language,
+                reason_code=error.reason_code,
+                reason=error.reason,
+                raw_response_text=error.raw_response_text,
+            )
+            if merge_run_summary is not None:
+                merge_run_summary.record_validation_rejected()
+        except Exception as error:
+            last_error_summary = summarize_error(error)
+            _log_merge_attempt_invalid(
+                model_name=primary_model,
+                attempt_index=attempt_index,
+                is_fallback=False,
+                branch_label=branch_label,
+                date_key=date_key,
+                slot_key=slot_key,
+                language=language,
+                reason_code="unexpected_error",
+                reason=last_error_summary,
+                raw_response_text="",
+            )
+
+    _log_merge_attempt_start(
+        model_name=fallback_model,
+        attempt_index=1,
+        is_fallback=True,
+        branch_label=branch_label,
+        date_key=date_key,
+        slot_key=slot_key,
+        language=language,
+    )
+    try:
+        merged_content, raw_response_text = _attempt_merge_once(
+            language=language,
+            videos=videos,
+            config=config,
+            model_name=fallback_model,
+            attempt_index=1,
+            attempt_label=f"{attempt_label}_FALLBACK_1",
+            branch_label=branch_label,
+            date_key=date_key,
+            slot_key=slot_key,
+            no_description_text=no_description_text,
+            normalize_youtube_url=normalize_youtube_url,
+        )
+        last_raw_response = raw_response_text
+        LOGGER.info("merge_llm_fallback_valid model=%s", fallback_model)
+        if merge_run_summary is not None:
+            merge_run_summary.record_fallback_success()
+        return LanguageMergeAttempt(
+            language=language,
+            model_name=fallback_model,
+            raw_response_text=raw_response_text,
+            merged=merged_content,
+            error_summary=None,
+            salvaged_title=merged_content.title,
+            publish_source_label="fallback_success",
+        )
+    except MergeAttemptFailure as error:
+        last_raw_response = error.raw_response_text
+        last_error_summary = error.reason
+        _log_merge_attempt_invalid(
+            model_name=fallback_model,
+            attempt_index=1,
+            is_fallback=True,
+            branch_label=branch_label,
+            date_key=date_key,
+            slot_key=slot_key,
+            language=language,
+            reason_code=error.reason_code,
+            reason=error.reason,
+            raw_response_text=error.raw_response_text,
+        )
+    except Exception as error:
+        last_error_summary = summarize_error(error)
+        _log_merge_attempt_invalid(
+            model_name=fallback_model,
+            attempt_index=1,
+            is_fallback=True,
+            branch_label=branch_label,
+            date_key=date_key,
+            slot_key=slot_key,
+            language=language,
+            reason_code="unexpected_error",
+            reason=last_error_summary,
+            raw_response_text="",
+        )
+
+    LOGGER.error(
+        "merge_llm_final_failure branch=%s date_key=%s slot_key=%s language=%s stage=fallback code=%s fallback_used=yes raw_response_received=%s reason=%s raw_chars=%d",
+        branch_label,
+        date_key,
+        slot_key,
+        language,
+        _reason_code_from_error(RuntimeError(last_error_summary)),
+        "yes" if bool(last_raw_response.strip()) else "no",
+        last_error_summary,
+        len(last_raw_response),
+    )
+    if merge_run_summary is not None:
+        merge_run_summary.record_final_failure()
+    return LanguageMergeAttempt(
+        language=language,
+        model_name=fallback_model,
+        raw_response_text=last_raw_response,
+        merged=None,
+        error_summary=last_error_summary,
+        salvaged_title=None,
+        publish_source_label="merge_failed",
+    )
+
+
+def enforce_openai_merged_paragraphs(
+    *,
+    language: str,
+    merged_content: MergedLanguageContent,
+    videos: List[PlannedVideo],
+    config: AppConfig,
+    no_description_text: str,
+    merge_run_summary: Optional[MergeRunSummary] = None,
+    branch_label: str = "unknown",
+    date_key: str = "unknown",
+    slot_key: str = "unknown",
+) -> MergedLanguageContent:
+    del videos, config, no_description_text
+    enforcement_result: ParagraphEnforcementResult = _enforce_merged_description_structure(
+        merged_content=merged_content
+    )
+    LOGGER.info(
+        "merge_post_enforcement branch=%s date_key=%s slot_key=%s language=%s body_paragraphs_before=%d body_paragraphs_after=%d cta_present_before=%s cta_present_after=%s links_count=%d hashtags_count=%d mutated=%s recovery_applied=%s reason=%s",
+        branch_label,
+        date_key,
+        slot_key,
+        language,
+        enforcement_result.body_paragraphs_before,
+        enforcement_result.body_paragraphs_after,
+        "yes" if enforcement_result.cta_present_before else "no",
+        "yes" if enforcement_result.cta_present_after else "no",
+        enforcement_result.links_count_after,
+        enforcement_result.hashtags_count_after,
+        "yes" if enforcement_result.mutated else "no",
+        "yes" if enforcement_result.recovery_applied else "no",
+        enforcement_result.note,
+    )
+    if not enforcement_result.mutated:
+        return merged_content
+    if enforcement_result.recovery_applied and merge_run_summary is not None:
+        merge_run_summary.record_paragraph_recovery_used()
+    updated_content: MergedLanguageContent = dataclasses.replace(
+        merged_content,
+        description=enforcement_result.description_text,
+        cta_text=enforcement_result.cta_text,
+        hashtags_line=enforcement_result.hashtags_line,
+        links=enforcement_result.links,
+        description_selected=enforcement_result.description_text,
+        description_audit=enforcement_result.description_text,
+    )
+    return updated_content

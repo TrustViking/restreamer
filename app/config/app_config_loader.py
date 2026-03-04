@@ -22,6 +22,7 @@ from app.config.validators import (
     setting_as_str,
     validate_app_settings,
 )
+from app.paths import get_project_paths
 
 
 def load_app_settings_from_path(path: Path) -> Dict[str, Any]:
@@ -63,12 +64,12 @@ def load_google_service_account_path() -> Optional[Path]:
 
 def load_google_oauth_credentials_path() -> Path:
     raw_value: str = os.getenv("GOOGLE_OAUTH_CREDENTIALS_PATH", "").strip()
-    return Path(raw_value or "credentials.json")
+    return Path(raw_value) if raw_value else get_project_paths().oauth_credentials_path
 
 
 def load_google_oauth_token_path() -> Path:
     raw_value: str = os.getenv("GOOGLE_OAUTH_TOKEN_PATH", "").strip()
-    return Path(raw_value or "token.json")
+    return Path(raw_value) if raw_value else get_project_paths().oauth_token_path
 
 
 def warn_ignored_google_auth_mode_in_config(
@@ -172,26 +173,16 @@ def load_config_from_env(
     logger: logging.Logger,
     summarize_error: Optional[Callable[[Exception], str]] = None,
 ) -> AppConfig:
-    app_config_path: Path = Path(
-        os.getenv("APP_CONFIG_PATH", "app_config.yaml").strip() or "app_config.yaml"
+    project_paths = get_project_paths()
+    app_config_path: Path = (
+        Path(os.getenv("APP_CONFIG_PATH", "").strip())
+        if os.getenv("APP_CONFIG_PATH", "").strip()
+        else project_paths.runtime_config_path
     )
     app_settings: Dict[str, Any] = load_app_settings_from_path(app_config_path)
     warn_ignored_google_auth_mode_in_config(app_settings, logger=logger)
 
-    stg_templates_path: Path = Path(setting_as_str(app_settings, "templates_path"))
-    default_templates_path: Path = Path("templates.yaml")
-    try:
-        templates = load_templates_from_path(stg_templates_path)
-    except Exception as error:
-        if stg_templates_path == default_templates_path:
-            raise
-        logger.warning(
-            "Templates loading failed for %s (%s). Falling back to %s.",
-            stg_templates_path,
-            error,
-            default_templates_path,
-        )
-        templates = load_templates_from_path(default_templates_path)
+    templates = load_templates_from_path(project_paths.templates_path)
 
     processing_mode: str = normalize_processing_mode(
         setting_as_str(app_settings, "processing.mode"),
@@ -209,7 +200,7 @@ def load_config_from_env(
     now_tz_mode: str = normalize_now_tz_mode(now_tz_mode_input, source="now timezone mode")
 
     llm_provider: str = resolve_llm_provider_from_env(logger=logger)
-    openai_model_primary: str = os.getenv("STG_OPENAI_MODEL_PRIMARY", "").strip() or "gpt-5-nano"
+    openai_model_primary: str = os.getenv("STG_OPENAI_MODEL_PRIMARY", "").strip() or "gpt-5.1"
     openai_model_fallback: str = os.getenv("STG_OPENAI_MODEL_FALLBACK", "").strip() or "gpt-5-mini"
     openai_timeout_sec: float = _load_float_env("STG_OPENAI_TIMEOUT_SEC", 120.0, min_value=1.0)
     openai_max_output_tokens: int = _load_int_env("STG_OPENAI_MAX_OUTPUT_TOKENS", 1000, min_value=1)
@@ -276,7 +267,7 @@ def load_config_from_env(
         "llm_source_desc_max_chars": llm_source_desc_max_chars,
         "llm_run_if_single_source": llm_run_if_single_source,
         "preview_filename_max_stem": setting_as_int(app_settings, "files.preview_filename_max_stem"),
-        "stg_templates_path": stg_templates_path,
+        "stg_templates_path": project_paths.templates_path,
         "telegram_use_audit": setting_as_bool(app_settings, "telegram.use_audit"),
         "templates": templates,
     }

@@ -6,33 +6,54 @@ import logging
 
 @dataclass
 class MergeRunSummary:
-    structured_ok: int = 0
-    structured_failed: int = 0
-    plain_fallback_ok: int = 0
-    repair_used: int = 0
+    primary_success: int = 0
+    validation_rejected: int = 0
+    primary_retry_used: int = 0
+    fallback_success: int = 0
+    final_failure: int = 0
     paragraph_recovery_used: int = 0
 
-    def record_structured_ok(self) -> None:
-        self.structured_ok += 1
+    @property
+    def structured_ok(self) -> int:
+        return self.primary_success
 
-    def record_structured_failed(self) -> None:
-        self.structured_failed += 1
+    @property
+    def structured_failed(self) -> int:
+        return self.validation_rejected
 
-    def record_plain_fallback_ok(self) -> None:
-        self.plain_fallback_ok += 1
+    @property
+    def plain_fallback_ok(self) -> int:
+        return self.fallback_success
 
-    def record_repair_used(self) -> None:
-        self.repair_used += 1
+    @property
+    def repair_used(self) -> int:
+        return self.primary_retry_used
+
+    def record_primary_success(self) -> None:
+        self.primary_success += 1
+
+    def record_validation_rejected(self) -> None:
+        self.validation_rejected += 1
+
+    def record_primary_retry_used(self) -> None:
+        self.primary_retry_used += 1
+
+    def record_fallback_success(self) -> None:
+        self.fallback_success += 1
+
+    def record_final_failure(self) -> None:
+        self.final_failure += 1
 
     def record_paragraph_recovery_used(self) -> None:
         self.paragraph_recovery_used += 1
 
     def log_summary(self, logger: logging.Logger) -> None:
         logger.info(
-            "merge_run_summary structured_ok=%d structured_failed=%d plain_fallback_ok=%d repair_used=%d paragraph_recovery_used=%d",
-            self.structured_ok,
-            self.structured_failed,
-            self.plain_fallback_ok,
-            self.repair_used,
+            "merge_run_summary primary_success=%d validation_rejected=%d primary_retry_used=%d fallback_success=%d final_failure=%d paragraph_recovery_used=%d",
+            self.primary_success,
+            self.validation_rejected,
+            self.primary_retry_used,
+            self.fallback_success,
+            self.final_failure,
             self.paragraph_recovery_used,
         )

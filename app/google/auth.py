@@ -263,7 +263,7 @@ def _create_oauth_credentials(
         raise RuntimeError(
             "Google OAuth credentials file is required. "
             f"Set GOOGLE_OAUTH_CREDENTIALS_PATH (current={str(oauth_credentials_path)!r}) "
-            "to your OAuth client credentials.json (Desktop app)."
+            "to your OAuth client credentials file (Desktop app)."
         )
 
     creds: Optional[Any] = None
@@ -313,7 +313,7 @@ def _create_oauth_credentials(
         return creds_to_save
     except Exception as error:
         raise RuntimeError(
-            "Failed to create OAuth token.json. "
+            "Failed to create OAuth token file. "
             f"credentials_path={str(oauth_credentials_path)!r} token_path={str(oauth_token_path)!r}. "
             "Check OAuth Desktop credentials and browser authorization flow."
         ) from error

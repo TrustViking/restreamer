@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -9,6 +10,7 @@ from typing import Optional, Tuple
 from app.core.constants import LOGGER_NAME_DEFAULT, LOGGER_NAME_ENV_VAR
 
 LEGACY_LOGGER_NAME_ENV_VAR: str = "STREAMERTG_LOGGER_NAME"
+LOG_FILE_ENV_VAR: str = "RESTREAMER_LOG_FILE"
 
 
 def resolve_base_logger_name() -> str:
@@ -71,14 +73,25 @@ def resolve_log_dir() -> Path:
     return script_dir / "logs"
 
 
+def resolve_log_file_path() -> Path:
+    env_log_file_raw: str = str(os.getenv(LOG_FILE_ENV_VAR, "") or "").strip()
+    if env_log_file_raw:
+        candidate_path: Path = Path(env_log_file_raw)
+        if not candidate_path.is_absolute():
+            candidate_path = (resolve_log_dir() / candidate_path).resolve()
+        return candidate_path
+
+    log_dir_path: Path = resolve_log_dir()
+    log_filename: str = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_restreamer.log"
+    return log_dir_path / log_filename
+
+
 def setup_logging(debug: bool) -> None:
     base_logger_name: str = resolve_base_logger_name()
     app_level: int = logging.DEBUG if debug else logging.INFO
 
-    log_dir_path: Path = resolve_log_dir()
-    log_dir_path.mkdir(parents=True, exist_ok=True)
-    log_filename: str = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_restreamer.log"
-    log_file_path: Path = log_dir_path / log_filename
+    log_file_path: Path = resolve_log_file_path()
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
     formatter: logging.Formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -94,7 +107,7 @@ def setup_logging(debug: bool) -> None:
     for handler in list(base_logger.handlers):
         base_logger.removeHandler(handler)
 
-    stream_handler: logging.StreamHandler = logging.StreamHandler()
+    stream_handler: logging.StreamHandler = logging.StreamHandler(stream=sys.stdout)
     stream_handler.setLevel(app_level)
     stream_handler.setFormatter(formatter)
     base_logger.addHandler(stream_handler)

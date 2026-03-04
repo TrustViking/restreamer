@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -70,24 +70,30 @@ class PlannedVideo:
 
 
 @dataclass(frozen=True)
-class PlannedVideoItem:
+class PreparedVideo:
     row_number: int
-    normalized_url: str
+    original_link: str
+    normalized_link: str
+    date_raw: str
+    time_raw: str
+    scheduled_at_kiev: datetime
     date_key: str
-    time_key: str
-    slot_key: str
-    base_lang: str
-    merge_langs: List[str]
-    title: str
-    description: str
-    preview: str
-    base_video: PlannedVideo
+    date_display: str
+    language: str
+    metadata: VideoMetadata
+    thumbnail: NormalizedImage
+    local_thumbnail_path: Optional[Path]
+    merge_raw: str
+    merge_languages: List[str]
 
 
 @dataclass(frozen=True)
 class MergedLanguageContent:
     title: str
     description: str
+    cta_text: Optional[str] = None
+    hashtags_line: Optional[str] = None
+    links: Tuple[str, ...] = ()
     title_selected: Optional[str] = None
     description_selected: Optional[str] = None
     title_audit: Optional[str] = None
@@ -103,6 +109,7 @@ class LanguageMergeAttempt:
     merged: Optional[MergedLanguageContent]
     error_summary: Optional[str]
     salvaged_title: Optional[str] = None
+    publish_source_label: Optional[str] = None
     plain_repair_used: Optional[bool] = None
     plain_repair_fallback_model: Optional[str] = None
     validation_reasons: Optional[List[str]] = None

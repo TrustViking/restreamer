@@ -6,20 +6,15 @@ import argparse
 def build_cli_parser() -> argparse.ArgumentParser:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
         description=(
-            "Batch pipeline from Google Sheets to Google Docs and Telegram "
-            "with local thumbnail saving."
+            "Audit pipeline from Google Sheets to Google Docs and Telegram "
+            "with shared preparation and branch execution."
         )
     )
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        "--merge",
-        action="store_true",
-        help="Run with LLM merge enabled for grouped descriptions.",
-    )
-    mode_group.add_argument(
-        "--nomerge",
-        action="store_true",
-        help="Run without LLM merge; publish original titles/descriptions with numbering.",
+    parser.add_argument(
+        "--audit-mode",
+        default="nomerge",
+        choices=("nomerge", "merge", "unite"),
+        help="Audit branch plan: nomerge, merge, or unite (nomerge then merge).",
     )
     parser.add_argument(
         "--dry-run",

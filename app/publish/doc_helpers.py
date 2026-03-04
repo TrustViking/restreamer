@@ -1,47 +1,30 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppTemplates
-from app.core.models import LanguageMergeAttempt, MergedLanguageContent, PlannedVideo
+from app.core.env_flags import (
+    strip_chapter_timestamps,
+    strip_chapter_timestamps_enabled_from_env,
+)
+from app.core.models import (
+    LanguageMergeAttempt,
+    MergedLanguageContent,
+    MergedPublicationPayload,
+    PlannedVideo,
+)
+from app.planning import planned_video_block_language
+from app.publish.post_llm_sanitation import (
+    build_sanitized_merged_publication_payload,
+    resolve_post_llm_source_label,
+    sanitize_post_llm_text_for_merged_publish,
+)
 
 
 LOGGER = _get_logger_impl(__name__)
-
-
-def _load_bool_env(name: str, default: bool) -> bool:
-    raw_value: str = os.getenv(name, "").strip().lower()
-    if not raw_value:
-        return default
-    if raw_value in {"1", "true", "yes", "on"}:
-        return True
-    if raw_value in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
-def _strip_chapter_timestamps_enabled_from_env() -> bool:
-    return _load_bool_env("STG_STRIP_CHAPTER_TIMESTAMPS", True)
-
-
-def strip_chapter_timestamps(text: str) -> str:
-    raw_text: str = str(text or "")
-    if not raw_text:
-        return raw_text
-    chapter_pattern: re.Pattern[str] = re.compile(
-        r"^\s*(?:\d{1,2}\s*:\s*)?\d{1,2}\s*:\s*\d{2}\s+\S.*$"
-    )
-    cleaned_lines: List[str] = []
-    for line in raw_text.splitlines(keepends=True):
-        stripped_line: str = line.strip()
-        if stripped_line and chapter_pattern.match(stripped_line):
-            continue
-        cleaned_lines.append(line)
-    return "".join(cleaned_lines)
 
 
 def _language_heading(language: str, templates: Optional[AppTemplates]) -> str:
@@ -69,38 +52,6 @@ def _numbered_lines(values: Sequence[str]) -> str:
     )
 
 
-def _merged_title_for_docs(merged_content: Optional[MergedLanguageContent]) -> str:
-    if not merged_content:
-        return ""
-    return str(merged_content.title_audit or merged_content.title or "").strip()
-
-
-def _merged_title_for_selected(merged_content: Optional[MergedLanguageContent]) -> str:
-    if not merged_content:
-        return ""
-    return str(merged_content.title_selected or merged_content.title or "").strip()
-
-
-def _merged_description_for_docs(
-    merged_content: Optional[MergedLanguageContent],
-) -> str:
-    if not merged_content:
-        return ""
-    return str(
-        merged_content.description_audit or merged_content.description or ""
-    ).strip()
-
-
-def _merged_description_for_selected(
-    merged_content: Optional[MergedLanguageContent],
-) -> str:
-    if not merged_content:
-        return ""
-    return str(
-        merged_content.description_selected or merged_content.description or ""
-    ).strip()
-
-
 def _numbered_original_titles(videos: List[PlannedVideo]) -> str:
     source_titles: List[str] = [video.metadata.title for video in videos]
     return _numbered_lines(source_titles)
@@ -113,9 +64,15 @@ def _build_titles_summary(
     use_audit_text: bool = True,
 ) -> str:
     if merged_content:
-        if use_audit_text:
-            return _merged_title_for_docs(merged_content)
-        return _merged_title_for_selected(merged_content)
+        language: str = planned_video_block_language(videos[0]) if videos else "unknown"
+        payload: MergedPublicationPayload = build_sanitized_merged_publication_payload(
+            language=language,
+            merged_content=merged_content,
+            merge_attempt=merge_attempt,
+            use_audit_text=use_audit_text,
+            source_videos=videos,
+        )
+        return payload.title_text
     if merge_attempt is not None:
         salvaged_title: str = str(merge_attempt.salvaged_title or "").strip()
         if salvaged_title:
@@ -133,7 +90,7 @@ def _fallback_source_description_text(
     description_text: str = video.metadata.description.strip() or _no_description_text(
         templates
     )
-    if _strip_chapter_timestamps_enabled_from_env():
+    if strip_chapter_timestamps_enabled_from_env():
         description_text = strip_chapter_timestamps(description_text)
     return description_text
 
@@ -150,11 +107,25 @@ def _build_descriptions_summary(
         source_descriptions.append(_fallback_source_description_text(video, templates))
     source_lines: str = _numbered_lines(source_descriptions)
     if merged_content:
-        if use_audit_text:
-            return _merged_description_for_docs(merged_content)
-        return _merged_description_for_selected(merged_content)
+        language: str = planned_video_block_language(videos[0]) if videos else "unknown"
+        payload: MergedPublicationPayload = build_sanitized_merged_publication_payload(
+            language=language,
+            merged_content=merged_content,
+            merge_attempt=merge_attempt,
+            use_audit_text=use_audit_text,
+            source_videos=videos,
+        )
+        return payload.description_text
     if merge_attempt is not None:
-        raw_text: str = str(merge_attempt.raw_response_text or "").strip()
+        raw_text: str = sanitize_post_llm_text_for_merged_publish(
+            text=str(merge_attempt.raw_response_text or "").strip(),
+            language=merge_attempt.language,
+            source_label=resolve_post_llm_source_label(
+                merge_attempt,
+                default_label="merge_attempt_raw",
+            ),
+            source_videos=videos,
+        )
         if raw_text:
             return f"{raw_text}\n\n{source_lines}".strip()
         return source_lines
@@ -284,21 +255,38 @@ def _build_language_table_rows(
     heading: str = _language_heading(language, templates)
     if time_display:
         heading = f"{heading} - {time_display}"
-    description_text: str = _build_descriptions_summary(
-        videos=videos,
-        templates=templates,
-        merged_content=merged_content,
-        merge_attempt=merge_attempt,
+    merged_payload: Optional[MergedPublicationPayload] = None
+    if merged_content is not None:
+        merged_payload = build_sanitized_merged_publication_payload(
+            language=language,
+            merged_content=merged_content,
+            merge_attempt=merge_attempt,
+            use_audit_text=True,
+            source_videos=videos,
+        )
+    description_text: str = (
+        merged_payload.description_text
+        if merged_payload is not None
+        else _build_descriptions_summary(
+            videos=videos,
+            templates=templates,
+            merged_content=merged_content,
+            merge_attempt=merge_attempt,
+        )
     )
 
     rows: List[Tuple[str, bool]] = [
         (heading, True),
         (title_label, True),
         (
-            _build_titles_summary(
-                videos=videos,
-                merged_content=merged_content,
-                merge_attempt=merge_attempt,
+            (
+                merged_payload.title_text
+                if merged_payload is not None
+                else _build_titles_summary(
+                    videos=videos,
+                    merged_content=merged_content,
+                    merge_attempt=merge_attempt,
+                )
             ),
             False,
         ),
@@ -308,4 +296,3 @@ def _build_language_table_rows(
     ]
     rows.extend(_build_preview_placeholder_rows(videos))
     return rows
-

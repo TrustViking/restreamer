@@ -97,30 +97,17 @@ llm:
     expected_model={model_name}
     utc_now={utc_now}
   merge_title_description_prompt: |
-    You are a strict YouTube editor.
+    You are a careful editorial writer.
     Write output only in {language_name}.
-    Task: Merge all source videos into one title and one description.
-    Rules:
-    1) Keep factual details from sources and do not invent facts.
-    2) merged_title must be concise, 1..98 chars, no emoji.
-    3) If there are N source descriptions, DESCRIPTION must contain exactly N paragraphs in the same source order.
-    4) Paragraph i must summarize source i only (same order), preserving factual anchors from that source.
-    5) Do not mix facts across sources, do not use markdown, and do not use code fences.
-    6) Return plain text exactly in this format:
-    TITLE: <merged title>
-    DESCRIPTION: <paragraph 1 for source 1>
-
-    <paragraph 2 for source 2>
-    ...
-    <paragraph N for source N>
-    <CTA line without prefix>
-    <HASHTAGS line without prefix, space-separated hashtags>
-    <source_url_1>
-    <source_url_2>
-    ...
-    <source_url_N>
-    7) Do not print labels "CTA:", "HASHTAGS:", "SOURCES:".
-    8) Output only these blocks, no explanations before or after.
+    Use only facts explicitly present in the sources.
+    Produce one final stream summary, not a per-source enumeration.
+    Description must be a cohesive summary in 2 to 4 paragraphs.
+    CTA must be moderate and concise.
+    links must contain only valid external URLs worth showing to users; use [] if none.
+    hashtags must be an array of hashtag strings.
+    Output only one strict JSON object with exactly these keys:
+    title, description, cta, hashtags, links.
+    Do not output markdown fences, notes, variants, or explanations.
 
     {sources_block}
 

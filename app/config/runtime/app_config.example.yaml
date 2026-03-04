@@ -1,12 +1,11 @@
-# Template config: copy this file to app_config.yaml and fill real values.
-# app_config.example.yaml should stay free of environment-specific secrets/ids.
+# Template config: copy this file to app/config/runtime/app_config.yaml and fill real values.
+# app/config/runtime/app_config.example.yaml should stay free of environment-specific secrets/ids.
 # Environment toggles (.env):
 # STG_SHEETS_LINK_WRITEBACK=True
 # STG_STRIP_CHAPTER_TIMESTAMPS=True
 app:
-  templates_path: templates.yaml
   processing:
-    mode: merge
+    mode: audit
 
   google:
     enabled: true

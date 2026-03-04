@@ -72,16 +72,27 @@ def resolve_llm_provider_from_env(*, logger: Optional[logging.Logger] = None) ->
 def normalize_processing_mode(value: str, *, source: str) -> str:
     raw_value: str = str(value or "").strip().lower()
     normalized_input: str = raw_value[2:] if raw_value.startswith("--") else raw_value
+    if normalized_input != "audit":
+        raise RuntimeError(
+            f"Unsupported {source}={value!r}. Supported mode: audit."
+        )
+    return "audit"
+
+
+def normalize_audit_mode(value: str, *, source: str) -> str:
+    raw_value: str = str(value or "").strip().lower()
+    normalized_input: str = raw_value[2:] if raw_value.startswith("--") else raw_value
     alias_to_mode: Dict[str, str] = {
-        "merge": "merge",
         "nomerge": "nomerge",
         "no-merge": "nomerge",
         "no_merge": "nomerge",
+        "merge": "merge",
+        "unite": "unite",
     }
     normalized_mode: Optional[str] = alias_to_mode.get(normalized_input)
     if normalized_mode is None:
         raise RuntimeError(
-            f"Unsupported {source}={value!r}. Supported modes: merge, nomerge."
+            f"Unsupported {source}={value!r}. Supported audit modes: nomerge, merge, unite."
         )
     return normalized_mode
 
@@ -112,7 +123,6 @@ def now_filter_timezone(now_tz_mode: str, kiev_tz: ZoneInfo) -> timezone | ZoneI
 
 def validate_app_settings(payload: Dict[str, Any]) -> None:
     checks: List[Tuple[str, str]] = [
-        ("templates_path", "str"),
         ("processing.mode", "str"),
         ("google.enabled", "bool"),
         ("google.drive_folder_id", "str"),
@@ -167,7 +177,7 @@ def validate_app_settings(payload: Dict[str, Any]) -> None:
         raise RuntimeError(
             "Invalid app config. Please fix these keys:\n"
             f"{joined}\n"
-            "You can start from app_config.example.yaml."
+            "You can start from app/config/runtime/app_config.example.yaml."
         )
 
 

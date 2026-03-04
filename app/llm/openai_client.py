@@ -4,8 +4,8 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, cast
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.llm.merge_parser import extract_json_object_candidates, parse_json_tolerant, strip_json_code_fences
@@ -17,6 +17,7 @@ except ImportError:
 
 LOGGER = _get_logger_impl(__name__)
 _OPENAI_CLIENT: Optional[Any] = None
+_RUN_LOCAL_USAGE_STATE: Optional["RunLocalOpenAIUsageState"] = None
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,48 @@ class OpenAITransportResult:
     structured_payload: Optional[Dict[str, Any]]
     incomplete_reason: str
     output_item_types: List[str]
+
+
+@dataclass(frozen=True)
+class LlmTraceContext:
+    branch_label: str
+    date_key: str
+    slot_key: str
+    language: str
+    provider: str
+    model_name: str
+    attempt_index: int
+    request_kind: str
+    source_count: int
+
+
+@dataclass
+class RunLocalOpenAIUsageState:
+    requests_sent: int = 0
+    repair_calls: int = 0
+    structured_calls: int = 0
+    fallback_calls: int = 0
+    models_used: Set[str] = field(default_factory=set)
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+
+
+def reset_run_local_openai_usage() -> RunLocalOpenAIUsageState:
+    global _RUN_LOCAL_USAGE_STATE
+    _RUN_LOCAL_USAGE_STATE = RunLocalOpenAIUsageState()
+    return _RUN_LOCAL_USAGE_STATE
+
+
+def get_run_local_openai_usage() -> RunLocalOpenAIUsageState:
+    global _RUN_LOCAL_USAGE_STATE
+    if _RUN_LOCAL_USAGE_STATE is None:
+        _RUN_LOCAL_USAGE_STATE = RunLocalOpenAIUsageState()
+    return _RUN_LOCAL_USAGE_STATE
+
+
+def record_run_local_openai_repair_call() -> None:
+    state: RunLocalOpenAIUsageState = get_run_local_openai_usage()
+    state.repair_calls += 1
 
 
 def _extract_openai_response_text(response: Any) -> str:
@@ -76,6 +119,131 @@ def _openai_incomplete_reason(response: Any) -> str:
     if isinstance(incomplete, dict):
         return str(incomplete.get("reason", "")).strip().lower()
     return str(getattr(incomplete, "reason", "")).strip().lower()
+
+
+def _extract_openai_usage_tokens(response: Any) -> Tuple[Optional[int], Optional[int]]:
+    usage: Any = getattr(response, "usage", None)
+    if usage is None and isinstance(response, dict):
+        usage = response.get("usage")
+    if usage is None:
+        return (None, None)
+    if isinstance(usage, dict):
+        input_tokens: Optional[int] = _safe_int_or_none(
+            usage.get("input_tokens") or usage.get("prompt_tokens")
+        )
+        output_tokens: Optional[int] = _safe_int_or_none(
+            usage.get("output_tokens") or usage.get("completion_tokens")
+        )
+        return (input_tokens, output_tokens)
+    input_tokens = _safe_int_or_none(
+        getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None)
+    )
+    output_tokens = _safe_int_or_none(
+        getattr(usage, "output_tokens", None)
+        or getattr(usage, "completion_tokens", None)
+    )
+    return (input_tokens, output_tokens)
+
+
+def _log_llm_request_start(
+    *,
+    trace_context: Optional[LlmTraceContext],
+    input_chars: int,
+) -> None:
+    if trace_context is None:
+        return
+    LOGGER.info(
+        "llm_request_start branch=%s date_key=%s slot_key=%s lang=%s provider=%s model=%s attempt_index=%d request_kind=%s source_count=%d input_chars=%d estimated_input_tokens=unknown",
+        trace_context.branch_label,
+        trace_context.date_key,
+        trace_context.slot_key,
+        trace_context.language,
+        trace_context.provider,
+        trace_context.model_name,
+        trace_context.attempt_index,
+        trace_context.request_kind,
+        trace_context.source_count,
+        input_chars,
+    )
+
+
+def _log_llm_request_finish(
+    *,
+    trace_context: Optional[LlmTraceContext],
+    response: Any,
+    success: bool,
+    elapsed_ms: int,
+    max_output_hit: bool,
+) -> None:
+    if trace_context is None:
+        return
+    input_tokens, output_tokens = _extract_openai_usage_tokens(response)
+    raw_text: str = _extract_openai_response_text(response)
+    finish_reason: str = _openai_incomplete_reason(response) or "completed"
+    LOGGER.info(
+        "llm_request_finish branch=%s date_key=%s slot_key=%s lang=%s provider=%s model=%s attempt_index=%d request_kind=%s success=%s llm_call_ms=%d output_chars=%d input_tokens=%s output_tokens=%s finish_reason=%s max_output_hit=%s",
+        trace_context.branch_label,
+        trace_context.date_key,
+        trace_context.slot_key,
+        trace_context.language,
+        trace_context.provider,
+        trace_context.model_name,
+        trace_context.attempt_index,
+        trace_context.request_kind,
+        "yes" if success else "no",
+        elapsed_ms,
+        len(raw_text),
+        str(input_tokens if input_tokens is not None else "unknown"),
+        str(output_tokens if output_tokens is not None else "unknown"),
+        finish_reason,
+        "yes" if max_output_hit else "no",
+    )
+
+
+def _log_llm_retry_decision(
+    *,
+    trace_context: Optional[LlmTraceContext],
+    reason_code: str,
+    retry_index: int,
+    retry_kind: str,
+    recovered: bool,
+) -> None:
+    if trace_context is None:
+        return
+    LOGGER.info(
+        "llm_retry_decision branch=%s date_key=%s slot_key=%s lang=%s provider=%s model=%s retry_index=%d retry_kind=%s reason_code=%s recovered=%s",
+        trace_context.branch_label,
+        trace_context.date_key,
+        trace_context.slot_key,
+        trace_context.language,
+        trace_context.provider,
+        trace_context.model_name,
+        retry_index,
+        retry_kind,
+        reason_code,
+        "yes" if recovered else "no",
+    )
+
+
+def _record_run_local_openai_request(
+    *,
+    model_name: str,
+    response: Any,
+    request_kind: str,
+) -> None:
+    state: RunLocalOpenAIUsageState = get_run_local_openai_usage()
+    cleaned_model_name: str = str(model_name or "").strip() or "unknown"
+    state.requests_sent += 1
+    state.models_used.add(cleaned_model_name)
+    if request_kind == "structured":
+        state.structured_calls += 1
+    else:
+        state.fallback_calls += 1
+    input_tokens, output_tokens = _extract_openai_usage_tokens(response)
+    if input_tokens is not None:
+        state.input_tokens = (state.input_tokens or 0) + input_tokens
+    if output_tokens is not None:
+        state.output_tokens = (state.output_tokens or 0) + output_tokens
 
 
 def _is_openai_temperature_unsupported_error(error: Exception) -> bool:
@@ -254,10 +422,25 @@ def _extract_structured_payload_or_none(response: Any) -> Optional[Dict[str, Any
     return None
 
 
-def openai_request_merge(*, prompt_text: str, model_name: str, timeout_sec: float, attempt_label: str, max_output_tokens: int, structured_schema: Optional[Dict[str, Any]] = None, temperature: float = 0.0) -> OpenAITransportResult:
+def openai_request_merge(
+    *,
+    prompt_text: str,
+    model_name: str,
+    timeout_sec: float,
+    attempt_label: str,
+    max_output_tokens: int,
+    structured_schema: Optional[Dict[str, Any]] = None,
+    temperature: float = 0.0,
+    trace_context: Optional[LlmTraceContext] = None,
+) -> OpenAITransportResult:
     client: Any = get_openai_client(timeout_sec=timeout_sec).with_options(timeout=timeout_sec)
     temperature_enabled: bool = _openai_should_send_temperature(model_name)
     reasoning_effort: str = "low"
+    request_kind: str = (
+        trace_context.request_kind
+        if trace_context is not None
+        else ("structured" if structured_schema is not None else "plain")
+    )
 
     def _create_response(max_tokens: int) -> Any:
         request_kwargs: Dict[str, Any] = {
@@ -277,14 +460,40 @@ def openai_request_merge(*, prompt_text: str, model_name: str, timeout_sec: floa
             }
         if temperature_enabled:
             request_kwargs["temperature"] = float(temperature)
+        _log_llm_request_start(
+            trace_context=trace_context,
+            input_chars=len(prompt_text),
+        )
+        request_started_at: float = time.perf_counter()
         try:
             raw_response: Any = client.responses.with_raw_response.create(**request_kwargs)
             _log_openai_rate_limit_snapshot(response_or_raw=raw_response, model_name=model_name, request_kind="responses.create")
             parse_method: Any = getattr(raw_response, "parse", None)
-            return parse_method() if callable(parse_method) else raw_response
+            parsed_response: Any = parse_method() if callable(parse_method) else raw_response
+            _record_run_local_openai_request(
+                model_name=model_name,
+                response=parsed_response,
+                request_kind=request_kind,
+            )
+            _log_llm_request_finish(
+                trace_context=trace_context,
+                response=parsed_response,
+                success=True,
+                elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
+                max_output_hit=(_openai_incomplete_reason(parsed_response) == "max_output_tokens"),
+            )
+            return parsed_response
         except AttributeError:
             response: Any = client.responses.create(**request_kwargs)
             _log_openai_rate_limit_snapshot(response_or_raw=response, model_name=model_name, request_kind="responses.create")
+            _record_run_local_openai_request(model_name=model_name, response=response, request_kind=request_kind)
+            _log_llm_request_finish(
+                trace_context=trace_context,
+                response=response,
+                success=True,
+                elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
+                max_output_hit=(_openai_incomplete_reason(response) == "max_output_tokens"),
+            )
             return response
 
     def _create_with_temp_fallback(max_tokens: int) -> Any:
@@ -295,6 +504,13 @@ def openai_request_merge(*, prompt_text: str, model_name: str, timeout_sec: floa
             if temperature_enabled and _is_openai_temperature_unsupported_error(cast(Exception, error)):
                 temperature_enabled = False
                 LOGGER.warning("OpenAI model=%s does not support temperature; retrying_without_temperature.", model_name)
+                _log_llm_retry_decision(
+                    trace_context=trace_context,
+                    reason_code="temperature_unsupported_retry",
+                    retry_index=1,
+                    retry_kind="retry_without_temperature",
+                    recovered=True,
+                )
                 return _create_response(max_tokens)
             raise
 
@@ -308,6 +524,13 @@ def openai_request_merge(*, prompt_text: str, model_name: str, timeout_sec: floa
             attempt_label,
             model_name,
             used_max_tokens,
+        )
+        _log_llm_retry_decision(
+            trace_context=trace_context,
+            reason_code="openai_max_output_retry",
+            retry_index=1,
+            retry_kind="max_output_retry",
+            recovered=True,
         )
         response = _create_with_temp_fallback(used_max_tokens)
         incomplete_reason = _openai_incomplete_reason(response)

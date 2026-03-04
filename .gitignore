@@ -5,8 +5,10 @@
 ########################################
 # Secrets / credentials (НЕ КОМИТИТЬ)
 ########################################
-.env
-.env.*
+secrets/
+secrets/.env
+secrets/token.json
+secrets/credentials.json
 *.env
 # если хочешь хранить шаблон:
 !.env.example
@@ -15,7 +17,6 @@
 credentials*.json
 credentials_bot.json
 .credentials_bot.json
-token*.json
 client_secret*.json
 *oauth*.json
 *service_account*.json
@@ -93,9 +94,9 @@ Desktop.ini
 ########################################
 # Local app config (keep only example)
 ########################################
-app_config.yaml
-app_config.*.yaml
-!app_config.example.yaml
+app/config/runtime/app_config.yaml
+app/config/runtime/app_config.*.yaml
+!app/config/runtime/app_config.example.yaml
 
 .gpt.txt
 .gpt.local.txt
