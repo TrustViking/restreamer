@@ -219,7 +219,7 @@ class OperationalHardeningTests(unittest.TestCase):
     def test_content_contract_does_not_expect_per_source_paragraphs_or_source_tail(self) -> None:
         snapshot, sanitization_result = analyze_content_contract(
             title_text="Final title",
-            description_text="Paragraph one.\n\nParagraph two.\n\nWatch live.\n\nhttps://youtube.com/watch?v=abcdefghijk\n\n#one #two",
+            description_text="Paragraph one.\n\nParagraph two.",
             source_videos=[SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
             mode="merge",
             title_mode="merged",
@@ -228,8 +228,8 @@ class OperationalHardeningTests(unittest.TestCase):
         self.assertEqual(2, snapshot.paragraph_count_min)
         self.assertEqual(4, snapshot.paragraph_count_max)
         self.assertTrue(snapshot.paragraph_count_valid)
-        self.assertEqual(3, snapshot.links_allowed_max)
-        self.assertEqual(1, snapshot.links_actual)
+        self.assertEqual(0, snapshot.links_allowed_max)
+        self.assertEqual(0, snapshot.links_actual)
         self.assertTrue(snapshot.links_valid)
         self.assertNotIn("paragraph_count_invalid", snapshot.contract_reason_codes)
         self.assertNotIn("links_limit_exceeded", snapshot.contract_reason_codes)

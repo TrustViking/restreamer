@@ -97,16 +97,36 @@ llm:
     expected_model={model_name}
     utc_now={utc_now}
   merge_title_description_prompt: |
-    You are a careful editorial writer.
+    You are writing a YouTube stream title and description.
     Write output only in {language_name}.
-    Use only facts explicitly present in the sources.
-    Produce one final stream summary, not a per-source enumeration.
-    Description must be a cohesive summary in 2 to 4 paragraphs.
-    CTA must be moderate and concise.
-    links must contain only valid external URLs worth showing to users; use [] if none.
-    hashtags must be an array of hashtag strings.
+    Use only facts explicitly present in the source descriptions.
+    Treat the sources as one complete stream, not as a list of separate videos.
+    Generate a new final title, not a copy of any single source title.
+    Do not use emoji in the title.
+    Mentally extract key points from each source, preserve all non-trivial source-specific points,
+    combine overlaps, compress repetition, and produce one coherent final description.
+    Write a strong native YouTube title no longer than 99 characters.
+    Write one cohesive stream description in 2 to 3 compact paragraphs.
+    The description must cover all source inputs that were merged.
+    If one source has a unique fact, topic, event, or angle, keep it unless it is true duplication.
+    Paragraph 1 (hook): write 1 to 2 sentences, emotionally engaging but factual, grounded in the main tension.
+    The hook must contain at least one of these punctuation marks: ":" or "!" or "?".
+    Keep the hook short (about 220 characters maximum). Optionally start the hook with one light emoji.
+    Paragraph 2 (theses block): start with one short lead-in sentence like "In this stream you'll see:" in {language_name}.
+    Then write 4 to 7 bullet lines, each on its own line, using long dash format exactly: "— ...".
+    Do not present bullets as SOURCE 1 / SOURCE 2 / SOURCE 3, and do not lose specifics from any source.
+    Optional emoji in theses block is very limited: at most 0 to 2 bullets may start with a light emoji.
+    Preserve important recognizable names from sources when relevant; never invent names.
+    If names are present in sources, surface 1 to 3 key names in bullets or as a short participants line.
+    You may use light emoji in the description only, sparingly.
+    Optional Paragraph 3 (short close): 1 compact practical close line with a light CTA and 2 to 5 relevant hashtags.
+    Keep the close concrete; avoid abstract slogans. Do not add links unless they are present in sources.
+    Do not enumerate sources as 1) 2) 3).
+    Do not write a dry digest, protocol, or generic filler text.
+    Do not output generic slogans, abstract editorial text, or propagandistic phrasing.
+    Do not replace concrete facts with broad statements like "an important talk about unity and change".
     Output only one strict JSON object with exactly these keys:
-    title, description, cta, hashtags, links.
+    title, description.
     Do not output markdown fences, notes, variants, or explanations.
 
     {sources_block}

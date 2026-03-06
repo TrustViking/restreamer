@@ -105,6 +105,7 @@ def build_sanitized_merged_publication_payload(
     use_audit_text: bool,
     source_videos: Optional[Sequence[PlannedVideo]] = None,
 ) -> MergedPublicationPayload:
+    del language, merge_attempt, source_videos
     raw_title: str = (
         str(merged_content.title_audit or merged_content.title or "").strip()
         if use_audit_text
@@ -117,19 +118,9 @@ def build_sanitized_merged_publication_payload(
             merged_content.description_selected or merged_content.description or ""
         ).strip()
     )
-    description_parts: List[str] = [raw_description] if raw_description else []
-    cta_text: str = str(merged_content.cta_text or "").strip()
-    if cta_text:
-        description_parts.append(cta_text)
-    links: List[str] = [str(item).strip() for item in merged_content.links if str(item).strip()]
-    if links:
-        description_parts.extend(links)
-    hashtags_text: str = str(merged_content.hashtags_line or "").strip()
-    if hashtags_text:
-        description_parts.append(hashtags_text)
     return MergedPublicationPayload(
         title_text=sanitize_post_llm_title(raw_title),
-        description_text="\n\n".join(part for part in description_parts if part).strip(),
+        description_text=raw_description,
     )
 
 

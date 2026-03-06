@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
-from urllib.parse import urlsplit
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.core.models import MergedLanguageContent
@@ -18,14 +16,10 @@ _FORBIDDEN_VARIANT_KEYS: set[str] = {
     "titles",
     "descriptions",
 }
-_HASHTAG_TOKEN_RE: re.Pattern[str] = re.compile(r"^#[^\s#]+$")
-
-
-@dataclass(frozen=True)
-class LinkFilterStats:
-    accepted_links: Tuple[str, ...]
-    duplicates_dropped: int
-    invalid_dropped: int
+_EMOJI_PATTERN: re.Pattern[str] = re.compile(
+    r"[\U0001F300-\U0001FAFF\u2600-\u27BF]",
+    flags=re.UNICODE,
+)
 
 
 def normalize_single_line_text(text: str) -> str:
@@ -98,7 +92,7 @@ def parse_json_tolerant(raw_text: str) -> tuple[dict[str, object] | None, str]:
 
 
 def validate_payload_keys(payload: Dict[str, Any]) -> None:
-    allowed_keys: set[str] = {"title", "description", "cta", "hashtags", "links"}
+    allowed_keys: set[str] = {"title", "description"}
     payload_keys: set[str] = set(payload.keys())
     missing_keys: List[str] = sorted(key for key in allowed_keys if key not in payload_keys)
     extra_keys: List[str] = sorted(key for key in payload_keys if key not in allowed_keys)
@@ -108,27 +102,27 @@ def validate_payload_keys(payload: Dict[str, Any]) -> None:
         raise RuntimeError("extra_keys:" + ",".join(extra_keys))
 
 
-def sanitize_title(title: str, *, min_chars: int, max_chars: int, allow_emoji: bool) -> str:
-    del allow_emoji
+def sanitize_title(title: str, *, min_chars: int, max_chars: int) -> str:
     normalized_title: str = re.sub(r"\s+", " ", str(title or "").strip())
     if len(normalized_title) > max_chars:
-        normalized_title = normalized_title[: max_chars - 1].rstrip() + "…"
+        normalized_title = normalized_title[:max_chars].rstrip()
     if len(normalized_title) < min_chars:
         return ""
     return normalized_title
 
 
+def contains_emoji(text: str) -> bool:
+    return bool(_EMOJI_PATTERN.search(str(text or "")))
+
+
 def strip_meta_lines(text: str) -> str:
     lines: List[str] = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     cleaned_lines: List[str] = []
-    meta_pattern: re.Pattern[str] = re.compile(
-        r"(?i)^\s*(?:title|description|cta|hashtags|links|sources?)\s*:"
-    )
+    meta_pattern: re.Pattern[str] = re.compile(r"(?i)^\s*(?:title|description|sources?)\s*:")
     for line in lines:
-        normalized_line: str = line.strip()
-        if meta_pattern.match(normalized_line):
+        if meta_pattern.match(line.strip()):
             continue
-        cleaned_lines.append(line)
+        cleaned_lines.append(line.rstrip())
     return "\n".join(cleaned_lines).strip()
 
 
@@ -139,14 +133,14 @@ def validate_description_plain(text: str) -> Tuple[bool, List[str]]:
         reasons.append("empty")
         return (False, reasons)
     for line in [line.strip() for line in normalized.split("\n") if line.strip()][:6]:
-        if re.match(r"(?i)^\s*(?:title|description|cta|hashtags|links|sources?)\s*:", line):
+        if re.match(r"(?i)^\s*(?:title|description|sources?)\s*:", line):
             reasons.append("meta_header")
             break
     return (len(reasons) == 0, reasons)
 
 
 def clean_and_validate_llm_description(*, text: str) -> Tuple[str, bool, List[str]]:
-    cleaned: str = strip_meta_lines(str(text or "").strip())
+    cleaned: str = strip_meta_lines(str(text or ""))
     ok, reasons = validate_description_plain(cleaned)
     return (cleaned, ok, reasons)
 
@@ -156,10 +150,8 @@ def build_plain_merged_content_or_raise(
     model_name: str,
     title_text: str,
     description_text: str,
-    cta_text: Optional[str] = None,
-    hashtags_line: Optional[str] = None,
 ) -> MergedLanguageContent:
-    title: str = sanitize_title(str(title_text or "").strip(), min_chars=1, max_chars=98, allow_emoji=False)
+    title: str = sanitize_title(str(title_text or "").strip(), min_chars=1, max_chars=99)
     description, ok, reasons = clean_and_validate_llm_description(text=description_text)
     if not title:
         raise RuntimeError("plain merge title is invalid")
@@ -168,8 +160,6 @@ def build_plain_merged_content_or_raise(
     return MergedLanguageContent(
         title=title,
         description=description,
-        cta_text=normalize_single_line_text(str(cta_text or "")) or None,
-        hashtags_line=normalize_hashtags_line(str(hashtags_line or "")) or None,
         title_selected=title,
         description_selected=description,
         title_audit=title,
@@ -178,48 +168,12 @@ def build_plain_merged_content_or_raise(
     )
 
 
-def normalize_hashtags_line(line: str) -> str:
-    tokens: List[str] = []
-    for raw_token in str(line or "").split():
-        token: str = raw_token.strip()
-        if not token:
-            continue
-        if not token.startswith("#"):
-            token = f"#{token.lstrip('#')}"
-        token = re.sub(r"\s+", "", token)
-        if _HASHTAG_TOKEN_RE.fullmatch(token):
-            tokens.append(token)
-    return " ".join(tokens)
-
-
-def _normalize_hashtags_list(raw_value: Any) -> str:
-    if not isinstance(raw_value, list):
-        raise RuntimeError("hashtags must be a list of strings")
-    normalized_tokens: List[str] = []
-    for item in raw_value:
-        if not isinstance(item, str):
-            raise RuntimeError("hashtags must be a list of strings")
-        normalized_token: str = normalize_hashtags_line(item)
-        if not normalized_token:
-            continue
-        normalized_tokens.extend(normalized_token.split())
-    deduped: List[str] = []
-    seen: set[str] = set()
-    for token in normalized_tokens:
-        key: str = token.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(token)
-    return " ".join(deduped)
-
-
 def _is_forbidden_multi_variant_payload(payload: Dict[str, Any]) -> Optional[str]:
     for key in payload.keys():
         normalized_key: str = str(key or "").strip().lower()
         if normalized_key in _FORBIDDEN_VARIANT_KEYS:
             return f"forbidden_key:{normalized_key}"
-    for key in ("title", "description", "cta"):
+    for key in ("title", "description"):
         value: Any = payload.get(key)
         if isinstance(value, list) or isinstance(value, dict):
             return f"invalid_type:{key}"
@@ -237,84 +191,13 @@ def _validate_paragraph_count(description: str) -> int:
     return len(paragraphs)
 
 
-def filter_links(raw_links: Any) -> LinkFilterStats:
-    if not isinstance(raw_links, list):
-        raise RuntimeError("links must be a list of strings")
-    accepted: List[str] = []
-    seen: set[str] = set()
-    duplicates_dropped: int = 0
-    invalid_dropped: int = 0
-    for item in raw_links:
-        if not isinstance(item, str):
-            invalid_dropped += 1
-            continue
-        candidate: str = str(item).strip()
-        if not candidate:
-            continue
-        parts = urlsplit(candidate)
-        if parts.scheme not in {"http", "https"} or not parts.netloc:
-            invalid_dropped += 1
-            continue
-        normalized_key: str = candidate.rstrip("/").lower()
-        if normalized_key in seen:
-            duplicates_dropped += 1
-            continue
-        seen.add(normalized_key)
-        accepted.append(candidate)
-        if len(accepted) >= 3:
-            break
-    return LinkFilterStats(
-        accepted_links=tuple(accepted),
-        duplicates_dropped=duplicates_dropped,
-        invalid_dropped=invalid_dropped,
-    )
-
-
-def normalize_filtered_links(
-    *,
-    links: Tuple[str, ...],
-    normalize_link: Optional[Callable[[str], str]],
-) -> LinkFilterStats:
-    accepted_links: List[str] = []
-    seen: set[str] = set()
-    duplicates_dropped: int = 0
-    invalid_dropped: int = 0
-    for raw_link in links:
-        candidate: str = str(raw_link or "").strip()
-        if not candidate:
-            continue
-        if normalize_link is not None:
-            try:
-                candidate = str(normalize_link(candidate) or "").strip()
-            except Exception:
-                invalid_dropped += 1
-                continue
-        parts = urlsplit(candidate)
-        if parts.scheme not in {"http", "https"} or not parts.netloc:
-            invalid_dropped += 1
-            continue
-        normalized_key: str = candidate.rstrip("/").lower()
-        if normalized_key in seen:
-            duplicates_dropped += 1
-            continue
-        seen.add(normalized_key)
-        accepted_links.append(candidate)
-        if len(accepted_links) >= 3:
-            break
-    return LinkFilterStats(
-        accepted_links=tuple(accepted_links),
-        duplicates_dropped=duplicates_dropped,
-        invalid_dropped=invalid_dropped,
-    )
-
-
 def parse_merge_response_or_raise(
     *,
     provider_name: str,
     model_name: str,
     raw_text: str,
     structured_payload: Optional[Dict[str, Any]] = None,
-) -> Tuple[MergedLanguageContent, LinkFilterStats, int]:
+) -> Tuple[MergedLanguageContent, int]:
     payload: Optional[Dict[str, Any]] = structured_payload
     parse_mode: str = "structured_payload"
     if payload is None:
@@ -328,47 +211,38 @@ def parse_merge_response_or_raise(
 
     title_value: Any = payload.get("title")
     description_value: Any = payload.get("description")
-    cta_value: Any = payload.get("cta")
-    hashtags_value: Any = payload.get("hashtags")
-    links_value: Any = payload.get("links")
     if not isinstance(title_value, str) or not title_value.strip():
         raise RuntimeError("title must be a non-empty string")
     if not isinstance(description_value, str) or not description_value.strip():
         raise RuntimeError("description must be a non-empty string")
-    if not isinstance(cta_value, str) or not cta_value.strip():
-        raise RuntimeError("cta must be a non-empty string")
+
     paragraph_count: int = _validate_paragraph_count(description_value)
     cleaned_description, ok, reasons = clean_and_validate_llm_description(text=description_value)
     if not ok or not cleaned_description:
         raise RuntimeError("description validation failed: " + ("; ".join(reasons) or "unknown"))
 
-    hashtags_line: str = _normalize_hashtags_list(hashtags_value)
-    links_stats: LinkFilterStats = filter_links(links_value)
-    title: str = sanitize_title(title_value, min_chars=1, max_chars=98, allow_emoji=False)
+    title: str = sanitize_title(title_value, min_chars=1, max_chars=99)
     if not title:
         raise RuntimeError("title is invalid after normalization")
+    if contains_emoji(title):
+        raise RuntimeError("title must not contain emoji")
     LOGGER.info(
-        "merge_payload_parsed model=%s parse_mode=%s title_length=%d description_length=%d paragraph_count=%d links_count=%d hashtags_count=%d duplicate_links_dropped=%d invalid_links_dropped=%d",
+        "merge_payload_parsed model=%s parse_mode=%s title_length=%d description_length=%d paragraph_count=%d",
         model_name,
         parse_mode,
         len(title),
         len(cleaned_description),
         paragraph_count,
-        len(links_stats.accepted_links),
-        len([token for token in hashtags_line.split() if token.strip()]),
-        links_stats.duplicates_dropped,
-        links_stats.invalid_dropped,
     )
-    merged_content: MergedLanguageContent = MergedLanguageContent(
-        title=title,
-        description=cleaned_description,
-        cta_text=normalize_single_line_text(cta_value),
-        hashtags_line=hashtags_line or None,
-        links=links_stats.accepted_links,
-        title_selected=title,
-        description_selected=cleaned_description,
-        title_audit=title,
-        description_audit=cleaned_description,
-        llm_model=model_name,
+    return (
+        MergedLanguageContent(
+            title=title,
+            description=cleaned_description,
+            title_selected=title,
+            description_selected=cleaned_description,
+            title_audit=title,
+            description_audit=cleaned_description,
+            llm_model=model_name,
+        ),
+        paragraph_count,
     )
-    return (merged_content, links_stats, paragraph_count)

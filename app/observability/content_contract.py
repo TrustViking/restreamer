@@ -51,21 +51,11 @@ def build_pre_sanitation_text(
     del source_videos
     if merged_content is None:
         return ""
-    base_description: str = (
+    return (
         str(merged_content.description_audit or merged_content.description or "").strip()
         if use_audit_text
         else str(merged_content.description_selected or merged_content.description or "").strip()
     )
-    parts: List[str] = [base_description]
-    if str(merged_content.cta_text or "").strip():
-        parts.append(str(merged_content.cta_text or "").strip())
-    if str(merged_content.hashtags_line or "").strip():
-        parts.append(str(merged_content.hashtags_line or "").strip())
-    for link in merged_content.links:
-        link_text: str = str(link or "").strip()
-        if link_text:
-            parts.append(link_text)
-    return "\n".join(part for part in parts if part).strip()
 
 
 def infer_title_mode(
@@ -121,22 +111,16 @@ def analyze_content_contract(
         if mode == "merge"
         else paragraph_count_actual >= 0
     )
-    hashtags_count: int = len(
-        [token for token in sanitized_result.hashtags_line.split() if token.strip()]
-    )
-    links_allowed_max: int = 3 if mode == "merge" else 0
+    hashtags_count: int = len([token for token in sanitized_result.hashtags_line.split() if token.strip()])
+    links_allowed_max: int = 0
     links_actual: int = len(sanitized_result.source_urls)
-    links_valid: bool = links_actual <= links_allowed_max if mode == "merge" else links_actual == 0
+    links_valid: bool = links_actual == 0
 
     reason_codes: List[str] = []
     if not str(title_text or "").strip():
         reason_codes.append("title_missing")
     if mode == "merge" and not paragraph_count_valid:
         reason_codes.append("paragraph_count_invalid")
-    if mode == "merge" and not sanitized_result.cta_found:
-        reason_codes.append("cta_missing")
-    if mode == "merge" and not sanitized_result.hashtags_found:
-        reason_codes.append("hashtags_missing")
     if mode == "merge" and not links_valid:
         reason_codes.append("links_limit_exceeded")
 

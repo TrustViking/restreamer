@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 
 @dataclass(frozen=True)
@@ -91,9 +91,6 @@ class PreparedVideo:
 class MergedLanguageContent:
     title: str
     description: str
-    cta_text: Optional[str] = None
-    hashtags_line: Optional[str] = None
-    links: Tuple[str, ...] = ()
     title_selected: Optional[str] = None
     description_selected: Optional[str] = None
     title_audit: Optional[str] = None
