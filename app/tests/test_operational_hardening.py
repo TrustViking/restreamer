@@ -228,7 +228,7 @@ class OperationalHardeningTests(unittest.TestCase):
         self.assertEqual(2, snapshot.paragraph_count_min)
         self.assertEqual(4, snapshot.paragraph_count_max)
         self.assertTrue(snapshot.paragraph_count_valid)
-        self.assertEqual(0, snapshot.links_allowed_max)
+        self.assertEqual(3, snapshot.links_allowed_max)
         self.assertEqual(0, snapshot.links_actual)
         self.assertTrue(snapshot.links_valid)
         self.assertNotIn("paragraph_count_invalid", snapshot.contract_reason_codes)

@@ -13,6 +13,7 @@ from app.core.models import (
     PlannedVideo,
 )
 from app.ingest.youtube_metadata import normalize_youtube_video_url
+from app.llm.merge_quality import normalize_merge_description
 from app.observability.runtime_analytics import record_malformed_tail_url_cleanup
 
 
@@ -146,8 +147,13 @@ def sanitize_post_llm_text_for_merged_publish(
             cleanup_event_key=cleanup_event_key,
         )
     )
+    normalized_body_text: str = normalize_merge_description(
+        description=sanitization_result.body_text,
+        language=language,
+        source_texts=(),
+    ).description_text
     return _compose_full_text(
-        body_text=sanitization_result.body_text,
+        body_text=normalized_body_text,
         cta_text=sanitization_result.cta_text,
         hashtags_line=sanitization_result.hashtags_line,
         source_urls=authoritative_source_urls.source_urls,

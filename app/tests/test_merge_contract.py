@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.core.models import MergedLanguageContent
+from app.llm.merge_quality import normalize_merge_description
 from app.llm.merge_parser import parse_merge_response_or_raise, sanitize_title
 from app.llm.merge_service import (
     MergeAttemptFailure,
@@ -102,13 +103,15 @@ The description must cover all source inputs that were merged.
 Start paragraph one with a strong factual hook grounded in the main tension, risk, or key conflict.
 Keep the hook editorial and readable, but never clickbait.
 Do not enumerate sources as 1) 2) 3).
-Do not write hashtags, CTA, or links list.
 Do not output generic slogans or abstract editorial phrasing.
 Do not use emoji in the title.
-Include one compact agenda block with 2 to 5 short bullet-like thesis lines.
-Keep agenda points specific and factual, not generic placeholders.
-Use light emoji only in description (max 3).
-An optional one-line closing sentence is allowed only if it reinforces meaning without CTA.
+Include one compact agenda block with 4 to 7 short bullet-like thesis lines.
+Each bullet must start with one allowed marker: 🔹 📌 🎤 🎥 ⚖ 🌐 ✅.
+Most bullets should start with 🔹.
+Accent markers are rare and optional; use no more than 3 accent markers per theses block.
+Avoid asserting strong person titles or role labels unless they are clearly necessary and well-supported by the sources.
+Optional official links block is allowed before close line with 1 to 3 non-YouTube links from sources.
+An optional one-line close should be practical CTA + 2 to 5 hashtags.
 Return strict JSON with title and description only.
 
 {sources_block}
@@ -144,12 +147,16 @@ Return strict JSON with title and description only.
         self.assertIn("YouTube stream title and description", prompt_text)
         self.assertIn("99 characters", prompt_text)
         self.assertIn("title and description only", prompt_text)
-        self.assertIn("Do not write hashtags, CTA, or links list.", prompt_text)
         self.assertIn("must cover all source inputs", prompt_text)
         self.assertIn("Do not output generic slogans", prompt_text)
         self.assertIn("compact agenda block", prompt_text)
+        self.assertIn("allowed marker", prompt_text)
+        self.assertIn("Most bullets should start with 🔹", prompt_text)
+        self.assertIn("no more than 3 accent markers", prompt_text)
+        self.assertIn("Avoid asserting strong person titles", prompt_text)
+        self.assertIn("Optional official links block", prompt_text)
         self.assertIn("Do not use emoji in the title.", prompt_text)
-        self.assertIn("optional one-line closing sentence", prompt_text)
+        self.assertIn("optional one-line close", prompt_text.lower())
         self.assertNotIn("URL:", prompt_text)
         self.assertIn("Paragraph one.\n\nParagraph two.", prompt_text)
 
@@ -374,11 +381,13 @@ Return strict JSON with title and description only.
         self.assertIsNotNone(attempt.merged)
         joined_logs: str = "\n".join(captured.output)
         self.assertIn("merge_style_coverage", joined_logs)
+        self.assertIn("style_contract_version=v4_merge_quality_hardening", joined_logs)
         self.assertIn("hook_present=yes", joined_logs)
         self.assertIn("agenda_block_present=yes", joined_logs)
         self.assertIn("bullet_points_count=3", joined_logs)
+        self.assertIn("semantic_bullets_count=3", joined_logs)
         self.assertIn("named_entities_preserved=2", joined_logs)
-        self.assertIn("emoji_count=1", joined_logs)
+        self.assertIn("emoji_count=4", joined_logs)
         self.assertIn("source_coverage_total=2/2", joined_logs)
         self.assertIn("source_coverage_ok=yes", joined_logs)
 
@@ -481,6 +490,242 @@ Return strict JSON with title and description only.
         self.assertIsNotNone(attempt.merged)
         self.assertIn("bullet_points_count=5", "\n".join(captured.output))
 
+    def test_semantic_emoji_bullets_are_accepted_and_logged(self) -> None:
+        videos = [
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="Human rights panel",
+                    description="Alice Brown discusses legal safeguards and witness testimony in Brussels.",
+                ),
+                normalized_link="https://youtube.com/watch?v=aaaaaaaaaaa",
+            ),
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="International conference desk",
+                    description="Bob Green shares conference logistics and official initiatives updates.",
+                ),
+                normalized_link="https://youtube.com/watch?v=bbbbbbbbbbb",
+            ),
+        ]
+        styled_response = SimpleNamespace(
+            raw_text=(
+                '{"title":"Brussels panel: legal safeguards and conference agenda","description":"This stream tracks why legal safeguards and testimony matter right now.\\n\\nIn this stream you will see:\\n📌 legal safeguards and testimony timeline\\n⚖ witness rights and justice risks\\n🎤 Alice Brown key remarks\\n🌐 conference initiative milestones\\n\\nJoin the live discussion and share your view. #rights #justice"}'
+            ),
+            structured_payload={
+                "title": "Brussels panel: legal safeguards and conference agenda",
+                "description": (
+                    "This stream tracks why legal safeguards and testimony matter right now.\n\n"
+                    "In this stream you'll see:\n"
+                    "📌 legal safeguards and testimony timeline\n"
+                    "⚖ witness rights and justice risks\n"
+                    "🎤 Alice Brown's key remarks\n"
+                    "🌐 conference initiative milestones\n\n"
+                    "Join the live discussion and share your view. #rights #justice"
+                ),
+            },
+        )
+        with patch("app.llm.merge_service.openai_request_merge", side_effect=[styled_response]), self.assertLogs(
+            level="INFO",
+        ) as captured:
+            attempt = attempt_openai_merge_with_audit(
+                language="en",
+                videos=videos,
+                config=self._config(),
+                attempt_label="TEST",
+                summarize_error=lambda error: str(error),
+                normalize_youtube_url=lambda url: url,
+                no_description_text="no description",
+            )
+        self.assertIsNotNone(attempt.merged)
+        joined_logs: str = "\n".join(captured.output)
+        self.assertIn("semantic_bullets_count=4", joined_logs)
+        self.assertIn("bullets_with_emoji_count=4", joined_logs)
+        self.assertIn("bullets_with_plain_marker_count=0", joined_logs)
+
+    def test_official_links_injected_when_missing_in_llm_output(self) -> None:
+        videos = [
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="Conference briefing",
+                    description=(
+                        "Main update and schedule.\n"
+                        "Official website: https://interfaithconf.org/about?utm_source=yt\n"
+                    ),
+                ),
+                normalized_link="https://youtube.com/watch?v=aaaaaaaaaaa",
+            ),
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="Initiative briefing",
+                    description=(
+                        "More details from initiative desk.\n"
+                        "More information: https://spiritualdiplomats.org/resources?fbclid=abc\n"
+                    ),
+                ),
+                normalized_link="https://youtube.com/watch?v=bbbbbbbbbbb",
+            ),
+        ]
+        response_without_links = SimpleNamespace(
+            raw_text=(
+                '{"title":"Conference and initiative briefing tonight","description":"Tonight we track the conference agenda and initiative updates with concrete facts.\\n\\nIn this stream you will see:\\n🔹 conference timeline and priorities\\n🎤 speaker remarks and context\\n✅ practical next steps for viewers\\n\\nJoin and follow updates. #conference #initiative"}'
+            ),
+            structured_payload={
+                "title": "Conference and initiative briefing tonight",
+                "description": (
+                    "Tonight we track the conference agenda and initiative updates with concrete facts.\n\n"
+                    "In this stream you'll see:\n"
+                    "🔹 conference timeline and priorities\n"
+                    "🎤 speaker remarks and context\n"
+                    "✅ practical next steps for viewers\n\n"
+                    "Join and follow updates. #conference #initiative"
+                ),
+            },
+        )
+        with patch("app.llm.merge_service.openai_request_merge", side_effect=[response_without_links]):
+            attempt = attempt_openai_merge_with_audit(
+                language="en",
+                videos=videos,
+                config=self._config(),
+                attempt_label="TEST",
+                summarize_error=lambda error: str(error),
+                normalize_youtube_url=lambda url: url,
+                no_description_text="no description",
+            )
+        self.assertIsNotNone(attempt.merged)
+        description: str = attempt.merged.description if attempt.merged else ""
+        self.assertIn("🌐 Official links:", description)
+        self.assertIn("https://interfaithconf.org/about", description)
+        self.assertIn("https://spiritualdiplomats.org/resources", description)
+        self.assertNotIn("utm_source", description)
+        self.assertNotIn("fbclid", description)
+
+    def test_official_links_dedup_and_non_youtube_selection(self) -> None:
+        videos = [
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="Source A",
+                    description=(
+                        "Official page: https://interfaithconf.org/about?utm_source=yt\n"
+                        "Official page mirror: https://interfaithconf.org/about?si=1\n"
+                        "Video link: https://youtu.be/aaaaaaaaaaa\n"
+                    ),
+                ),
+                normalized_link="https://youtube.com/watch?v=aaaaaaaaaaa",
+            ),
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="Source B",
+                    description="Initiative: https://allatra.org/?feature=share",
+                ),
+                normalized_link="https://youtube.com/watch?v=bbbbbbbbbbb",
+            ),
+        ]
+        response_without_links = SimpleNamespace(
+            raw_text=(
+                '{"title":"Official resources and initiative update","description":"We summarize the key updates and practical context for tonight.\\n\\nIn this stream you will see:\\n🔹 official agenda and milestones\\n✅ what to follow next\\n\\nJoin and share. #update #resources"}'
+            ),
+            structured_payload={
+                "title": "Official resources and initiative update",
+                "description": (
+                    "We summarize the key updates and practical context for tonight.\n\n"
+                    "In this stream you'll see:\n"
+                    "🔹 official agenda and milestones\n"
+                    "✅ what to follow next\n\n"
+                    "Join and share. #update #resources"
+                ),
+            },
+        )
+        with patch("app.llm.merge_service.openai_request_merge", side_effect=[response_without_links]):
+            attempt = attempt_openai_merge_with_audit(
+                language="en",
+                videos=videos,
+                config=self._config(),
+                attempt_label="TEST",
+                summarize_error=lambda error: str(error),
+                normalize_youtube_url=lambda url: url,
+                no_description_text="no description",
+            )
+        self.assertIsNotNone(attempt.merged)
+        description: str = attempt.merged.description if attempt.merged else ""
+        self.assertIn("https://interfaithconf.org/about", description)
+        self.assertEqual(1, description.count("https://interfaithconf.org/about"))
+        self.assertIn("https://allatra.org/", description)
+        self.assertNotIn("youtu.be", description)
+
+    def test_short_service_lines_are_normalized_to_expected_language(self) -> None:
+        result = normalize_merge_description(
+            description=(
+                "Це короткий вступ про головну тему!\n\n"
+                "In this stream you'll see:\n"
+                "📌 перший акцент\n"
+                "🔹 другий пункт\n\n"
+                "🌐 Official links:\n"
+                "https://example.org\n\n"
+                "Watch the stream and share your thoughts. #подія"
+            ),
+            language="uk",
+            source_texts=(),
+        )
+        self.assertIn("У цьому стрімі ви побачите:", result.description_text)
+        self.assertIn("🌐 Офіційні ресурси:", result.description_text)
+        self.assertIn("Дивіться ефір і діліться думками. #подія", result.description_text)
+        self.assertEqual("needs_normalization", result.diagnostics.semantic_gate_status)
+        self.assertTrue(result.diagnostics.wrong_language_heading_detected)
+
+    def test_accent_marker_cap_is_enforced_and_overflow_is_logged(self) -> None:
+        result = normalize_merge_description(
+            description=(
+                "Focused hook paragraph with enough detail to stay valid!\n\n"
+                "In this stream you'll see:\n"
+                "📌 first\n"
+                "🎤 second\n"
+                "🎥 third\n"
+                "⚖ fourth\n"
+                "🌐 fifth"
+            ),
+            language="en",
+            source_texts=(),
+        )
+        self.assertEqual(3, result.diagnostics.accent_bullets_count)
+        self.assertEqual(2, result.diagnostics.neutral_bullets_count)
+        self.assertTrue(result.diagnostics.accent_overflow)
+        self.assertIn("🔹 fourth", result.description_text)
+        self.assertIn("🔹 fifth", result.description_text)
+
+    def test_block_spacing_and_role_softening_are_stabilized(self) -> None:
+        result = normalize_merge_description(
+            description=(
+                "This hook stays factual and readable with enough context!\n"
+                "In this stream you'll see:\n"
+                "🎤 Pastor Vitaliy Orlov comments on the community response\n"
+                "🔹 relief updates continue\n"
+                "🌐 Official links:\n"
+                "https://example.org\n"
+                "Watch the stream and share your thoughts. #update"
+            ),
+            language="en",
+            source_texts=("Vitaliy Orlov comments on the community response.",),
+        )
+        self.assertIn("\n\nIn this stream you'll see:\n", result.description_text)
+        self.assertIn("\n\n🌐 Official links:\nhttps://example.org\n\n", result.description_text)
+        self.assertIn("🎤 Vitaliy Orlov comments on the community response", result.description_text)
+        self.assertNotIn("Pastor Vitaliy Orlov", result.description_text)
+        self.assertTrue(result.diagnostics.role_softening_applied)
+
+    def test_core_wrong_language_hook_is_hard_reject(self) -> None:
+        result = normalize_merge_description(
+            description=(
+                "This English hook is clearly not in the expected block language and stays unchanged.\n\n"
+                "У цьому стрімі ви побачите:\n"
+                "🔹 пункт один\n"
+                "🔹 пункт два"
+            ),
+            language="uk",
+            source_texts=(),
+        )
+        self.assertEqual("hard_reject", result.diagnostics.semantic_gate_status)
+        self.assertIn("inconsistent_block_language", result.diagnostics.semantic_gate_reason_codes)
+
     def test_post_enforcement_repairs_fixable_single_paragraph_shape(self) -> None:
         summary = MergeRunSummary()
         merged_content = MergedLanguageContent(
@@ -564,6 +809,69 @@ Return strict JSON with title and description only.
         self.assertIsNotNone(attempt.merged)
         self.assertEqual("single_source_plain_ok", attempt.publish_source_label)
         self.assertEqual("Source title", attempt.merged.title if attempt.merged else "")
+
+    def test_merge_service_logs_quality_hardening_fields(self) -> None:
+        videos = [
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="Community briefing",
+                    description="Vitaliy Orlov comments on relief work and public updates.",
+                ),
+                normalized_link="https://youtube.com/watch?v=aaaaaaaaaaa",
+            ),
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="Relief desk",
+                    description="Editors track official resources and practical next steps for viewers.",
+                ),
+                normalized_link="https://youtube.com/watch?v=bbbbbbbbbbb",
+            ),
+        ]
+        styled_response = SimpleNamespace(
+            raw_text=(
+                '{"title":"Community briefing tonight","description":"This hook stays factual and readable with enough context!\\n\\n'
+                'In this stream you\\u0027ll see:\\n📌 first point\\n🎤 Pastor Vitaliy Orlov comments on relief work\\n🎥 third point\\n⚖ fourth point\\n'
+                '🌐 Official links:\\nhttps://example.org\\n\\nWatch the stream and share your thoughts. #update"}'
+            ),
+            structured_payload={
+                "title": "Community briefing tonight",
+                "description": (
+                    "This hook stays factual and readable with enough context!\n\n"
+                    "In this stream you'll see:\n"
+                    "📌 first point\n"
+                    "🎤 Pastor Vitaliy Orlov comments on relief work\n"
+                    "🎥 third point\n"
+                    "⚖ fourth point\n"
+                    "🌐 Official links:\n"
+                    "https://example.org\n\n"
+                    "Watch the stream and share your thoughts. #update"
+                ),
+            },
+        )
+        with patch("app.llm.merge_service.openai_request_merge", side_effect=[styled_response]), self.assertLogs(
+            level="INFO",
+        ) as captured:
+            attempt = attempt_openai_merge_with_audit(
+                language="en",
+                videos=videos,
+                config=self._config(),
+                attempt_label="TEST",
+                summarize_error=lambda error: str(error),
+                normalize_youtube_url=lambda url: url,
+                no_description_text="no description",
+                branch_label="merge",
+                date_key="010130",
+                slot_key="010130_1000",
+            )
+        self.assertIsNotNone(attempt.merged)
+        logs = "\n".join(captured.output)
+        self.assertIn("neutral_bullets_count=", logs)
+        self.assertIn("accent_bullets_count=", logs)
+        self.assertIn("accent_overflow=yes", logs)
+        self.assertIn("block_language_expected=en", logs)
+        self.assertIn("person_role_claims_detected=", logs)
+        self.assertIn("role_softening_applied=yes", logs)
+        self.assertIn("semantic_gate_status=needs_normalization", logs)
 
 
 if __name__ == "__main__":

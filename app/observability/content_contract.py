@@ -5,6 +5,7 @@ import logging
 from typing import Iterable, List, Optional, Sequence
 
 from app.core.models import LanguageMergeAttempt, MergedLanguageContent, PlannedVideo
+from app.llm.merge_quality import inspect_merge_description
 from app.publish.post_llm_sanitation import (
     PostLlmSanitizationResult,
     resolve_post_llm_source_label,
@@ -32,6 +33,8 @@ class ContentContractSnapshot:
     tail_source: str
     contract_status: str
     contract_reason_codes: List[str]
+    semantic_gate_status: str
+    semantic_gate_reason_codes: List[str]
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,7 @@ def analyze_content_contract(
     mode: str,
     title_mode: str,
     tail_source: str,
+    language: str = "other",
 ) -> tuple[ContentContractSnapshot, PostLlmSanitizationResult]:
     del source_videos
     sanitized_result: PostLlmSanitizationResult = sanitize_post_llm_text(
@@ -112,9 +116,9 @@ def analyze_content_contract(
         else paragraph_count_actual >= 0
     )
     hashtags_count: int = len([token for token in sanitized_result.hashtags_line.split() if token.strip()])
-    links_allowed_max: int = 0
+    links_allowed_max: int = 3 if mode == "merge" else 0
     links_actual: int = len(sanitized_result.source_urls)
-    links_valid: bool = links_actual == 0
+    links_valid: bool = links_actual <= links_allowed_max
 
     reason_codes: List[str] = []
     if not str(title_text or "").strip():
@@ -123,11 +127,26 @@ def analyze_content_contract(
         reason_codes.append("paragraph_count_invalid")
     if mode == "merge" and not links_valid:
         reason_codes.append("links_limit_exceeded")
+    semantic_gate_status: str = "ok"
+    semantic_gate_reason_codes: List[str] = []
+    if mode == "merge":
+        quality_diagnostics = inspect_merge_description(
+            description=sanitized_result.body_text,
+            language=language,
+        )
+        semantic_gate_status = quality_diagnostics.semantic_gate_status
+        semantic_gate_reason_codes = list(quality_diagnostics.semantic_gate_reason_codes)
+        reason_codes.extend(
+            code
+            for code in semantic_gate_reason_codes
+            if code not in reason_codes
+        )
 
     contract_status: str = _resolve_contract_status(
         reason_codes=reason_codes,
         title_present=bool(str(title_text or "").strip()),
         paragraph_count_actual=paragraph_count_actual,
+        semantic_gate_status=semantic_gate_status,
     )
     snapshot: ContentContractSnapshot = ContentContractSnapshot(
         mode=mode,
@@ -148,6 +167,8 @@ def analyze_content_contract(
         tail_source=tail_source,
         contract_status=contract_status,
         contract_reason_codes=reason_codes,
+        semantic_gate_status=semantic_gate_status,
+        semantic_gate_reason_codes=semantic_gate_reason_codes,
     )
     return (snapshot, sanitized_result)
 
@@ -180,7 +201,7 @@ def log_content_contract(
     snapshot: ContentContractSnapshot,
 ) -> None:
     logger.info(
-        "%s branch=%s date_key=%s slot_key=%s lang=%s mode=%s title_mode=%s title_present=%s title_chars=%d paragraph_count_min=%d paragraph_count_max=%d paragraph_count_actual=%d paragraph_count_valid=%s cta_present=%s cta_chars=%d hashtags_present=%s hashtags_count=%d links_allowed_max=%d links_actual=%d links_valid=%s tail_source=%s contract_status=%s contract_reason_codes=%s",
+        "%s branch=%s date_key=%s slot_key=%s lang=%s mode=%s title_mode=%s title_present=%s title_chars=%d paragraph_count_min=%d paragraph_count_max=%d paragraph_count_actual=%d paragraph_count_valid=%s cta_present=%s cta_chars=%d hashtags_present=%s hashtags_count=%d links_allowed_max=%d links_actual=%d links_valid=%s tail_source=%s contract_status=%s contract_reason_codes=%s semantic_gate_status=%s semantic_gate_reason_codes=%s",
         event_name,
         branch_label,
         date_key,
@@ -204,6 +225,8 @@ def log_content_contract(
         snapshot.tail_source or "none",
         snapshot.contract_status,
         _join_codes(snapshot.contract_reason_codes),
+        snapshot.semantic_gate_status,
+        _join_codes(snapshot.semantic_gate_reason_codes),
     )
 
 
@@ -289,7 +312,10 @@ def _resolve_contract_status(
     reason_codes: Sequence[str],
     title_present: bool,
     paragraph_count_actual: int,
+    semantic_gate_status: str,
 ) -> str:
+    if semantic_gate_status == "hard_reject":
+        return "fail"
     if not reason_codes:
         return "ok"
     if not title_present or paragraph_count_actual == 0:

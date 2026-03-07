@@ -123,11 +123,21 @@ def build_prepared_videos(
                 )
             language: Optional[str] = language_cache.get(normalized_link)
             if language is None:
-                from app.core.language import detect_language
+                from app.core.language import detect_language_decision, log_language_decision
 
-                language = detect_language(metadata)
+                language_decision = detect_language_decision(metadata)
+                language = language_decision.final_language
+                log_language_decision(
+                    row_number=row.row_number,
+                    decision=language_decision,
+                )
                 language_cache[normalized_link] = language
-            logger.info("Row %d: language=%s", row.row_number, language)
+            else:
+                logger.info(
+                    "Row %d: language=%s (cached)",
+                    row.row_number,
+                    language,
+                )
             normalized_thumbnail: Optional[NormalizedImage] = thumbnail_cache.get(
                 normalized_link
             )

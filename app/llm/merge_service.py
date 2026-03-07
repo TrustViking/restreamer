@@ -5,10 +5,16 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppConfig
 from app.core.models import LanguageMergeAttempt, MergedLanguageContent, PlannedVideo
+from app.llm.merge_quality import (
+    MergeQualityDiagnostics,
+    MergeQualityNormalizationResult,
+    normalize_merge_description,
+)
 from app.llm.merge_parser import (
     build_plain_merged_content_or_raise,
     clean_and_validate_llm_description,
@@ -19,6 +25,45 @@ from app.llm.openai_client import LlmTraceContext, OpenAITransportResult, openai
 
 LOGGER = _get_logger_impl(__name__)
 PRIMARY_ATTEMPTS: int = 2
+STYLE_CONTRACT_VERSION: str = "v4_merge_quality_hardening"
+_SEMANTIC_BULLET_MARKERS: tuple[str, ...] = ("🔹", "📌", "🎤", "🎥", "⚖", "🌐", "✅")
+_SEMANTIC_BULLET_MARKER_SET: set[str] = set(_SEMANTIC_BULLET_MARKERS)
+_BULLET_PLAIN_PATTERN: re.Pattern[str] = re.compile(
+    r"^\s*(?:[-*•▪◦‣–—]|(?:\d+[.)]))\s+\S+",
+    flags=re.UNICODE,
+)
+_URL_PATTERN: re.Pattern[str] = re.compile(r"https?://\S+", flags=re.IGNORECASE)
+_TRACKING_QUERY_KEYS: tuple[str, ...] = (
+    "si",
+    "feature",
+    "pp",
+    "fbclid",
+    "gclid",
+    "igsh",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "ref_src",
+    "ref_url",
+    "spm",
+)
+_OFFICIAL_LINK_CONTEXT_HINTS: tuple[str, ...] = (
+    "official",
+    "website",
+    "initiative",
+    "resource",
+    "resources",
+    "conference",
+    "more information",
+    "details",
+    "site",
+    "official links",
+    "офіцій",
+    "ініціатив",
+    "ресурс",
+    "сайт",
+    "официал",
+)
 _SEMANTIC_TOKEN_PATTERN: re.Pattern[str] = re.compile(
     r"[0-9A-Za-zА-Яа-яЁёІіЇїЄєҐґ]{3,}",
     flags=re.UNICODE,
@@ -144,11 +189,33 @@ class MergeSemanticDiagnostics:
     hook_present: bool
     agenda_block_present: bool
     bullet_points_count: int
+    semantic_bullets_count: int
+    bullets_with_emoji_count: int
+    bullets_with_plain_marker_count: int
+    bullet_marker_types: tuple[str, ...]
     named_entities_preserved: int
     emoji_count: int
     source_coverage_hits: int
     source_coverage_total: int
     source_coverage_by_item: tuple[bool, ...]
+    official_links_found_in_sources: int
+    official_links_kept: int
+    official_links_in_output: int
+    official_links_fill_applied: bool
+    merge_quality: MergeQualityDiagnostics
+
+
+@dataclass(frozen=True)
+class OfficialLinksSelection:
+    found_in_sources: int
+    kept_links: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class OfficialLinksFillResult:
+    description: str
+    links_in_output: int
+    fill_applied: bool
 
 
 def _reason_code_from_error(error: Exception) -> str:
@@ -213,15 +280,208 @@ def _count_emoji(text: str) -> int:
     return len(emoji_pattern.findall(str(text or "")))
 
 
-def _count_bullet_like_lines(text: str) -> int:
-    bullet_pattern: re.Pattern[str] = re.compile(
-        r"^\s*(?:[-*•▪◦‣–—]|(?:\d+[.)]))\s+\S+",
-        flags=re.UNICODE,
+def _bullet_marker_for_line(line: str) -> str:
+    stripped: str = str(line or "").strip()
+    if not stripped:
+        return ""
+    for marker in _SEMANTIC_BULLET_MARKERS:
+        if stripped.startswith(f"{marker} "):
+            return marker
+    if _BULLET_PLAIN_PATTERN.match(stripped):
+        first_token: str = stripped.split(maxsplit=1)[0]
+        return first_token
+    return ""
+
+
+def _is_youtube_host(host: str) -> bool:
+    normalized_host: str = str(host or "").strip().lower()
+    if not normalized_host:
+        return False
+    return (
+        normalized_host.endswith("youtube.com")
+        or normalized_host.endswith("youtu.be")
+        or normalized_host.endswith("youtube-nocookie.com")
     )
-    return sum(
-        1
-        for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
-        if bullet_pattern.match(line.strip())
+
+
+def _normalize_link_candidate(url: str) -> Optional[str]:
+    raw_url: str = str(url or "").strip().strip("<>()[]{}").rstrip(".,;")
+    if not raw_url:
+        return None
+    parts = urlsplit(raw_url)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return None
+    filtered_query_items: List[tuple[str, str]] = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        normalized_key: str = key.lower().strip()
+        if normalized_key.startswith("utm_") or normalized_key in _TRACKING_QUERY_KEYS:
+            continue
+        filtered_query_items.append((key, value))
+    sanitized_query: str = urlencode(filtered_query_items, doseq=True)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, sanitized_query, ""))
+
+
+def _official_links_heading(language: str) -> str:
+    if language == "uk":
+        return "🌐 Офіційні ресурси:"
+    if language == "ru":
+        return "🌐 Официальные ссылки:"
+    return "🌐 Official links:"
+
+
+def _canonical_link_key(url: str) -> str:
+    parts = urlsplit(url)
+    host: str = parts.netloc.lower().strip()
+    path: str = (parts.path or "/").rstrip("/")
+    return f"{host}{path}"
+
+
+def _line_has_official_context(line_text: str) -> bool:
+    normalized_line: str = str(line_text or "").strip().lower()
+    if not normalized_line:
+        return False
+    return any(hint in normalized_line for hint in _OFFICIAL_LINK_CONTEXT_HINTS)
+
+
+def _extract_official_links_from_sources(videos: Sequence[PlannedVideo]) -> OfficialLinksSelection:
+    raw_candidates: List[tuple[str, str]] = []
+    domain_counts: dict[str, int] = {}
+    for video in videos:
+        for line in str(video.metadata.description or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            urls: List[str] = [match.group(0) for match in _URL_PATTERN.finditer(line)]
+            if not urls:
+                continue
+            for url in urls:
+                normalized_url: Optional[str] = _normalize_link_candidate(url)
+                if normalized_url is None:
+                    continue
+                parts = urlsplit(normalized_url)
+                if _is_youtube_host(parts.netloc):
+                    continue
+                raw_candidates.append((normalized_url, line))
+                domain: str = parts.netloc.lower().strip()
+                domain_counts[domain] = domain_counts.get(domain, 0) + 1
+    if not raw_candidates:
+        return OfficialLinksSelection(found_in_sources=0, kept_links=())
+
+    scored_candidates: List[tuple[int, int, str]] = []
+    for index, (url, line_text) in enumerate(raw_candidates):
+        parts = urlsplit(url)
+        domain: str = parts.netloc.lower().strip()
+        score: int = 0
+        if parts.scheme == "https":
+            score += 20
+        if _line_has_official_context(line_text):
+            score += 20
+        score += min(20, domain_counts.get(domain, 1) * 5)
+        if parts.query:
+            score -= 5
+        score += max(0, 15 - (len(url) // 15))
+        scored_candidates.append((score, -index, url))
+
+    scored_candidates.sort(reverse=True)
+    selected_links: List[str] = []
+    seen_keys: set[str] = set()
+    for _, _, url in scored_candidates:
+        canonical_key: str = _canonical_link_key(url)
+        if canonical_key in seen_keys:
+            continue
+        seen_keys.add(canonical_key)
+        selected_links.append(url)
+        if len(selected_links) >= 3:
+            break
+    return OfficialLinksSelection(
+        found_in_sources=len(raw_candidates),
+        kept_links=tuple(selected_links),
+    )
+
+
+def _description_has_official_links_block(description: str) -> bool:
+    normalized: str = str(description or "")
+    if not normalized:
+        return False
+    heading_present: bool = bool(
+        re.search(
+            r"(?im)^\s*(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:\s*$",
+            normalized,
+        )
+    )
+    if not heading_present:
+        return False
+    return any(
+        not _is_youtube_host(urlsplit(match.group(0)).netloc)
+        for match in _URL_PATTERN.finditer(normalized)
+    )
+
+
+def _count_output_official_links(description: str) -> int:
+    seen_keys: set[str] = set()
+    for match in _URL_PATTERN.finditer(str(description or "")):
+        normalized_url: Optional[str] = _normalize_link_candidate(match.group(0))
+        if normalized_url is None:
+            continue
+        if _is_youtube_host(urlsplit(normalized_url).netloc):
+            continue
+        seen_keys.add(_canonical_link_key(normalized_url))
+    return len(seen_keys)
+
+
+def _looks_like_close_paragraph(text: str) -> bool:
+    normalized: str = str(text or "").strip().lower()
+    if not normalized:
+        return False
+    if "#" in normalized:
+        return True
+    return any(hint in normalized for hint in ("subscribe", "join", "watch", "follow", "диві", "долуч", "смотрите", "подпис"))
+
+
+def _inject_official_links_block_if_missing(
+    *,
+    description: str,
+    language: str,
+    official_links: Sequence[str],
+) -> OfficialLinksFillResult:
+    if not official_links:
+        return OfficialLinksFillResult(
+            description=description,
+            links_in_output=_count_output_official_links(description),
+            fill_applied=False,
+        )
+    if _description_has_official_links_block(description):
+        return OfficialLinksFillResult(
+            description=description,
+            links_in_output=_count_output_official_links(description),
+            fill_applied=False,
+        )
+    paragraphs: List[str] = _extract_description_paragraphs_raw(description)
+    if not paragraphs:
+        return OfficialLinksFillResult(
+            description=description,
+            links_in_output=0,
+            fill_applied=False,
+        )
+    links_block: str = "\n".join([_official_links_heading(language), *official_links]).strip()
+    updated_paragraphs: List[str] = list(paragraphs)
+    if len(updated_paragraphs) <= 3:
+        if _looks_like_close_paragraph(updated_paragraphs[-1]):
+            updated_paragraphs.insert(-1, links_block)
+        else:
+            updated_paragraphs.append(links_block)
+    elif _looks_like_close_paragraph(updated_paragraphs[-1]):
+        updated_paragraphs[-1] = f"{links_block}\n{updated_paragraphs[-1].strip()}".strip()
+    else:
+        return OfficialLinksFillResult(
+            description=description,
+            links_in_output=_count_output_official_links(description),
+            fill_applied=False,
+        )
+    updated_description: str = "\n\n".join(
+        paragraph for paragraph in updated_paragraphs if paragraph.strip()
+    ).strip()
+    return OfficialLinksFillResult(
+        description=updated_description,
+        links_in_output=_count_output_official_links(updated_description),
+        fill_applied=True,
     )
 
 
@@ -303,6 +563,9 @@ def _build_merge_semantic_diagnostics(
     *,
     merged_content: MergedLanguageContent,
     videos: Sequence[PlannedVideo],
+    official_links_selection: OfficialLinksSelection,
+    official_links_fill: OfficialLinksFillResult,
+    merge_quality: MergeQualityDiagnostics,
 ) -> MergeSemanticDiagnostics:
     description_text: str = str(merged_content.description or "").strip()
     merged_text_for_anchors: str = f"{merged_content.title.strip()}\n{description_text}"
@@ -328,7 +591,20 @@ def _build_merge_semantic_diagnostics(
         f"{merged_content.title.strip()}\n{description_text}"
     )
     named_entities_preserved: int = len(source_entity_candidates & merged_entities)
-    bullet_points_count: int = _count_bullet_like_lines(description_text)
+    marker_types: List[str] = []
+    semantic_bullets_count: int = 0
+    bullets_with_plain_marker_count: int = 0
+    for line in description_text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        marker: str = _bullet_marker_for_line(line)
+        if not marker:
+            continue
+        if marker in _SEMANTIC_BULLET_MARKER_SET:
+            semantic_bullets_count += 1
+        else:
+            bullets_with_plain_marker_count += 1
+        if marker not in marker_types:
+            marker_types.append(marker)
+    bullet_points_count: int = semantic_bullets_count + bullets_with_plain_marker_count
     agenda_heading_present: bool = _contains_agenda_heading(description_text)
     paragraphs: List[str] = _extract_description_paragraphs_raw(description_text)
     first_paragraph: str = paragraphs[0] if paragraphs else ""
@@ -339,11 +615,20 @@ def _build_merge_semantic_diagnostics(
         hook_present=hook_present,
         agenda_block_present=(bullet_points_count >= 3) or agenda_heading_present,
         bullet_points_count=bullet_points_count,
+        semantic_bullets_count=semantic_bullets_count,
+        bullets_with_emoji_count=semantic_bullets_count,
+        bullets_with_plain_marker_count=bullets_with_plain_marker_count,
+        bullet_marker_types=tuple(marker_types),
         named_entities_preserved=named_entities_preserved,
         emoji_count=_count_emoji(description_text),
         source_coverage_hits=sum(1 for value in source_coverage_by_item if value),
         source_coverage_total=len(source_coverage_by_item),
         source_coverage_by_item=source_coverage_by_item,
+        official_links_found_in_sources=official_links_selection.found_in_sources,
+        official_links_kept=len(official_links_selection.kept_links),
+        official_links_in_output=official_links_fill.links_in_output,
+        official_links_fill_applied=official_links_fill.fill_applied,
+        merge_quality=merge_quality,
     )
 
 
@@ -361,17 +646,28 @@ def _log_merge_style_diagnostics(
         f"{index}:{'yes' if covered else 'no'}"
         for index, covered in enumerate(diagnostics.source_coverage_by_item, start=1)
     )
+    marker_types_text: str = ",".join(diagnostics.bullet_marker_types) or "none"
     LOGGER.info(
-        "merge_style_coverage branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d hook_present=%s agenda_block_present=%s bullet_points_count=%d named_entities_preserved=%d emoji_count=%d source_coverage_total=%d/%d source_coverage_ok=%s source_coverage_by_item=%s",
+        "merge_style_coverage branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d style_contract_version=%s hook_present=%s agenda_block_present=%s bullet_points_count=%d semantic_bullets_count=%d bullets_with_emoji_count=%d bullets_with_plain_marker_count=%d bullet_marker_types=%s neutral_bullets_count=%d accent_bullets_count=%d accent_marker_types=%s accent_overflow=%s block_spacing_ok=%s named_entities_preserved=%d emoji_count=%d source_coverage_total=%d/%d source_coverage_ok=%s source_coverage_by_item=%s official_links_found_in_sources=%d official_links_kept=%d official_links_in_output=%d official_links_fill_applied=%s",
         branch_label,
         date_key,
         slot_key,
         language,
         model_name,
         attempt_index,
+        STYLE_CONTRACT_VERSION,
         "yes" if diagnostics.hook_present else "no",
         "yes" if diagnostics.agenda_block_present else "no",
         diagnostics.bullet_points_count,
+        diagnostics.semantic_bullets_count,
+        diagnostics.bullets_with_emoji_count,
+        diagnostics.bullets_with_plain_marker_count,
+        marker_types_text,
+        diagnostics.merge_quality.neutral_bullets_count,
+        diagnostics.merge_quality.accent_bullets_count,
+        ",".join(diagnostics.merge_quality.accent_marker_types) or "none",
+        "yes" if diagnostics.merge_quality.accent_overflow else "no",
+        "yes" if diagnostics.merge_quality.block_spacing_ok else "no",
         diagnostics.named_entities_preserved,
         diagnostics.emoji_count,
         diagnostics.source_coverage_hits,
@@ -382,6 +678,31 @@ def _log_merge_style_diagnostics(
             else "no"
         ),
         coverage_by_item_text or "none",
+        diagnostics.official_links_found_in_sources,
+        diagnostics.official_links_kept,
+        diagnostics.official_links_in_output,
+        "yes" if diagnostics.official_links_fill_applied else "no",
+    )
+    LOGGER.info(
+        "merge_semantic_gate branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d block_language_expected=%s hook_language_detected=%s lead_in_language_detected=%s links_heading_language_detected=%s cta_language_detected=%s language_consistency_ok=%s wrong_language_heading_detected=%s person_role_claims_detected=%d suspicious_role_labels_detected=%s role_softening_applied=%s semantic_gate_status=%s semantic_gate_reason_codes=%s",
+        branch_label,
+        date_key,
+        slot_key,
+        language,
+        model_name,
+        attempt_index,
+        diagnostics.merge_quality.block_language_expected,
+        diagnostics.merge_quality.hook_language_detected,
+        diagnostics.merge_quality.lead_in_language_detected,
+        diagnostics.merge_quality.links_heading_language_detected,
+        diagnostics.merge_quality.cta_language_detected,
+        "yes" if diagnostics.merge_quality.language_consistency_ok else "no",
+        "yes" if diagnostics.merge_quality.wrong_language_heading_detected else "no",
+        diagnostics.merge_quality.person_role_claims_detected,
+        ",".join(diagnostics.merge_quality.suspicious_role_labels_detected) or "none",
+        "yes" if diagnostics.merge_quality.role_softening_applied else "no",
+        diagnostics.merge_quality.semantic_gate_status,
+        ",".join(diagnostics.merge_quality.semantic_gate_reason_codes) or "none",
     )
 
 
@@ -413,10 +734,16 @@ def _validate_coverage_preserving_merge_or_raise(
     *,
     merged_content: MergedLanguageContent,
     videos: Sequence[PlannedVideo],
+    official_links_selection: OfficialLinksSelection,
+    official_links_fill: OfficialLinksFillResult,
+    merge_quality: MergeQualityDiagnostics,
 ) -> MergeSemanticDiagnostics:
     diagnostics: MergeSemanticDiagnostics = _build_merge_semantic_diagnostics(
         merged_content=merged_content,
         videos=videos,
+        official_links_selection=official_links_selection,
+        official_links_fill=official_links_fill,
+        merge_quality=merge_quality,
     )
     merged_anchors: set[str] = _extract_semantic_anchors(
         f"{merged_content.title.strip()}\n{merged_content.description.strip()}"
@@ -425,8 +752,11 @@ def _validate_coverage_preserving_merge_or_raise(
         raise RuntimeError("description validation failed: per_source_enumeration")
     if len(merged_anchors) < 3:
         raise RuntimeError("description validation failed: semantic_too_generic")
-    if diagnostics.emoji_count > 3:
+    if diagnostics.emoji_count > 10:
         raise RuntimeError("description validation failed: excessive_emoji_usage")
+    if merge_quality.semantic_gate_status == "hard_reject":
+        reason_codes: str = ",".join(merge_quality.semantic_gate_reason_codes) or "semantic_gate"
+        raise RuntimeError(f"description validation failed: {reason_codes}")
 
     source_anchors: List[set[str]] = [
         _extract_semantic_anchors(
@@ -503,14 +833,19 @@ def build_llm_merge_prompt_text(
         "Do not drop a source-specific fact, event, or angle without clear overlap-based reason.\n"
         "Start paragraph one with a strong factual hook grounded in the main tension, risk, or key conflict.\n"
         "Keep the hook editorial and readable, but never clickbait.\n"
-        "Include one compact 'what is in this stream' agenda block using 2 to 5 short bullet-like thesis lines.\n"
+        "Include one compact 'what is in this stream' agenda block using 4 to 7 short thesis bullet lines.\n"
+        "Each thesis line must start with one allowed marker: 🔹 📌 🎤 🎥 ⚖ 🌐 ✅.\n"
+        "Most thesis bullets should start with 🔹.\n"
+        "Accent markers are rare and optional; use no more than 3 accent markers per theses block.\n"
         "Do not present the agenda as SOURCE 1 / SOURCE 2 / SOURCE 3.\n"
         "Keep agenda points specific and factual, not generic placeholders.\n"
         "Preserve important recognizable names from sources when relevant; never invent names.\n"
-        "You may use light emoji in the description only (ideally 1 to 2, maximum 3).\n"
-        "An optional one-line closing sentence is allowed only if it reinforces meaning without CTA.\n"
+        "Avoid asserting strong person titles or role labels unless they are clearly necessary and well-supported by the sources.\n"
+        "Keep marker usage controlled and readable; do not use dash-only bullets as the sole style.\n"
+        "Optional official links block is allowed before close paragraph, with 1 to 3 non-YouTube links from sources.\n"
+        "An optional one-line closing sentence should be a light practical CTA with 2 to 5 hashtags.\n"
         "Do not enumerate sources as 1) 2) 3).\n"
-        "Do not write a dry digest, protocol, CTA block, hashtags, or links list.\n"
+        "Do not write a dry digest, protocol, or generic CTA block.\n"
         "Do not output generic slogans, abstract editorial text, or propagandistic phrasing.\n"
         "Do not replace concrete facts with broad statements like 'an important conversation about everything'.\n"
         'Output only one strict JSON object with exactly these keys: title, description.\n\n'
@@ -881,10 +1216,42 @@ def _attempt_merge_once(
             attempt_stage="validation",
             raw_response_text=raw_response_text,
         ) from error
+    official_links_selection: OfficialLinksSelection = _extract_official_links_from_sources(
+        videos
+    )
+    official_links_fill: OfficialLinksFillResult = _inject_official_links_block_if_missing(
+        description=merged_content.description,
+        language=language,
+        official_links=official_links_selection.kept_links,
+    )
+    if official_links_fill.fill_applied:
+        merged_content = dataclasses.replace(
+            merged_content,
+            description=official_links_fill.description,
+            description_selected=official_links_fill.description,
+            description_audit=official_links_fill.description,
+        )
+    quality_result: MergeQualityNormalizationResult = normalize_merge_description(
+        description=merged_content.description,
+        language=language,
+        source_texts=tuple(
+            f"{video.metadata.title.strip()}\n{video.metadata.description.strip()}" for video in videos
+        ),
+    )
+    if quality_result.description_text != merged_content.description:
+        merged_content = dataclasses.replace(
+            merged_content,
+            description=quality_result.description_text,
+            description_selected=quality_result.description_text,
+            description_audit=quality_result.description_text,
+        )
     try:
         diagnostics: MergeSemanticDiagnostics = _validate_coverage_preserving_merge_or_raise(
             merged_content=merged_content,
             videos=videos,
+            official_links_selection=official_links_selection,
+            official_links_fill=official_links_fill,
+            merge_quality=quality_result.diagnostics,
         )
     except Exception as error:
         raise MergeAttemptFailure(

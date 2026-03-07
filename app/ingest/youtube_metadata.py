@@ -46,9 +46,9 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
         description: str = str(info.get("description") or "").strip()
         thumbnail_url: str = str(info.get("thumbnail") or "").strip()
         video_id: str = str(info.get("id") or "").strip()
-        youtube_language: Optional[str] = (
-            str(info.get("language") or info.get("channel_language") or "").strip()
-            or None
+        youtube_language: Optional[str] = str(info.get("language") or "").strip() or None
+        channel_language: Optional[str] = (
+            str(info.get("channel_language") or "").strip() or None
         )
 
         if not title:
@@ -89,6 +89,7 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
             description=description,
             thumbnail_url=thumbnail_url,
             youtube_language=youtube_language,
+            channel_language=channel_language,
         )
 
 

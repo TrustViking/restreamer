@@ -13,6 +13,7 @@ class VideoMetadata:
     description: str
     thumbnail_url: str
     youtube_language: Optional[str]
+    channel_language: Optional[str] = None
 
 
 @dataclass(frozen=True)
