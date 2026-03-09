@@ -12,6 +12,9 @@ class MergeRunSummary:
     fallback_success: int = 0
     final_failure: int = 0
     paragraph_recovery_used: int = 0
+    polish_requested: int = 0
+    polish_accepted: int = 0
+    polish_rejected: int = 0
 
     @property
     def structured_ok(self) -> int:
@@ -47,13 +50,25 @@ class MergeRunSummary:
     def record_paragraph_recovery_used(self) -> None:
         self.paragraph_recovery_used += 1
 
+    def record_polish_requested(self) -> None:
+        self.polish_requested += 1
+
+    def record_polish_accepted(self) -> None:
+        self.polish_accepted += 1
+
+    def record_polish_rejected(self) -> None:
+        self.polish_rejected += 1
+
     def log_summary(self, logger: logging.Logger) -> None:
         logger.info(
-            "merge_run_summary primary_success=%d validation_rejected=%d primary_retry_used=%d fallback_success=%d final_failure=%d paragraph_recovery_used=%d",
+            "merge_run_summary primary_success=%d validation_rejected=%d primary_retry_used=%d fallback_success=%d final_failure=%d paragraph_recovery_used=%d polish_requested=%d polish_accepted=%d polish_rejected=%d",
             self.primary_success,
             self.validation_rejected,
             self.primary_retry_used,
             self.fallback_success,
             self.final_failure,
             self.paragraph_recovery_used,
+            self.polish_requested,
+            self.polish_accepted,
+            self.polish_rejected,
         )

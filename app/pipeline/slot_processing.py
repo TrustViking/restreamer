@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig
+from app.core.branching import BRANCH_NOMERGE
 from app.core.error_summary import summarize_error
 from app.core.models import (
     LanguageMergeAttempt,
@@ -17,8 +18,8 @@ from app.core.models import (
 from app.ingest.youtube_metadata import normalize_youtube_video_url
 from app.llm import (
     MergeRunSummary,
-    attempt_openai_merge_with_audit,
-    attempt_openai_single_source_translate_with_audit,
+    attempt_llm_merge_with_audit,
+    attempt_llm_single_source_translate_with_audit,
     enforce_openai_merged_paragraphs,
 )
 from app.planning import language_index, planned_video_block_language
@@ -261,11 +262,11 @@ def process_slot(
             )
             merge_attempt: LanguageMergeAttempt
             if run_single_source_translate:
-                merge_attempt = attempt_openai_single_source_translate_with_audit(
+                merge_attempt = attempt_llm_single_source_translate_with_audit(
                     language=language,
                     videos=language_items_for_merge,
                     config=config,
-                    attempt_label=f"OPENAI_TRANSLATE_{language.upper()}",
+                    attempt_label=f"{config.llm_provider.upper()}_TRANSLATE_{language.upper()}",
                     summarize_error=summarize_error,
                     no_description_text=_publish_no_description_text(config.templates),
                     merge_run_summary=merge_run_summary,
@@ -274,11 +275,11 @@ def process_slot(
                     slot_key=slot_key,
                 )
             else:
-                merge_attempt = attempt_openai_merge_with_audit(
+                merge_attempt = attempt_llm_merge_with_audit(
                     language=language,
                     videos=language_items_for_merge,
                     config=config,
-                    attempt_label=f"OPENAI_MERGE_{language.upper()}",
+                    attempt_label=f"{config.llm_provider.upper()}_MERGE_{language.upper()}",
                     summarize_error=summarize_error,
                     normalize_youtube_url=normalize_youtube_video_url,
                     no_description_text=_publish_no_description_text(config.templates),
@@ -288,19 +289,38 @@ def process_slot(
                     slot_key=slot_key,
                 )
             logger.info(
-                "[%s] LLM merge result language=%s provider=%s model=%s success=%s",
+                "[%s] LLM merge result language=%s provider=%s model=%s generator_model=%s polish_model=%s polish_accepted=%s success=%s",
                 branch_label,
                 language,
                 config.llm_provider,
                 merge_attempt.model_name,
+                merge_attempt.generator_model_name or "unknown",
+                merge_attempt.polish_model_name or "none",
+                (
+                    "yes"
+                    if merge_attempt.polish_accepted
+                    else ("no" if merge_attempt.polish_accepted is False else "n/a")
+                ),
                 "yes" if merge_attempt.merged is not None else "no",
             )
-            merge_audit_by_language[language] = merge_attempt
-            record_branch_model_used(
-                date_key=date_key,
-                branch_label=branch_label,
-                model_name=merge_attempt.model_name,
+            logger.info(
+                "branch_field_sources branch_type=%s date_key=%s slot_key=%s language=%s title_source=%s hook_source=%s hashtags_source=%s body_source=%s",
+                branch_label,
+                date_key,
+                slot_key,
+                language,
+                merge_attempt.title_source or "unknown",
+                merge_attempt.hook_source or "unknown",
+                merge_attempt.hashtags_source or "unknown",
+                merge_attempt.body_source or "unknown",
             )
+            merge_audit_by_language[language] = merge_attempt
+            for used_model_name in merge_attempt.used_model_names or (merge_attempt.model_name,):
+                record_branch_model_used(
+                    date_key=date_key,
+                    branch_label=branch_label,
+                    model_name=used_model_name,
+                )
             if merge_attempt.merged is not None:
                 merged_content_value: MergedLanguageContent = merge_attempt.merged
                 if len(language_items_for_merge) > 1:
@@ -356,16 +376,29 @@ def process_slot(
                 merge_expected=False,
                 merge_skip_reason=(
                     "processing_mode_nomerge"
-                    if branch_label.endswith("nomerge") or branch_label == "nomerge"
+                    if branch_label.endswith(BRANCH_NOMERGE) or branch_label == BRANCH_NOMERGE
                     else "llm_unavailable"
                 ),
             )
-        if branch_label.endswith("nomerge") or branch_label == "nomerge":
+        if branch_label.endswith(BRANCH_NOMERGE) or branch_label == BRANCH_NOMERGE:
             logger.info(
                 "[%s] slot=%s merge skipped by processing_mode=nomerge; append mode active.",
                 branch_label,
                 slot_key,
             )
+            for language in ("uk", "en", "ru", "other"):
+                if language_groups[language]:
+                    logger.info(
+                        "branch_field_sources branch_type=%s date_key=%s slot_key=%s language=%s title_source=%s hook_source=%s hashtags_source=%s body_source=%s",
+                        branch_label,
+                        date_key,
+                        slot_key,
+                        language,
+                        "nomerge",
+                        "nomerge",
+                        "fallback_none",
+                        "nomerge",
+                    )
         else:
             logger.info(
                 "[%s] slot=%s merge skipped (LLM unavailable). Using append mode.",

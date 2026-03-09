@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig
+from app.core.branching import (
+    BRANCH_MERGE_MAIN,
+    BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+    BRANCH_NOMERGE,
+)
 from app.core.env_flags import sheets_link_normalize_report_limit_from_env
 from app.core.models import PlannedVideo, PreparedVideo
 from app.ingest.youtube_metadata import YouTubeMetadataFetcher
@@ -38,6 +43,7 @@ from app.observability.runtime_analytics import (
     record_telegram_skipped,
 )
 from app.observability.startup_health import log_section, run_startup_health_checks
+from app.observability.startup_summary import LlmSummarySnapshot
 from app.paths.name_builder import NamePathBuilder
 from app.planning import log_link_normalization_report, planned_video_time_key
 from app.planning.batch_planner import (
@@ -51,6 +57,7 @@ from app.telegram.bot_client import TelegramBotClient
 from .daily_doc_publish import publish_daily_document
 from .daily_telegram_publish import publish_daily_telegram
 from .runtime_services import BatchServices, build_runtime_services
+from .slot_packaging import build_packaging_slot_result
 from .slot_processing import SlotProcessResult, process_slot
 
 
@@ -59,6 +66,7 @@ class AuditBranch:
     name: str
     processing_mode: str
     llm_merge_enabled: bool
+    packaging_overlay_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,36 +140,46 @@ class BatchRunner:
         audit_mode: str,
         llm_merge_available: bool,
     ) -> List[AuditBranch]:
+        merge_gpt_branch: AuditBranch = AuditBranch(
+            name=BRANCH_MERGE_MAIN,
+            processing_mode="merge",
+            llm_merge_enabled=llm_merge_available,
+            packaging_overlay_enabled=False,
+        )
+        packaging_branch: AuditBranch = AuditBranch(
+            name=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+            processing_mode="merge",
+            llm_merge_enabled=llm_merge_available,
+            packaging_overlay_enabled=True,
+        )
         if audit_mode == "unite":
             return [
                 AuditBranch(
-                    name="nomerge",
+                    name=BRANCH_NOMERGE,
                     processing_mode="nomerge",
                     llm_merge_enabled=False,
                 ),
-                AuditBranch(
-                    name="merge",
-                    processing_mode="merge",
-                    llm_merge_enabled=llm_merge_available,
-                ),
+                merge_gpt_branch,
+                packaging_branch,
             ]
         if audit_mode == "merge":
-            return [
-                AuditBranch(
-                    name="merge",
-                    processing_mode="merge",
-                    llm_merge_enabled=llm_merge_available,
-                )
-            ]
+            return [merge_gpt_branch, packaging_branch]
         return [
             AuditBranch(
-                name="nomerge",
+                name=BRANCH_NOMERGE,
                 processing_mode="nomerge",
                 llm_merge_enabled=False,
             )
         ]
 
-    def run(self, *, dry_run: bool, audit_mode: str, run_id: str) -> None:
+    def run(
+        self,
+        *,
+        dry_run: bool,
+        audit_mode: str,
+        run_id: str,
+        llm_summary: LlmSummarySnapshot,
+    ) -> None:
         run_started_at: float = time.perf_counter()
         if not self._config.google_enabled:
             raise RuntimeError("Для batch режима GOOGLE_ENABLED должен быть включен.")
@@ -169,7 +187,16 @@ class BatchRunner:
         merge_run_summary: MergeRunSummary = MergeRunSummary()
         self._last_merge_run_summary = merge_run_summary
         branch_failures: List[str] = []
-        branches_for_log: str = "nomerge,merge" if audit_mode == "unite" else audit_mode
+        if audit_mode == "unite":
+            branches_for_log = ",".join(
+                (BRANCH_NOMERGE, BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
+            )
+        elif audit_mode == "merge":
+            branches_for_log = ",".join(
+                (BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
+            )
+        else:
+            branches_for_log = BRANCH_NOMERGE
         self._logger.info(
             "audit_start audit_mode=%s branches=%s run_id=%s dry_run=%s",
             audit_mode,
@@ -186,6 +213,7 @@ class BatchRunner:
                 dry_run=dry_run,
                 audit_mode=audit_mode,
                 run_id=run_id,
+                llm_summary=llm_summary,
             )
             if not prepared_context.prepared_videos:
                 log_link_normalization_report(
@@ -253,12 +281,14 @@ class BatchRunner:
         dry_run: bool,
         audit_mode: str,
         run_id: str,
+        llm_summary: LlmSummarySnapshot,
     ) -> PreparedRunContext:
         self._log_section("Startup Health Check")
         startup_health_started_at: float = time.perf_counter()
         llm_merge_available: bool = run_startup_health_checks(
             logger=self._logger,
             config=self._config,
+            llm_summary=llm_summary,
             services=services,
             telegram_client=self._telegram_client,
             resolve_logger_name_meta=self._resolve_logger_name_meta,
@@ -407,6 +437,7 @@ class BatchRunner:
             }
         )
         for date_key in date_keys:
+            slot_results_cache: Dict[Tuple[str, str, str], SlotProcessResult] = {}
             for branch in branches:
                 self._execute_single_branch_date(
                     services=services,
@@ -417,6 +448,7 @@ class BatchRunner:
                     merge_run_summary=merge_run_summary,
                     audit_mode=audit_mode,
                     branch_failures=branch_failures,
+                    slot_results_cache=slot_results_cache,
                 )
 
     def _execute_single_branch_date(
@@ -430,8 +462,11 @@ class BatchRunner:
         merge_run_summary: MergeRunSummary,
         audit_mode: str,
         branch_failures: List[str],
+        slot_results_cache: Dict[Tuple[str, str, str], SlotProcessResult],
     ) -> None:
         date_videos_all: List[PlannedVideo] = processed_by_branch.get(branch.name, {}).get(date_key, [])
+        if not date_videos_all and branch.packaging_overlay_enabled:
+            date_videos_all = processed_by_branch.get(BRANCH_MERGE_MAIN, {}).get(date_key, [])
         if not date_videos_all:
             self._logger.info(
                 "audit_branch_skip branch=%s date_key=%s reason=empty_branch_items",
@@ -449,6 +484,7 @@ class BatchRunner:
                 date_videos_all=date_videos_all,
                 dry_run=dry_run,
                 merge_run_summary=merge_run_summary,
+                slot_results_cache=slot_results_cache,
             )
             branch_total_ms: int = int(round((time.perf_counter() - branch_started_at) * 1000.0))
             record_branch_total_ms(
@@ -498,6 +534,7 @@ class BatchRunner:
         date_videos_all: List[PlannedVideo],
         dry_run: bool,
         merge_run_summary: MergeRunSummary,
+        slot_results_cache: Dict[Tuple[str, str, str], SlotProcessResult],
     ) -> None:
         slot_processing_started_at: float = time.perf_counter()
         slots_by_time: Dict[str, List[PlannedVideo]] = self._group_date_videos_by_slot_time(
@@ -529,19 +566,37 @@ class BatchRunner:
         )
         slot_results: List[SlotProcessResult] = []
         for slot_time_key in sorted(slots_by_time.keys()):
-            slot_results.append(
-                process_slot(
+            if branch.packaging_overlay_enabled:
+                base_slot_result: Optional[SlotProcessResult] = slot_results_cache.get(
+                    (BRANCH_MERGE_MAIN, date_key, slot_time_key)
+                )
+                if base_slot_result is None:
+                    raise RuntimeError(
+                        f"Packaging branch requires {BRANCH_MERGE_MAIN} slot result first: date={date_key} slot={slot_time_key}"
+                    )
+                packaged_slot_result: SlotProcessResult = build_packaging_slot_result(
                     logger=self._logger,
                     config=self._config,
-                    videos=slots_by_time[slot_time_key],
-                    date_key=date_key,
-                    slot_time_key=slot_time_key,
-                    llm_merge_enabled=branch.llm_merge_enabled,
-                    cet_tz=self._cet_tz,
-                    merge_run_summary=merge_run_summary,
+                    source_slot_result=base_slot_result,
                     branch_label=branch.name,
+                    date_key=date_key,
                 )
+                slot_results.append(packaged_slot_result)
+                slot_results_cache[(branch.name, date_key, slot_time_key)] = packaged_slot_result
+                continue
+            processed_slot_result: SlotProcessResult = process_slot(
+                logger=self._logger,
+                config=self._config,
+                videos=slots_by_time[slot_time_key],
+                date_key=date_key,
+                slot_time_key=slot_time_key,
+                llm_merge_enabled=branch.llm_merge_enabled,
+                cet_tz=self._cet_tz,
+                merge_run_summary=merge_run_summary,
+                branch_label=branch.name,
             )
+            slot_results.append(processed_slot_result)
+            slot_results_cache[(branch.name, date_key, slot_time_key)] = processed_slot_result
         slot_processing_ms: int = int(round((time.perf_counter() - slot_processing_started_at) * 1000.0))
         record_stage_duration(stage_name="slot_processing", elapsed_ms=slot_processing_ms)
         log_stage_timing(
@@ -653,28 +708,44 @@ class BatchRunner:
         record_branch_completed(branch_label=branch.name)
 
     def _log_audit_branch_compare(self, *, date_key: str) -> None:
-        merge_state = get_branch_date_summary(date_key=date_key, branch_label="merge")
-        nomerge_state = get_branch_date_summary(date_key=date_key, branch_label="nomerge")
-        if merge_state is None and nomerge_state is None:
+        merge_gpt_state = get_branch_date_summary(
+            date_key=date_key,
+            branch_label=BRANCH_MERGE_MAIN,
+        )
+        packaging_state = get_branch_date_summary(
+            date_key=date_key,
+            branch_label=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+        )
+        nomerge_state = get_branch_date_summary(date_key=date_key, branch_label=BRANCH_NOMERGE)
+        if merge_gpt_state is None and packaging_state is None and nomerge_state is None:
             return
         comparison_status: str = (
-            "complete" if merge_state is not None and nomerge_state is not None else "incomplete"
+            "complete"
+            if merge_gpt_state is not None and packaging_state is not None and nomerge_state is not None
+            else "incomplete"
         )
         log_method = self._logger.info if comparison_status == "complete" else self._logger.debug
         log_method(
-            "audit_branch_compare date_key=%s merge_branch_executed=%s nomerge_branch_executed=%s merge_doc_created=%s nomerge_doc_created=%s merge_telegram_sent=%s nomerge_telegram_sent=%s merge_contract_failures=%d nomerge_contract_failures=%d merge_recovered_degradations=%d nomerge_recovered_degradations=%d merge_models_used=%s nomerge_models_used=%s comparison_status=%s",
+            "audit_branch_compare date_key=%s merge_main_executed=%s packaging_executed=%s nomerge_executed=%s merge_main_doc_created=%s packaging_doc_created=%s nomerge_doc_created=%s merge_main_telegram_sent=%s packaging_telegram_sent=%s nomerge_telegram_sent=%s merge_main_contract_failures=%d packaging_contract_failures=%d nomerge_contract_failures=%d merge_main_models_used=%s packaging_models_used=%s nomerge_models_used=%s comparison_status=%s",
             date_key,
-            "yes" if merge_state is not None else "no",
+            "yes" if merge_gpt_state is not None else "no",
+            "yes" if packaging_state is not None else "no",
             "yes" if nomerge_state is not None else "no",
-            "yes" if merge_state is not None and merge_state.docs_created > 0 else "no",
+            "yes" if merge_gpt_state is not None and merge_gpt_state.docs_created > 0 else "no",
+            "yes" if packaging_state is not None and packaging_state.docs_created > 0 else "no",
             "yes" if nomerge_state is not None and nomerge_state.docs_created > 0 else "no",
-            "yes" if merge_state is not None and merge_state.telegram_sent > 0 else "no",
+            "yes" if merge_gpt_state is not None and merge_gpt_state.telegram_sent > 0 else "no",
+            "yes" if packaging_state is not None and packaging_state.telegram_sent > 0 else "no",
             "yes" if nomerge_state is not None and nomerge_state.telegram_sent > 0 else "no",
-            merge_state.contract_failures if merge_state is not None else 0,
+            merge_gpt_state.contract_failures if merge_gpt_state is not None else 0,
+            packaging_state.contract_failures if packaging_state is not None else 0,
             nomerge_state.contract_failures if nomerge_state is not None else 0,
-            merge_state.contract_recovered if merge_state is not None else 0,
-            nomerge_state.contract_recovered if nomerge_state is not None else 0,
-            ",".join(sorted(merge_state.models_used)) if merge_state is not None and merge_state.models_used else "none",
+            ",".join(sorted(merge_gpt_state.models_used))
+            if merge_gpt_state is not None and merge_gpt_state.models_used
+            else "none",
+            ",".join(sorted(packaging_state.models_used))
+            if packaging_state is not None and packaging_state.models_used
+            else "none",
             ",".join(sorted(nomerge_state.models_used)) if nomerge_state is not None and nomerge_state.models_used else "none",
             comparison_status,
         )

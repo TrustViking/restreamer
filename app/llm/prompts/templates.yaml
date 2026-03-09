@@ -152,7 +152,7 @@ llm:
     {sources_block}
 
 files:
-  doc_title_template: "{date} ({processing_mode}) Ежедневные стримы / Everyday streams {creation_stamp}"
+  doc_title_template: "{date}_{processing_mode}_Everyday_streams{llm_models_segment}_{creation_stamp}"
   preview_name_template: "{index}_{language}_{title}"
   language_codes:
     uk: "UA"

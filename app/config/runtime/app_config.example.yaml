@@ -1,8 +1,33 @@
 # Template config: copy this file to app/config/runtime/app_config.yaml and fill real values.
 # app/config/runtime/app_config.example.yaml should stay free of environment-specific secrets/ids.
 # Environment toggles (.env):
+# RESTREAMER_LOGGER_NAME=restreamer
+# TELEGRAM_BOT_TOKEN=
+# TELEGRAM_CHAT_ID=
+# DPSK_API_KEY=sk-
+# GPT_API_KEY=sk-proj-
+# OPENAI_ADMIN_KEY=sk-admin-
+# OPENAI_PROJECT_ID=proj_
+# GOOGLE_SERVICE_ACCOUNT_PATH=
+# GOOGLE_AUTH_MODE=oauth
+# GOOGLE_OAUTH_CREDENTIALS_PATH=secrets/credentials.json
+# GOOGLE_OAUTH_TOKEN_PATH=secrets/token.json
+# LOG_DIR=D:/_projects/restreamer/logs
+# APP_CONFIG_PATH=app/config/runtime/app_config.yaml
 # STG_SHEETS_LINK_WRITEBACK=True
 # STG_STRIP_CHAPTER_TIMESTAMPS=True
+# OPENAI_MODEL=gpt-5.1
+# DEEPSEEK_MODEL=deepseek-chat
+# MAIN_MODEL=OPENAI_MODEL
+# FALLBACK_MODEL=DEEPSEEK_MODEL
+# STG_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+# STG_DEEPSEEK_TIMEOUT_SECONDS=600
+# STG_OPENAI_TIMEOUT_SEC=600
+# STG_OPENAI_MAX_OUTPUT_TOKENS=3000
+# STG_OPENAI_PRE_DELAY_SEC=5
+# OPENAI_USAGE_MODELS=gpt-5.1
+# OPENAI_USAGE_TIMEOUT_SEC=30
+# OPENAI_USAGE_VERBOSE_LOG=1
 app:
   processing:
     mode: audit
@@ -19,8 +44,8 @@ app:
     contacts: "@contact1 @contact2"
 
   paths:
-    local_image_dir_template: "D:\\_Download\\_stream\\y2b\\{language}\\{date}"
-    local_doc_dir_template: "D:\\_Download\\_stream\\y2b\\docs\\{date}"
+    local_image_dir_template: "./image/{language}/{date}"
+    local_doc_dir_template: "./docs/{date}"
 
   timezones:
     kiev: "Europe/Kyiv"

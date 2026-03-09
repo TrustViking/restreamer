@@ -287,15 +287,31 @@ def build_authoritative_merged_source_urls(
         seen_canonical_urls.add(canonical_key)
         authoritative_urls.append(normalized_source_url)
 
+    preserved_non_youtube_tail_urls: List[str] = []
+    for extracted_tail_url in extracted_tail_urls:
+        cleaned_tail_url: str = str(extracted_tail_url or "").strip()
+        if not cleaned_tail_url or not _is_complete_source_url(cleaned_tail_url):
+            continue
+        if _is_youtube_url(cleaned_tail_url):
+            continue
+        canonical_key = cleaned_tail_url.rstrip("/")
+        if canonical_key in seen_canonical_urls:
+            duplicate_urls_removed += 1
+            continue
+        seen_canonical_urls.add(canonical_key)
+        authoritative_urls.append(cleaned_tail_url)
+        preserved_non_youtube_tail_urls.append(cleaned_tail_url)
+
     extracted_tail_dropped_count: int = malformed_tail_urls_dropped + sum(
         1 for item in extracted_tail_urls if not _is_complete_source_url(item)
     )
     LOGGER.info(
-        "merged_source_urls_built lang=%s inspected=%d emitted=%d deduped=%d source_urls_mode=authoritative_from_inputs",
+        "merged_source_urls_built lang=%s inspected=%d emitted=%d deduped=%d preserved_non_youtube_tail_urls=%d source_urls_mode=authoritative_from_inputs_plus_non_youtube_tail",
         language,
         len(source_videos),
         len(authoritative_urls),
         duplicate_urls_removed,
+        len(preserved_non_youtube_tail_urls),
     )
     if extracted_tail_dropped_count > 0:
         LOGGER.info(
@@ -555,9 +571,15 @@ def _sanitize_source_url(url: str) -> Optional[str]:
         return None
     if not _is_complete_source_url(sanitized_url):
         return None
+    if not _is_youtube_url(sanitized_url):
+        return sanitized_url
     try:
         return normalize_youtube_video_url(sanitized_url)
     except Exception:
+        LOGGER.info(
+            "non_authoritative_youtube_tail_url_dropped reason=youtube_normalization_failed raw=%r",
+            sanitized_url,
+        )
         return None
 
 
@@ -570,11 +592,25 @@ def _normalize_authoritative_video_url(video: PlannedVideo) -> Optional[str]:
     for candidate in candidates:
         if not candidate or not _is_complete_source_url(candidate):
             continue
+        if not _is_youtube_url(candidate):
+            return _sanitize_url(candidate)
         try:
             return normalize_youtube_video_url(candidate)
         except Exception:
             continue
     return None
+
+
+def _is_youtube_url(url: str) -> bool:
+    cleaned_url: str = str(url or "").strip().strip("<>()[]{}").rstrip(".,;")
+    if not cleaned_url:
+        return False
+    try:
+        parts = urlsplit(cleaned_url)
+    except Exception:
+        return False
+    host: str = str(parts.netloc or "").strip().lower()
+    return host in {"youtu.be", "www.youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com"}
 
 
 def _is_complete_source_url(url: str) -> bool:

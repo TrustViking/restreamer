@@ -7,6 +7,7 @@
 ########################################
 secrets/
 secrets/.env
+!secrets/.env.example
 secrets/token.json
 secrets/credentials.json
 *.env
@@ -75,6 +76,8 @@ output/
 outputs/
 downloads/
 data/
+docs/
+image/
 
 ########################################
 # IDE / OS / local workspace stuff
@@ -98,6 +101,3 @@ app/config/runtime/app_config.yaml
 app/config/runtime/app_config.*.yaml
 !app/config/runtime/app_config.example.yaml
 
-.gpt.txt
-.gpt.local.txt
-.openai.admin.local.txt

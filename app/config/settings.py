@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+from app.config.llm_routing import ResolvedLlmRouting
+
 
 @dataclass(frozen=True)
 class AppTemplates:
@@ -87,8 +89,18 @@ class OpenAISettings:
 
 
 @dataclass(frozen=True)
+class DeepSeekSettings:
+    base_url: str
+    model: str
+    reasoning_model: Optional[str]
+    timeout_sec: float
+    max_retries: int
+
+
+@dataclass(frozen=True)
 class LlmSettings:
     provider: str
+    routing: ResolvedLlmRouting
     source_desc_max_chars: int
     run_if_single_source: bool
 
@@ -117,6 +129,7 @@ class AppSettings:
     google: GoogleSettings
     telegram: TelegramSettings
     openai: OpenAISettings
+    deepseek: DeepSeekSettings
     llm: LlmSettings
     paths: PathSettings
     timezones: TimezoneSettings
@@ -165,11 +178,21 @@ class AppConfig:
     processing_mode: str
     now_tz_mode: str
     llm_provider: str
+    llm_routing: ResolvedLlmRouting
+    configured_main_model_alias: str
+    configured_fallback_model_alias: str
+    llm_main_model: str
+    llm_fallback_model: str
     openai_model_primary: str
     openai_model_fallback: str
     openai_timeout_sec: float
     openai_max_output_tokens: int
     openai_pre_delay_sec: float
+    deepseek_base_url: str
+    deepseek_model: str
+    deepseek_reasoning_model: Optional[str]
+    deepseek_timeout_sec: float
+    deepseek_max_retries: int
     llm_source_desc_max_chars: int
     llm_run_if_single_source: bool
     preview_filename_max_stem: int
@@ -222,8 +245,16 @@ def to_app_settings(config: AppConfig) -> AppSettings:
             max_output_tokens=config.openai_max_output_tokens,
             pre_delay_sec=config.openai_pre_delay_sec,
         ),
+        deepseek=DeepSeekSettings(
+            base_url=config.deepseek_base_url,
+            model=config.deepseek_model,
+            reasoning_model=config.deepseek_reasoning_model,
+            timeout_sec=config.deepseek_timeout_sec,
+            max_retries=config.deepseek_max_retries,
+        ),
         llm=LlmSettings(
             provider=config.llm_provider,
+            routing=config.llm_routing,
             source_desc_max_chars=config.llm_source_desc_max_chars,
             run_if_single_source=config.llm_run_if_single_source,
         ),

@@ -6,6 +6,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.bootstrap.run_context import StartupContext
+from app.core.branching import (
+    BRANCH_MERGE_MAIN,
+    BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+    BRANCH_NOMERGE,
+)
 from app.llm.merge_run_summary import MergeRunSummary
 from app.observability.content_contract import analyze_content_contract
 from app.observability import runtime_analytics
@@ -22,10 +28,12 @@ class OperationalHardeningTests(unittest.TestCase):
     def test_runtime_summary_uses_audit_mode_aware_branch_summary(self) -> None:
         logger = logging.getLogger("operational-hardening-runtime")
         runtime_analytics.setup_runtime_analytics(logger=logger, debug_enabled=False)
-        runtime_analytics.record_branch_started(branch_label="nomerge")
-        runtime_analytics.record_branch_completed(branch_label="nomerge")
-        runtime_analytics.record_branch_started(branch_label="merge")
-        runtime_analytics.record_branch_failed(branch_label="merge")
+        runtime_analytics.record_branch_started(branch_label=BRANCH_NOMERGE)
+        runtime_analytics.record_branch_completed(branch_label=BRANCH_NOMERGE)
+        runtime_analytics.record_branch_started(branch_label=BRANCH_MERGE_MAIN)
+        runtime_analytics.record_branch_completed(branch_label=BRANCH_MERGE_MAIN)
+        runtime_analytics.record_branch_started(branch_label=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
+        runtime_analytics.record_branch_failed(branch_label=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
         with self.assertLogs(logger, level="INFO") as captured:
             runtime_analytics.log_run_completed(
                 logger=logger,
@@ -41,7 +49,10 @@ class OperationalHardeningTests(unittest.TestCase):
             )
         text: str = "\n".join(captured.output)
         self.assertIn("audit_mode=unite", text)
-        self.assertIn("branch_summary=nomerge:success,merge:failed", text)
+        self.assertIn(
+            "branch_summary=nomerge:success,merge_main:success,merge_main_fallback_packaging:failed",
+            text,
+        )
         self.assertIn("validation_rejected=1", text)
         self.assertIn("primary_retry_used=1", text)
         self.assertIn("final_failure=1", text)
@@ -49,8 +60,8 @@ class OperationalHardeningTests(unittest.TestCase):
     def test_informational_warning_does_not_downgrade_success_status(self) -> None:
         logger = logging.getLogger("operational-hardening-informational")
         runtime_analytics.setup_runtime_analytics(logger=logger, debug_enabled=False)
-        runtime_analytics.record_branch_started(branch_label="nomerge")
-        runtime_analytics.record_branch_completed(branch_label="nomerge")
+        runtime_analytics.record_branch_started(branch_label=BRANCH_NOMERGE)
+        runtime_analytics.record_branch_completed(branch_label=BRANCH_NOMERGE)
         log_warning_informational(logger, "Informational warning only")
         with self.assertLogs(logger, level="INFO") as captured:
             runtime_analytics.log_run_completed(
@@ -70,8 +81,10 @@ class OperationalHardeningTests(unittest.TestCase):
     def test_operational_warning_downgrades_status(self) -> None:
         logger = logging.getLogger("operational-hardening-operational")
         runtime_analytics.setup_runtime_analytics(logger=logger, debug_enabled=False)
-        runtime_analytics.record_branch_started(branch_label="merge")
-        runtime_analytics.record_branch_completed(branch_label="merge")
+        runtime_analytics.record_branch_started(branch_label=BRANCH_MERGE_MAIN)
+        runtime_analytics.record_branch_completed(branch_label=BRANCH_MERGE_MAIN)
+        runtime_analytics.record_branch_started(branch_label=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
+        runtime_analytics.record_branch_completed(branch_label=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
         log_warning_operational(logger, "Operational warning")
         with self.assertLogs(logger, level="INFO") as captured:
             runtime_analytics.log_run_completed(
@@ -108,24 +121,29 @@ class OperationalHardeningTests(unittest.TestCase):
         with patch("builtins.print") as print_mock, self.assertLogs(logger, level="INFO") as captured:
             log_startup_summary(
                 logger,
-                run_id="run",
-                argv_list=["--audit-mode", "unite"],
-                args_audit_mode="unite",
-                args_debug=False,
-                args_dry_run=False,
-                processing_mode="audit",
-                config_processing_mode_raw="audit",
-                project_root=paths.project_root,
-                entrypoint_path=paths.entrypoint_path,
-                runtime_config_path=paths.runtime_config_path,
-                templates_path=paths.templates_path,
-                secrets_env_path=paths.secrets_env_path,
-                oauth_credentials_path=paths.oauth_credentials_path,
-                oauth_token_path=paths.oauth_token_path,
+                StartupContext(
+                    run_id="run",
+                    argv_list=["--audit-mode", "unite"],
+                    args_audit_mode="unite",
+                    args_debug=False,
+                    args_dry_run=False,
+                    processing_mode="audit",
+                    config_processing_mode_raw="audit",
+                    project_root=paths.project_root,
+                    entrypoint_path=paths.entrypoint_path,
+                    runtime_config_path=paths.runtime_config_path,
+                    templates_path=paths.templates_path,
+                    secrets_env_path=paths.secrets_env_path,
+                    oauth_credentials_path=paths.oauth_credentials_path,
+                    oauth_token_path=paths.oauth_token_path,
+                ),
             )
         text: str = "\n".join(captured.output)
         self.assertFalse(print_mock.called)
-        self.assertIn("resolved_audit_mode=unite branches=nomerge,merge", text)
+        self.assertIn(
+            "resolved_audit_mode=unite branches=nomerge,merge_main,merge_main_fallback_packaging",
+            text,
+        )
         self.assertIn(str(paths.templates_path), text)
         self.assertIn(str(paths.secrets_env_path), text)
 
@@ -161,6 +179,18 @@ class OperationalHardeningTests(unittest.TestCase):
             run_startup_health_checks(
                 logger=logger,
                 config=config,
+                llm_summary=SimpleNamespace(
+                    provider="openai",
+                    primary_provider="openai",
+                    fallback_provider="openai",
+                    effective_primary_model="gpt-5.1",
+                    effective_fallback_model="gpt-5-mini",
+                    merge_stage_model="gpt-5.1",
+                    packaging_stage_model="gpt-5-mini",
+                    base_url="default_openai",
+                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    providers_used=("openai",),
+                ),
                 services=services,
                 telegram_client=telegram_client,
                 resolve_logger_name_meta=lambda: ("logger", "test", False),
@@ -170,7 +200,7 @@ class OperationalHardeningTests(unittest.TestCase):
             )
         text: str = "\n".join(captured.output)
         self.assertIn("primary_attempts=2", text)
-        self.assertIn("fallback_enabled=yes", text)
+        self.assertIn("packaging_stage_enabled=yes", text)
         self.assertNotIn("max_retries=0", text)
 
     def test_nomerge_branch_does_not_call_llm_merge(self) -> None:
@@ -194,7 +224,7 @@ class OperationalHardeningTests(unittest.TestCase):
             google_contacts="contacts",
         )
         with patch("app.pipeline.slot_processing.planned_video_block_language", return_value="en"), patch(
-            "app.pipeline.slot_processing.attempt_openai_merge_with_audit"
+            "app.pipeline.slot_processing.attempt_llm_merge_with_audit"
         ) as merge_mock:
             process_slot(
                 logger=logger,

@@ -151,6 +151,74 @@ class GoogleDriveClient:
             )
         return file_id, public_url
 
+    def find_file_by_name_and_size(
+        self,
+        *,
+        folder_id: str,
+        file_name: str,
+        expected_size: int,
+    ) -> Optional[Tuple[str, int]]:
+        safe_name: str = str(file_name or "").strip()
+        if not safe_name:
+            return None
+        LOGGER.info(
+            'drive_preview_duplicate_lookup_started folder_id=%s filename="%s" expected_size=%d',
+            folder_id,
+            safe_name,
+            int(expected_size),
+        )
+        escaped_name: str = safe_name.replace("'", "\\'")
+        query: str = (
+            f"name='{escaped_name}' and "
+            "trashed=false and "
+            f"'{folder_id}' in parents"
+        )
+        response: Dict[str, Any] = cast(
+            Dict[str, Any],
+            self._drive_service.files()
+            .list(
+                q=query,
+                spaces="drive",
+                fields="files(id,name,size)",
+                pageSize=20,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+            )
+            .execute(),
+        )
+        files_found: List[Dict[str, Any]] = cast(List[Dict[str, Any]], response.get("files", []))
+        LOGGER.info(
+            'drive_preview_duplicate_lookup_candidates folder_id=%s filename="%s" expected_size=%d candidate_count=%d',
+            folder_id,
+            safe_name,
+            int(expected_size),
+            len(files_found),
+        )
+        for item in files_found:
+            item_id: str = str(item.get("id") or "").strip()
+            item_size: int = int(str(item.get("size") or "0").strip() or "0")
+            if item_id and item_size == int(expected_size):
+                LOGGER.info(
+                    'drive_preview_duplicate_lookup_result folder_id=%s filename="%s" expected_size=%d status=duplicate_found file_id=%s matched_size=%d',
+                    folder_id,
+                    safe_name,
+                    int(expected_size),
+                    item_id,
+                    item_size,
+                )
+                return (item_id, item_size)
+        candidate_sizes: str = ",".join(
+            str(int(str(item.get("size") or "0").strip() or "0")) for item in files_found
+        ) or "none"
+        LOGGER.info(
+            'drive_preview_duplicate_lookup_result folder_id=%s filename="%s" expected_size=%d status=duplicate_not_found candidate_sizes=%s',
+            folder_id,
+            safe_name,
+            int(expected_size),
+            candidate_sizes,
+        )
+        return None
+
     def ensure_folder(self, *, parent_folder_id: str, folder_name: str) -> str:
         safe_name: str = str(folder_name or "").strip()
         if not safe_name:

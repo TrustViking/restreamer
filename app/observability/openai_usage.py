@@ -280,23 +280,7 @@ def log_openai_limits_and_usage(
         _format_top_models_usage(per_model),
     )
     spent_usd_month: float = float(summary_payload.get("spent_usd_month") or 0.0)
-    budget_raw: str = str(os.getenv("OPENAI_MONTHLY_BUDGET_USD", "") or "").strip()
-    budget_usd: Optional[float] = None
-    if budget_raw:
-        try:
-            budget_usd = float(budget_raw)
-        except Exception:
-            budget_usd = None
-    if budget_usd is not None:
-        remaining_usd: float = float(budget_usd) - spent_usd_month
-        logger.info(
-            "OPENAI COST month spent_usd=%.6f remaining_usd=%.6f budget_usd=%.6f",
-            spent_usd_month,
-            remaining_usd,
-            float(budget_usd),
-        )
-    else:
-        logger.info("OPENAI COST month spent_usd=%.6f", spent_usd_month)
+    logger.info("OPENAI COST month spent_usd=%.6f", spent_usd_month)
 
 
 def log_run_local_openai_usage(logger: logging.Logger) -> None:

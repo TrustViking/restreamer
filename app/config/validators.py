@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 from datetime import timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -57,16 +56,6 @@ def setting_as_optional_str(payload: Dict[str, Any], dotted_key: str) -> Optiona
         current = current[key]
     value: str = str(current).strip()
     return value or None
-
-
-def resolve_llm_provider_from_env(*, logger: Optional[logging.Logger] = None) -> str:
-    raw_value: str = os.getenv("STG_LLM_PROVIDER", "openai").strip().lower()
-    if raw_value in {"gpt", "openai"}:
-        return "openai"
-    raise RuntimeError(
-        "Only OpenAI is supported in this application. "
-        f"Unsupported STG_LLM_PROVIDER={raw_value!r}."
-    )
 
 
 def normalize_processing_mode(value: str, *, source: str) -> str:

@@ -139,6 +139,7 @@ class NamePathBuilder:
         date_key: str,
         created_at: datetime,
         processing_mode: str,
+        llm_models_segment: str = "",
     ) -> str:
         creation_stamp: str = created_at.strftime("%H%M_%d%m%y")
         return _render_template(
@@ -147,6 +148,7 @@ class NamePathBuilder:
                 "date": date_key,
                 "creation_stamp": creation_stamp,
                 "processing_mode": processing_mode,
+                "llm_models_segment": str(llm_models_segment or "").strip(),
             },
         )
 
@@ -154,7 +156,11 @@ class NamePathBuilder:
         if self._local_doc_dir_template is None:
             return None
         base_dir: str = self._local_doc_dir_template.format(date=date_key)
-        safe_stem: str = re.sub(r"[^A-Za-z0-9._-]+", "_", str(doc_title or "").strip())
+        safe_stem: str = re.sub(
+            r"[^A-Za-z0-9._,\-\[\]]+",
+            "_",
+            str(doc_title or "").strip(),
+        )
         safe_stem = re.sub(r"_+", "_", safe_stem).strip("._-")
         safe_stem = safe_stem[: self._max_filename_stem].rstrip("._-") or "document"
         return Path(base_dir) / f"{safe_stem}.docx"

@@ -8,11 +8,13 @@ from app.config.settings import AppConfig
 from app.core.constants import LOGGER_NAME_ENV_VAR
 from app.core.env_flags import llm_allow_in_dry_run_from_env
 from app.core.error_summary import summarize_error
+from app.core.branching import audit_branch_labels
 from app.observability.runtime_analytics import (
     log_error_event,
     log_warning_informational,
     log_warning_operational,
 )
+from app.observability.startup_summary import LlmSummarySnapshot
 from app.pipeline.runtime_services import BatchServices
 from app.telegram.bot_client import TelegramBotClient
 
@@ -29,44 +31,79 @@ def _resolve_llm_merge_enabled(
     *,
     logger: logging.Logger,
     config: AppConfig,
+    llm_summary: LlmSummarySnapshot,
     dry_run: bool,
     resolved_audit_mode: str,
     run_id: str,
 ) -> bool:
     primary_attempts: int = 2
-    fallback_enabled: bool = True
     log_section(logger=logger, title="LLM API")
     logger.info(
         "run_id=%s Processing mode selected: audit audit_mode=%s",
         run_id,
         resolved_audit_mode,
     )
-    if resolved_audit_mode == "unite":
-        logger.info("LLM selection: audit branch execution=nomerge,merge")
-    else:
-        logger.info("LLM selection: audit branch execution=%s", resolved_audit_mode)
+    logger.info(
+        "LLM selection: audit branch execution=%s",
+        ",".join(audit_branch_labels(audit_mode=resolved_audit_mode)),
+    )
     logger.info(
         "run_id=%s LLM provider selected: %s",
         run_id,
-        config.llm_provider,
+        llm_summary.provider,
     )
     logger.info(
-        "OpenAI merge policy model.primary=%s model.fallback=%s primary_attempts=%d fallback_enabled=%s timeout_sec=%.1f max_output_tokens=%d source_desc_max_chars=%d pre_delay_sec=%.1f",
-        config.openai_model_primary,
-        config.openai_model_fallback,
+        "LLM policy: provider=%s primary_model=%s fallback_model=%s base_url=%s usage_reporting_mode=%s",
+        llm_summary.provider,
+        llm_summary.effective_primary_model,
+        llm_summary.effective_fallback_model,
+        llm_summary.base_url,
+        llm_summary.usage_reporting_mode,
+    )
+    logger.info(
+        "LLM merge policy provider=%s primary_attempts=%d packaging_stage_enabled=%s merge_stage_model=%s packaging_stage_model=%s max_output_tokens=%d source_desc_max_chars=%d pre_delay_sec=%.1f",
+        llm_summary.provider,
         primary_attempts,
-        "yes" if fallback_enabled else "no",
-        config.openai_timeout_sec,
+        "yes" if bool(str(llm_summary.packaging_stage_model or "").strip()) else "no",
+        llm_summary.merge_stage_model,
+        llm_summary.packaging_stage_model,
         config.openai_max_output_tokens,
         config.llm_source_desc_max_chars,
         config.openai_pre_delay_sec,
     )
-    gpt_api_key_present: bool = bool(os.getenv("GPT_API_KEY", "").strip())
+    if llm_summary.primary_provider == "deepseek":
+        logger.info(
+            "DeepSeek merge policy model.primary=%s model.fallback=%s timeout_sec=%.1f base_url=%s",
+            llm_summary.effective_primary_model,
+            llm_summary.effective_fallback_model,
+            config.deepseek_timeout_sec,
+            config.deepseek_base_url,
+        )
+        logger.info(
+            "LLM usage reporting note: provider=deepseek openai_usage_summary_expected=no reporting_mode=%s",
+            llm_summary.usage_reporting_mode,
+        )
+    else:
+        logger.info(
+            "OpenAI merge policy model.primary=%s model.fallback=%s timeout_sec=%.1f",
+            llm_summary.effective_primary_model,
+            llm_summary.effective_fallback_model,
+            config.openai_timeout_sec,
+        )
+        logger.info(
+            "LLM usage reporting note: provider=openai openai_usage_summary_expected=yes reporting_mode=%s",
+            llm_summary.usage_reporting_mode,
+        )
+    provider_api_ready: bool = False
+    if "openai" in llm_summary.providers_used and bool(os.getenv("GPT_API_KEY", "").strip()):
+        provider_api_ready = True
+    if "deepseek" in llm_summary.providers_used and bool(os.getenv("DPSK_API_KEY", "").strip()):
+        provider_api_ready = True
     llm_merge_enabled: bool = False
     merge_mode_enabled: bool = resolved_audit_mode in {"merge", "unite"}
     llm_allow_in_dry_run: bool = llm_allow_in_dry_run_from_env()
     if merge_mode_enabled:
-        llm_merge_enabled = gpt_api_key_present
+        llm_merge_enabled = provider_api_ready
         if dry_run and not llm_allow_in_dry_run:
             llm_merge_enabled = False
             logger.info(
@@ -75,7 +112,7 @@ def _resolve_llm_merge_enabled(
     if llm_merge_enabled:
         logger.info(
             "LLM selection: provider=%s enabled for merge stage.",
-            config.llm_provider,
+            llm_summary.provider,
         )
     else:
         if not merge_mode_enabled:
@@ -96,6 +133,7 @@ def run_startup_health_checks(
     *,
     logger: logging.Logger,
     config: AppConfig,
+    llm_summary: LlmSummarySnapshot,
     services: BatchServices,
     telegram_client: TelegramBotClient,
     resolve_logger_name_meta: LoggerNameMetaResolver,
@@ -215,6 +253,7 @@ def run_startup_health_checks(
     llm_merge_enabled: bool = _resolve_llm_merge_enabled(
         logger=logger,
         config=config,
+        llm_summary=llm_summary,
         dry_run=dry_run,
         resolved_audit_mode=resolved_audit_mode,
         run_id=run_id,

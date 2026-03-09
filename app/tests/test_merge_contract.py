@@ -84,11 +84,15 @@ class MergeContractParserTests(unittest.TestCase):
 class MergeContractServiceTests(unittest.TestCase):
     def _config(self) -> SimpleNamespace:
         return SimpleNamespace(
+            llm_main_model="gpt-5.1",
+            llm_fallback_model="deepseek-chat",
             openai_model_primary="gpt-5.1",
-            openai_model_fallback="gpt-5-mini",
+            openai_model_fallback="gpt-5.1",
             openai_timeout_sec=30.0,
             openai_max_output_tokens=1000,
             openai_pre_delay_sec=0.0,
+            deepseek_model="deepseek-chat",
+            deepseek_base_url="https://api.deepseek.com/v1",
             llm_source_desc_max_chars=500,
             templates=SimpleNamespace(
                 llm_language_names_json='{"en":"English"}',
@@ -160,7 +164,7 @@ Return strict JSON with title and description only.
         self.assertNotIn("URL:", prompt_text)
         self.assertIn("Paragraph one.\n\nParagraph two.", prompt_text)
 
-    def test_invalid_primary_response_triggers_retry_then_fallback(self) -> None:
+    def test_invalid_primary_response_triggers_retry_then_final_failure_when_deepseek_is_polish_only(self) -> None:
         responses = [
             SimpleNamespace(raw_text='{"variants":[{"title":"bad"}]}', structured_payload={"variants": [{"title": "bad"}]}),
             SimpleNamespace(raw_text='{"title":"","description":"bad"}', structured_payload={"title": "", "description": "bad"}),
@@ -178,10 +182,10 @@ Return strict JSON with title and description only.
                 no_description_text="no description",
             )
 
-        self.assertEqual(3, request_mock.call_count)
-        self.assertIsNotNone(attempt.merged)
-        self.assertEqual("gpt-5-mini", attempt.model_name)
-        self.assertEqual("Final title", attempt.merged.title if attempt.merged else "")
+        self.assertEqual(2, request_mock.call_count)
+        self.assertIsNone(attempt.merged)
+        self.assertEqual("gpt-5.1", attempt.model_name)
+        self.assertEqual("merge_failed", attempt.publish_source_label)
 
     def test_merge_attempt_failure_carries_reason_code(self) -> None:
         failure = MergeAttemptFailure(
@@ -260,10 +264,10 @@ Return strict JSON with title and description only.
         self.assertIn("slot_key=010130_1000", joined_logs)
         self.assertIn("language=en", joined_logs)
         self.assertIn("stage=primary", joined_logs)
-        self.assertIn("stage=fallback", joined_logs)
+        self.assertIn("fallback_used=no", joined_logs)
         self.assertIn("code=invalid_title", joined_logs)
 
-    def test_semantic_generic_merge_is_rejected_and_fallback_can_recover(self) -> None:
+    def test_semantic_generic_merge_is_rejected_without_semantic_deepseek_fallback(self) -> None:
         generic_response = SimpleNamespace(
             raw_text=(
                 '{"title":"Important discussion","description":"A meaningful discussion about values and change.'
@@ -274,16 +278,9 @@ Return strict JSON with title and description only.
                 "description": "A meaningful discussion about values and change.\n\nAn inspiring talk about the big picture.",
             },
         )
-        fallback_success = SimpleNamespace(
-            raw_text='{"title":"Final title","description":"Paragraph one.\\n\\nParagraph two."}',
-            structured_payload={
-                "title": "Final title",
-                "description": "Paragraph one.\n\nParagraph two.",
-            },
-        )
         with patch(
             "app.llm.merge_service.openai_request_merge",
-            side_effect=[generic_response, generic_response, fallback_success],
+            side_effect=[generic_response, generic_response],
         ) as request_mock:
             attempt = attempt_openai_merge_with_audit(
                 language="en",
@@ -294,9 +291,9 @@ Return strict JSON with title and description only.
                 normalize_youtube_url=lambda url: url,
                 no_description_text="no description",
             )
-        self.assertEqual(3, request_mock.call_count)
-        self.assertIsNotNone(attempt.merged)
-        self.assertEqual("gpt-5-mini", attempt.model_name)
+        self.assertEqual(2, request_mock.call_count)
+        self.assertIsNone(attempt.merged)
+        self.assertEqual("merge_failed", attempt.publish_source_label)
 
     def test_per_source_dump_is_rejected(self) -> None:
         per_source_dump = SimpleNamespace(
@@ -308,16 +305,9 @@ Return strict JSON with title and description only.
                 "description": "SOURCE 1: Point one.\n\nSOURCE 2: Point two.",
             },
         )
-        fallback_success = SimpleNamespace(
-            raw_text='{"title":"Final title","description":"Paragraph one.\\n\\nParagraph two."}',
-            structured_payload={
-                "title": "Final title",
-                "description": "Paragraph one.\n\nParagraph two.",
-            },
-        )
         with patch(
             "app.llm.merge_service.openai_request_merge",
-            side_effect=[per_source_dump, per_source_dump, fallback_success],
+            side_effect=[per_source_dump, per_source_dump],
         ) as request_mock:
             attempt = attempt_openai_merge_with_audit(
                 language="en",
@@ -328,8 +318,8 @@ Return strict JSON with title and description only.
                 normalize_youtube_url=lambda url: url,
                 no_description_text="no description",
             )
-        self.assertEqual(3, request_mock.call_count)
-        self.assertIsNotNone(attempt.merged)
+        self.assertEqual(2, request_mock.call_count)
+        self.assertIsNone(attempt.merged)
 
     def test_style_coverage_log_is_emitted_for_successful_merge(self) -> None:
         videos = [

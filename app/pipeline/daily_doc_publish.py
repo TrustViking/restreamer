@@ -8,6 +8,10 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig, AppTemplates
+from app.core.branching import (
+    BRANCH_MERGE_MAIN,
+    BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+)
 from app.core.error_summary import summarize_error
 from app.core.models import MergedLanguageContent, PlannedVideo
 from app.google import GoogleDocsClient, GoogleDriveClient
@@ -23,6 +27,10 @@ from app.observability.content_contract import (
 )
 from app.observability.runtime_analytics import record_contract_result
 from app.paths.name_builder import NamePathBuilder
+from app.paths.output_naming import (
+    collect_used_runtime_models,
+    render_doc_title_models_segment,
+)
 from app.planning import format_time_key_for_display
 from app.publish import GoogleDocsReportWriter
 from app.publish.doc_helpers import _build_descriptions_summary, _build_titles_summary
@@ -72,11 +80,10 @@ def _build_doc_header_text(
 
 
 def _document_processing_mode_label(*, processing_mode: str, branch_label: str) -> str:
-    normalized_processing_mode: str = str(processing_mode or "").strip()
     normalized_branch_label: str = str(branch_label or "").strip().lower()
     if normalized_branch_label.startswith("audit/"):
-        return f"audit_{normalized_processing_mode}"
-    return normalized_processing_mode
+        return normalized_branch_label.replace("/", "_")
+    return normalized_branch_label or str(processing_mode or "").strip()
 
 
 def _export_document_to_local_docx(
@@ -153,12 +160,22 @@ def publish_daily_document(
                 f"{_language_heading(language, config.templates)} - {time_display}\n{merged_title}"
             )
     language_time_titles: str = "\n\n".join(header_blocks).strip()
+    used_runtime_models = collect_used_runtime_models(
+        slot_results=slot_results,
+        configured_primary_model=config.llm_main_model,
+        configured_fallback_model=config.llm_fallback_model,
+    )
     doc_title: str = name_builder.build_doc_title(
         date_key=date_key,
         created_at=datetime.now(kiev_tz),
         processing_mode=_document_processing_mode_label(
             processing_mode=processing_mode,
             branch_label=branch_label,
+        ),
+        llm_models_segment=(
+            render_doc_title_models_segment(used_runtime_models=used_runtime_models)
+            if branch_label in {BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING}
+            else ""
         ),
     )
     first_header_context: Dict[str, str] = dict(slot_results[0].header_context)

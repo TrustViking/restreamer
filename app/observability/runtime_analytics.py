@@ -5,6 +5,13 @@ import logging
 import time
 from typing import Dict, List, Optional, Set
 
+from app.bootstrap.run_context import RunContext
+from app.core.branching import (
+    BRANCH_MERGE_MAIN,
+    BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+    BRANCH_NOMERGE,
+)
+
 WARNING_CATEGORY_INFORMATIONAL: str = "informational"
 WARNING_CATEGORY_OPERATIONAL: str = "operational"
 
@@ -429,45 +436,36 @@ def log_run_started(
 
 
 def log_run_context(
-    *,
     logger: logging.Logger,
-    run_id: str,
-    processing_mode: str,
-    audit_mode: str,
-    config_processing_mode: str,
-    audit_branches: List[str],
-    debug_enabled: bool,
-    dry_run: bool,
-    google_enabled: bool,
-    telegram_enabled: bool,
-    llm_provider: str,
-    openai_primary: str,
-    openai_fallback: str,
-    sheet_id: str,
-    sheet_range: str,
-    sheets_link_writeback: bool,
-    local_doc_export_enabled: bool,
-    strip_chapter_timestamps: bool,
+    run_context: RunContext,
 ) -> None:
     logger.info(
-        "run_context run_id=%s processing_mode=%s audit_mode=%s config_processing_mode=%s audit_branches=%s debug=%s dry_run=%s google_enabled=%s telegram_enabled=%s llm_provider=%s openai_primary=%s openai_fallback=%s sheet_id=%s sheet_range=%s sheets_link_writeback=%s local_doc_export_enabled=%s strip_chapter_timestamps=%s",
-        run_id,
-        processing_mode,
-        audit_mode,
-        config_processing_mode or "default",
-        ",".join(audit_branches) if audit_branches else "none",
-        "yes" if debug_enabled else "no",
-        "yes" if dry_run else "no",
-        "yes" if google_enabled else "no",
-        "yes" if telegram_enabled else "no",
-        llm_provider or "unknown",
-        openai_primary or "unknown",
-        openai_fallback or "unknown",
-        sheet_id or "unknown",
-        sheet_range or "unknown",
-        "yes" if sheets_link_writeback else "no",
-        "yes" if local_doc_export_enabled else "no",
-        "yes" if strip_chapter_timestamps else "no",
+        "run_context run_id=%s processing_mode=%s audit_mode=%s config_processing_mode=%s audit_branches=%s debug=%s dry_run=%s google_enabled=%s telegram_enabled=%s llm_provider=%s llm_primary_provider=%s llm_fallback_provider=%s llm_effective_primary_model=%s llm_effective_fallback_model=%s merge_stage_model=%s packaging_stage_model=%s llm_base_url=%s llm_usage_reporting_mode=%s openai_primary=%s openai_fallback=%s sheet_id=%s sheet_range=%s sheets_link_writeback=%s local_doc_export_enabled=%s strip_chapter_timestamps=%s",
+        run_context.run_id,
+        run_context.processing_mode,
+        run_context.audit_mode,
+        run_context.config_processing_mode or "default",
+        ",".join(run_context.audit_branches) if run_context.audit_branches else "none",
+        "yes" if run_context.debug_enabled else "no",
+        "yes" if run_context.dry_run else "no",
+        "yes" if run_context.google_enabled else "no",
+        "yes" if run_context.telegram_enabled else "no",
+        run_context.llm_provider or "unknown",
+        run_context.llm_primary_provider or "unknown",
+        run_context.llm_fallback_provider or "unknown",
+        run_context.llm_effective_primary_model or "unknown",
+        run_context.llm_effective_fallback_model or "not_applicable",
+        run_context.llm_merge_stage_model or "unknown",
+        run_context.llm_packaging_stage_model or "not_applicable",
+        run_context.llm_base_url or "not_applicable",
+        run_context.llm_usage_reporting_mode or "unknown",
+        run_context.llm_effective_primary_model or "unknown",
+        run_context.llm_effective_fallback_model or "unknown",
+        run_context.sheet_id or "unknown",
+        run_context.sheet_range or "unknown",
+        "yes" if run_context.sheets_link_writeback else "no",
+        "yes" if run_context.local_doc_export_enabled else "no",
+        "yes" if run_context.strip_chapter_timestamps else "no",
     )
 
 
@@ -648,7 +646,7 @@ def _format_branch_summary(
 ) -> str:
     if not state.branch_results:
         return "<not_run>"
-    if audit_mode != "unite":
+    if audit_mode == "nomerge":
         branch_state: BranchAnalyticsState = state.branch_results.get(
             audit_mode,
             BranchAnalyticsState(),
@@ -657,8 +655,17 @@ def _format_branch_summary(
             f"{audit_mode}:"
             f"{'failed' if branch_state.failed else ('success' if branch_state.completed else 'not_run')}"
         )
+    branch_labels: tuple[str, ...]
+    if audit_mode == "merge":
+        branch_labels = (BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
+    else:
+        branch_labels = (
+            BRANCH_NOMERGE,
+            BRANCH_MERGE_MAIN,
+            BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+        )
     branch_parts: list[str] = []
-    for branch_label in ("nomerge", "merge"):
+    for branch_label in branch_labels:
         branch_state: BranchAnalyticsState = state.branch_results.get(
             branch_label,
             BranchAnalyticsState(),

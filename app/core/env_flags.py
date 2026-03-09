@@ -50,15 +50,6 @@ def sheets_link_normalize_report_limit_from_env() -> int:
     return load_int_env("STG_SHEETS_LINK_NORMALIZE_REPORT_LIMIT", 20, min_value=1)
 
 
-def stg_debug_prompt_to_file_from_env() -> bool:
-    raw_value: str = os.getenv("STG_DEBUG_PROMPT_TO_FILE", "").strip().lower()
-    return raw_value in {"1", "true", "yes", "on"}
-
-
-def stg_debug_prompt_dir_from_env() -> str:
-    return os.getenv("STG_DEBUG_PROMPT_DIR", "_debug_prompts").strip() or "_debug_prompts"
-
-
 def llm_allow_in_dry_run_from_env() -> bool:
     return load_bool_env("STG_LLM_ALLOW_IN_DRY_RUN", False)
 

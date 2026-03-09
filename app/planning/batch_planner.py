@@ -217,6 +217,7 @@ def materialize_prepared_previews(
             extension=prepared.thumbnail.extension,
         )
         local_image_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_preview_size: int = len(prepared.thumbnail.bytes_data)
         if not local_image_path.exists():
             local_image_path.write_bytes(prepared.thumbnail.bytes_data)
             logger.info(
@@ -225,6 +226,22 @@ def materialize_prepared_previews(
                 local_image_path,
             )
         else:
+            existing_local_size: int = int(local_image_path.stat().st_size)
+            if existing_local_size == expected_preview_size:
+                logger.info(
+                    'preview_save_skipped_duplicate_local row=%d filename="%s" size=%d path="%s"',
+                    prepared.row_number,
+                    local_image_path.name,
+                    existing_local_size,
+                    local_image_path,
+                )
+            else:
+                local_image_path.write_bytes(prepared.thumbnail.bytes_data)
+                logger.info(
+                    "Row %d: shared preview overwritten at %s",
+                    prepared.row_number,
+                    local_image_path,
+                )
             logger.info(
                 "Row %d: shared preview reused at %s",
                 prepared.row_number,
@@ -259,6 +276,34 @@ def materialize_prepared_previews(
             preview_target_folder_id = drive_folder_cache[drive_folder_key]
             if preview_target_folder_id and local_image_path.exists():
                 try:
+                    duplicate_drive_file = drive_client.find_file_by_name_and_size(
+                        folder_id=preview_target_folder_id,
+                        file_name=local_image_path.name,
+                        expected_size=local_image_path.stat().st_size,
+                    )
+                    if duplicate_drive_file is not None:
+                        logger.info(
+                            'preview_save_skipped_duplicate_drive row=%d filename="%s" size=%d folder_id=%s file_id=%s',
+                            prepared.row_number,
+                            local_image_path.name,
+                            duplicate_drive_file[1],
+                            preview_target_folder_id,
+                            duplicate_drive_file[0],
+                        )
+                        materialized_videos.append(
+                            dataclasses.replace(
+                                prepared,
+                                local_thumbnail_path=local_image_path,
+                            )
+                        )
+                        continue
+                    logger.info(
+                        'preview_drive_upload_proceeds row=%d filename="%s" size=%d folder_id=%s duplicate_lookup_result=not_found',
+                        prepared.row_number,
+                        local_image_path.name,
+                        local_image_path.stat().st_size,
+                        preview_target_folder_id,
+                    )
                     drive_client.upload_image_and_make_public(
                         image_path=local_image_path,
                         folder_id=preview_target_folder_id,

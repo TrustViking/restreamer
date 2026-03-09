@@ -92,11 +92,34 @@ class PreparedVideo:
 class MergedLanguageContent:
     title: str
     description: str
+    hook_text: Optional[str] = None
+    hashtags_line: Optional[str] = None
+    branch_type: Optional[str] = None
+    title_source: Optional[str] = None
+    hook_source: Optional[str] = None
+    hashtags_source: Optional[str] = None
+    body_source: Optional[str] = None
+    packaging_model_name: Optional[str] = None
     title_selected: Optional[str] = None
     description_selected: Optional[str] = None
     title_audit: Optional[str] = None
     description_audit: Optional[str] = None
     llm_model: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PackagingAudit:
+    packaging_model: str
+    raw_response_text: str
+    title_text: str
+    hook_text: str
+    hashtags_line: str
+    emoji_plan: tuple[str, ...] = ()
+    requested: bool = False
+    received: bool = False
+    inserted: bool = False
+    fallback_used: bool = False
+    fallback_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +134,17 @@ class LanguageMergeAttempt:
     plain_repair_used: Optional[bool] = None
     plain_repair_fallback_model: Optional[str] = None
     validation_reasons: Optional[List[str]] = None
+    generator_model_name: Optional[str] = None
+    polish_model_name: Optional[str] = None
+    polish_accepted: Optional[bool] = None
+    polish_reject_reason: Optional[str] = None
+    used_model_names: tuple[str, ...] = ()
+    branch_type: Optional[str] = None
+    title_source: Optional[str] = None
+    hook_source: Optional[str] = None
+    hashtags_source: Optional[str] = None
+    body_source: Optional[str] = None
+    packaging_audit: Optional[PackagingAudit] = None
 
 
 @dataclass(frozen=True)

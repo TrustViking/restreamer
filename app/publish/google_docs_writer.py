@@ -307,27 +307,63 @@ class GoogleDocsReportWriter:
         indexed_videos: List[Tuple[int, PlannedVideo]] = list(
             enumerate(videos, start=1)
         )
+
+        def _preview_link_text(video: PlannedVideo) -> str:
+            candidate_link: str = (
+                str(video.normalized_link or "").strip()
+                or str(video.original_link or "").strip()
+                or str(video.metadata.url or "").strip()
+            )
+            return f"{candidate_link}\n" if candidate_link else ""
+
         for preview_index, video in reversed(indexed_videos):
             row_index: int = preview_first_item_row_index + (preview_index - 1)
             row_start_index: int = _refresh_row_start_index(row_index)
-            link_text: str = f"{video.normalized_link}\n"
-            try:
-                self._docs_client.batch_update(
-                    document_id=document_id,
-                    requests_payload=[
-                        {
-                            "insertText": {
-                                "location": {"index": row_start_index},
-                                "text": link_text,
-                            }
-                        }
-                    ],
-                )
-            except Exception:
+            link_text: str = _preview_link_text(video)
+            if not link_text:
                 LOGGER.warning(
-                    "Preview link insert failed for row %d in language %s.",
+                    "Preview link insert skipped for row %d in language %s: empty link payload.",
                     video.row_number,
                     language,
+                )
+                continue
+            link_inserted: bool = False
+            link_insert_error: str = ""
+            for use_plus_one in (False, True):
+                try:
+                    refreshed_start_index: int = _refresh_row_start_index(row_index)
+                    self._docs_client.batch_update(
+                        document_id=document_id,
+                        requests_payload=[
+                            {
+                                "insertText": {
+                                    "location": {
+                                        "index": refreshed_start_index + (1 if use_plus_one else 0)
+                                    },
+                                    "text": link_text,
+                                }
+                            }
+                        ],
+                    )
+                    link_inserted = True
+                    if use_plus_one:
+                        LOGGER.info(
+                            "Preview link insert recovered with plus_one=True for row %d in language %s.",
+                            video.row_number,
+                            language,
+                        )
+                    break
+                except Exception as error:
+                    link_insert_error = str(error)
+            if not link_inserted:
+                LOGGER.warning(
+                    "Preview link insert failed for row %d in language %s. row_index=%d start_index=%d link_length=%d reason=%s",
+                    video.row_number,
+                    language,
+                    row_index,
+                    row_start_index,
+                    len(link_text),
+                    link_insert_error or "unknown",
                 )
                 continue
 

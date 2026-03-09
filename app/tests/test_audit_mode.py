@@ -7,8 +7,16 @@ from unittest.mock import MagicMock, patch
 
 from app.bootstrap.cli import build_cli_parser
 from app.config.validators import normalize_audit_mode, normalize_processing_mode
+from app.core.branching import (
+    BRANCH_MERGE_MAIN,
+    BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+    BRANCH_NOMERGE,
+)
+from app.core.models import LanguageMergeAttempt, MergedLanguageContent, PackagingAudit
 from app.observability import runtime_analytics
 from app.pipeline.batch_runner import BatchRunner
+from app.pipeline.slot_packaging import build_packaging_slot_result
+from app.pipeline.slot_processing import SlotProcessResult
 
 
 class AuditModeCliTests(unittest.TestCase):
@@ -56,10 +64,17 @@ class AuditModeRunnerTests(unittest.TestCase):
             audit_mode="unite",
             llm_merge_available=True,
         )
-        self.assertEqual(["nomerge", "merge"], [branch.name for branch in branches])
-        self.assertEqual(["nomerge", "merge"], [branch.processing_mode for branch in branches])
+        self.assertEqual(
+            [BRANCH_NOMERGE, BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING],
+            [branch.name for branch in branches],
+        )
+        self.assertEqual(
+            ["nomerge", "merge", "merge"],
+            [branch.processing_mode for branch in branches],
+        )
         self.assertFalse(branches[0].llm_merge_enabled)
         self.assertTrue(branches[1].llm_merge_enabled)
+        self.assertTrue(branches[2].packaging_overlay_enabled)
 
     def test_single_branch_plans_are_precise(self) -> None:
         runner = self._build_runner()
@@ -71,9 +86,13 @@ class AuditModeRunnerTests(unittest.TestCase):
             audit_mode="merge",
             llm_merge_available=False,
         )
-        self.assertEqual(["nomerge"], [branch.name for branch in nomerge_branch])
-        self.assertEqual(["merge"], [branch.name for branch in merge_branch])
+        self.assertEqual([BRANCH_NOMERGE], [branch.name for branch in nomerge_branch])
+        self.assertEqual(
+            [BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING],
+            [branch.name for branch in merge_branch],
+        )
         self.assertFalse(merge_branch[0].llm_merge_enabled)
+        self.assertTrue(merge_branch[1].packaging_overlay_enabled)
 
     def test_unite_reuses_shared_preparation_once(self) -> None:
         runner = self._build_runner()
@@ -104,21 +123,37 @@ class AuditModeRunnerTests(unittest.TestCase):
             return_value=prepared_videos,
         ) as materialize_mock, patch(
             "app.pipeline.batch_runner.derive_planned_videos",
-            side_effect=[planned_nomerge, planned_merge],
+            side_effect=[planned_nomerge, planned_merge, planned_merge],
         ) as derive_mock, patch.object(BatchRunner, "_run_branch_for_date", return_value=None):
-            runner.run(dry_run=True, audit_mode="unite", run_id="run")
+            runner.run(
+                dry_run=True,
+                audit_mode="unite",
+                run_id="run",
+                llm_summary=SimpleNamespace(
+                    provider="openai",
+                    primary_provider="openai",
+                    fallback_provider="deepseek",
+                    effective_primary_model="gpt-5.1",
+                    effective_fallback_model="deepseek-chat",
+                    merge_stage_model="gpt-5.1",
+                    packaging_stage_model="deepseek-chat",
+                    base_url="default_openai",
+                    usage_reporting_mode="openai_run_local+openai_org_snapshot+provider_logs_only",
+                    providers_used=("openai", "deepseek"),
+                ),
+            )
 
         self.assertEqual(1, load_sheet_state_mock.call_count)
         self.assertEqual(1, build_prepared_mock.call_count)
         self.assertEqual(1, materialize_mock.call_count)
-        self.assertEqual(2, derive_mock.call_count)
+        self.assertEqual(3, derive_mock.call_count)
 
     def test_incomplete_audit_branch_compare_is_debug_only(self) -> None:
         runtime_analytics.setup_runtime_analytics(
             logger=logging.getLogger("audit-mode-compare"),
             debug_enabled=False,
         )
-        runtime_analytics.record_docs_created(count=1, date_key="010130", branch_label="nomerge")
+        runtime_analytics.record_docs_created(count=1, date_key="010130", branch_label=BRANCH_NOMERGE)
         runner = self._build_runner()
         runner._logger = MagicMock()
 
@@ -126,6 +161,79 @@ class AuditModeRunnerTests(unittest.TestCase):
 
         runner._logger.info.assert_not_called()
         runner._logger.debug.assert_called_once()
+
+    def test_packaging_branch_records_packaging_model_usage_in_runtime_analytics(self) -> None:
+        runtime_analytics.setup_runtime_analytics(
+            logger=logging.getLogger("audit-mode-packaging-models"),
+            debug_enabled=False,
+        )
+        source_slot_result = SlotProcessResult(
+            slot_key="090326_1350",
+            slot_time_key="1350",
+            header_context={},
+            day_videos=[],
+            language_groups={"uk": [], "en": [SimpleNamespace()], "ru": [], "other": []},
+            merged_content_by_language={"en": MergedLanguageContent(title="GPT title", description="GPT body")},
+            merge_audit_by_language={
+                "en": LanguageMergeAttempt(
+                    language="en",
+                    model_name="gpt-5.1",
+                    raw_response_text="{}",
+                    merged=MergedLanguageContent(title="GPT title", description="GPT body"),
+                    error_summary=None,
+                    generator_model_name="gpt-5.1",
+                    used_model_names=("gpt-5.1",),
+                )
+            },
+        )
+        packaged_attempt = LanguageMergeAttempt(
+            language="en",
+            model_name="gpt-5.1",
+            raw_response_text="{}",
+            merged=MergedLanguageContent(
+                title="Packaged title",
+                description="Packaged body",
+                branch_type=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+            ),
+            error_summary=None,
+            generator_model_name="gpt-5.1",
+            used_model_names=("gpt-5.1", "deepseek-chat"),
+            branch_type=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+            packaging_audit=PackagingAudit(
+                packaging_model="deepseek-chat",
+                raw_response_text="{}",
+                title_text="Packaged title",
+                hook_text="Packaged hook",
+                hashtags_line="#packaged",
+                requested=True,
+                received=True,
+                inserted=True,
+            ),
+        )
+        with patch(
+            "app.pipeline.slot_packaging.build_packaging_overlay_attempt",
+            return_value=(
+                MergedLanguageContent(
+                    title="Packaged title",
+                    description="Packaged body",
+                    branch_type=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+                ),
+                packaged_attempt,
+            ),
+        ):
+            build_packaging_slot_result(
+                logger=logging.getLogger("audit-mode-packaging-models"),
+                config=SimpleNamespace(),
+                source_slot_result=source_slot_result,
+                branch_label=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+                date_key="090326",
+            )
+        summary = runtime_analytics.get_branch_date_summary(
+            date_key="090326",
+            branch_label=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+        )
+        self.assertIsNotNone(summary)
+        self.assertIn("deepseek-chat", summary.models_used if summary is not None else set())
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ charset-normalizer==3.4.4
 colorama==0.4.6
 cryptography==46.0.5
 distro==1.9.0
+et_xmlfile==2.0.0
 google-api-core==2.29.0
 google-api-python-client==2.190.0
 google-auth==2.48.0
@@ -22,6 +23,7 @@ jiter==0.13.0
 nodeenv==1.10.0
 oauthlib==3.3.1
 openai==2.21.0
+openpyxl==3.1.5
 pillow==12.1.1
 proto-plus==1.27.1
 protobuf==6.33.5

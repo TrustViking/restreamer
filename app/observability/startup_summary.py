@@ -3,10 +3,84 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
 
+from app.config.llm_routing import ResolvedLlmRouting, coerce_llm_routing_from_config
 from app.config.settings import AppConfig
+from app.bootstrap.run_context import RunContext, StartupContext
+from app.core.branching import audit_branch_labels
+
+
+@dataclass(frozen=True)
+class LlmSummarySnapshot:
+    provider: str
+    primary_provider: str
+    fallback_provider: str
+    effective_primary_model: str
+    effective_fallback_model: str
+    merge_stage_model: str
+    packaging_stage_model: str
+    base_url: str
+    usage_reporting_mode: str
+    providers_used: tuple[str, ...]
+    is_mixed_provider: bool
+
+
+def _base_url_for_provider(*, provider_name: str, config: AppConfig) -> str:
+    normalized_provider_name: str = str(provider_name or "").strip().lower()
+    if normalized_provider_name == "deepseek":
+        return str(getattr(config, "deepseek_base_url", "") or "").strip() or "https://api.deepseek.com/v1"
+    return "default_openai"
+
+
+def build_llm_summary_snapshot(config: AppConfig) -> LlmSummarySnapshot:
+    llm_routing: ResolvedLlmRouting = coerce_llm_routing_from_config(config)
+    primary_provider: str = llm_routing.primary.provider
+    fallback_provider: str = llm_routing.fallback.provider
+    effective_primary_model: str = llm_routing.primary.model
+    effective_fallback_model: str = llm_routing.fallback.model
+    base_url: str = (
+        f"primary={_base_url_for_provider(provider_name=primary_provider, config=config)};"
+        f"fallback={_base_url_for_provider(provider_name=fallback_provider, config=config)}"
+        if llm_routing.is_mixed_provider
+        else _base_url_for_provider(provider_name=primary_provider, config=config)
+    )
+    if primary_provider == "deepseek":
+        return LlmSummarySnapshot(
+            provider=primary_provider,
+            primary_provider=primary_provider,
+            fallback_provider=fallback_provider,
+            effective_primary_model=effective_primary_model,
+            effective_fallback_model=effective_fallback_model,
+            merge_stage_model=effective_primary_model,
+            packaging_stage_model=effective_fallback_model,
+            base_url=base_url,
+            usage_reporting_mode=(
+                "openai_run_local+openai_org_snapshot+provider_logs_only"
+                if llm_routing.uses_provider("openai")
+                else "provider_logs_only"
+            ),
+            providers_used=llm_routing.providers_used,
+            is_mixed_provider=llm_routing.is_mixed_provider,
+        )
+    return LlmSummarySnapshot(
+        provider=primary_provider,
+        primary_provider=primary_provider,
+        fallback_provider=fallback_provider,
+        effective_primary_model=effective_primary_model,
+        effective_fallback_model=effective_fallback_model,
+        merge_stage_model=effective_primary_model,
+        packaging_stage_model=effective_fallback_model,
+        base_url=base_url,
+        usage_reporting_mode=(
+            "openai_run_local+openai_org_snapshot+provider_logs_only"
+            if llm_routing.uses_provider("deepseek")
+            else "openai_run_local+openai_org_snapshot"
+        ),
+        providers_used=llm_routing.providers_used,
+        is_mixed_provider=llm_routing.is_mixed_provider,
+    )
 
 
 def _safe_console_text(text: str) -> str:
@@ -32,135 +106,210 @@ def _safe_console_print(text: str) -> None:
     print(_safe_console_text(text))
 
 
-def log_startup_summary(
-    logger: logging.Logger,
+def _log_startup_banner(
     *,
-    run_id: str,
-    argv_list: list[str],
-    args_audit_mode: str,
-    args_debug: bool,
-    args_dry_run: bool,
-    processing_mode: str,
-    config_processing_mode_raw: str,
-    project_root: Path,
-    entrypoint_path: Path,
-    runtime_config_path: Path,
-    templates_path: Path,
-    secrets_env_path: Path,
-    oauth_credentials_path: Path,
-    oauth_token_path: Path,
+    logger: logging.Logger,
+    startup_context: StartupContext,
+    llm_summary: Optional[LlmSummarySnapshot],
 ) -> None:
     env_stg_merge_semantics: str = (
         os.getenv("STG_MERGE_SEMANTICS", "").strip() or "<unset>"
     )
     config_processing_mode_for_banner: str = (
-        config_processing_mode_raw if config_processing_mode_raw else "missing"
+        startup_context.config_processing_mode_raw
+        if startup_context.config_processing_mode_raw
+        else "missing"
     )
-    audit_branches: str = "nomerge,merge" if args_audit_mode == "unite" else args_audit_mode
+    audit_branches: str = ",".join(
+        audit_branch_labels(audit_mode=startup_context.args_audit_mode)
+    )
     logger.info("=== STARTUP BANNER BEGIN ===")
-    logger.info("run_id=%s", run_id)
+    logger.info("run_id=%s", startup_context.run_id)
     logger.info("argv=%s", repr(list(sys.argv)))
     logger.info("cwd=%s", os.getcwd())
     logger.info("python=%s", sys.executable)
     logger.info(
         "args.audit_mode=%s args.debug=%s args.dry_run=%s",
-        args_audit_mode,
-        args_debug,
-        args_dry_run,
+        startup_context.args_audit_mode,
+        startup_context.args_debug,
+        startup_context.args_dry_run,
     )
     logger.info("config_processing_mode=%s", config_processing_mode_for_banner)
     logger.info("env.STG_MERGE_SEMANTICS=%s", env_stg_merge_semantics)
-    logger.info("resolved_processing_mode=%s", processing_mode)
-    logger.info("resolved_audit_mode=%s branches=%s", args_audit_mode, audit_branches)
-    logger.info("project_root=%s", project_root)
-    logger.info("entrypoint_path=%s", entrypoint_path)
-    logger.info("runtime_config_path=%s", runtime_config_path)
-    logger.info("templates_path=%s", templates_path)
-    logger.info("secrets_env_path=%s", secrets_env_path)
-    logger.info("oauth_credentials_path=%s", oauth_credentials_path)
-    logger.info("oauth_token_path=%s", oauth_token_path)
+    logger.info("resolved_processing_mode=%s", startup_context.processing_mode)
+    logger.info(
+        "resolved_audit_mode=%s branches=%s",
+        startup_context.args_audit_mode,
+        audit_branches,
+    )
+    logger.info("project_root=%s", startup_context.project_root)
+    logger.info("entrypoint_path=%s", startup_context.entrypoint_path)
+    logger.info("runtime_config_path=%s", startup_context.runtime_config_path)
+    logger.info("templates_path=%s", startup_context.templates_path)
+    logger.info("secrets_env_path=%s", startup_context.secrets_env_path)
+    logger.info("oauth_credentials_path=%s", startup_context.oauth_credentials_path)
+    logger.info("oauth_token_path=%s", startup_context.oauth_token_path)
+    if llm_summary is not None:
+        logger.info(
+            "llm_provider=%s llm_primary_provider=%s llm_fallback_provider=%s llm_effective_primary_model=%s llm_effective_fallback_model=%s merge_stage_model=%s packaging_stage_model=%s llm_base_url=%s llm_usage_reporting_mode=%s",
+            llm_summary.provider or "unknown",
+            llm_summary.primary_provider or "unknown",
+            llm_summary.fallback_provider or "unknown",
+            llm_summary.effective_primary_model or "unknown",
+            llm_summary.effective_fallback_model or "not_applicable",
+            llm_summary.merge_stage_model or "unknown",
+            llm_summary.packaging_stage_model or "not_applicable",
+            llm_summary.base_url or "not_applicable",
+            llm_summary.usage_reporting_mode or "unknown",
+        )
     logger.info("=== STARTUP BANNER END ===")
 
+
+def _log_startup_dump(
+    *,
+    logger: logging.Logger,
+    startup_context: StartupContext,
+    llm_summary: Optional[LlmSummarySnapshot],
+) -> None:
     def _log_run_startup_line(text: str) -> None:
         logger.info(text)
-        if args_debug:
+        if startup_context.args_debug:
             _safe_console_print(text)
 
     _log_run_startup_line("Run startup dump begin")
     _log_run_startup_line(f"Run argv(sys): {repr(list(sys.argv))}")
-    _log_run_startup_line(f"Run argv(main): {repr(argv_list)}")
+    _log_run_startup_line(f"Run argv(main): {repr(startup_context.argv_list)}")
     _log_run_startup_line(
         "Run args: "
-        f"args.audit_mode={args_audit_mode} "
-        f"args.debug={args_debug} "
-        f"args.dry_run={args_dry_run}"
+        f"args.audit_mode={startup_context.args_audit_mode} "
+        f"args.debug={startup_context.args_debug} "
+        f"args.dry_run={startup_context.args_dry_run}"
     )
-    _log_run_startup_line(f"Run resolved: processing_mode={processing_mode} audit_mode={args_audit_mode}")
-    _log_run_startup_line(f"cwd={os.getcwd()}")
-    _log_run_startup_line(f"script_path={entrypoint_path}")
-    _log_run_startup_line(f"project_root={project_root}")
-    _log_run_startup_line(f"runtime_config_path={runtime_config_path}")
-    _log_run_startup_line(f"templates_path={templates_path}")
-    _log_run_startup_line(f"secrets_env_path={secrets_env_path}")
     _log_run_startup_line(
-        f"config_processing_mode={config_processing_mode_raw or '<empty>'}"
+        "Run resolved: "
+        f"processing_mode={startup_context.processing_mode} "
+        f"audit_mode={startup_context.args_audit_mode}"
     )
+    _log_run_startup_line(f"cwd={os.getcwd()}")
+    _log_run_startup_line(f"script_path={startup_context.entrypoint_path}")
+    _log_run_startup_line(f"project_root={startup_context.project_root}")
+    _log_run_startup_line(f"runtime_config_path={startup_context.runtime_config_path}")
+    _log_run_startup_line(f"templates_path={startup_context.templates_path}")
+    _log_run_startup_line(f"secrets_env_path={startup_context.secrets_env_path}")
+    _log_run_startup_line(
+        f"config_processing_mode={startup_context.config_processing_mode_raw or '<empty>'}"
+    )
+    if llm_summary is not None:
+        _log_run_startup_line(
+            "Run llm: "
+            f"provider={llm_summary.provider or 'unknown'} "
+            f"primary_provider={llm_summary.primary_provider or 'unknown'} "
+            f"fallback_provider={llm_summary.fallback_provider or 'unknown'} "
+            f"primary_model={llm_summary.effective_primary_model or 'unknown'} "
+            f"fallback_model={llm_summary.effective_fallback_model or 'not_applicable'} "
+            f"merge_stage_model={llm_summary.merge_stage_model or 'unknown'} "
+            f"packaging_stage_model={llm_summary.packaging_stage_model or 'not_applicable'} "
+            f"base_url={llm_summary.base_url or 'not_applicable'} "
+            f"usage_reporting_mode={llm_summary.usage_reporting_mode or 'unknown'}"
+        )
     _log_run_startup_line("Run startup dump end")
+
+
+def log_startup_summary(
+    logger: logging.Logger,
+    startup_context: StartupContext,
+    llm_summary: Optional[LlmSummarySnapshot] = None,
+) -> None:
+    _log_startup_banner(
+        logger=logger,
+        startup_context=startup_context,
+        llm_summary=llm_summary,
+    )
+    _log_startup_dump(
+        logger=logger,
+        startup_context=startup_context,
+        llm_summary=llm_summary,
+    )
 
 
 def log_config_summary(
     logger: logging.Logger,
     config: AppConfig,
-    *,
-    mode_label: str,
-    resolved_processing_mode: Optional[str] = None,
-    resolved_audit_mode: Optional[str] = None,
-    run_id: Optional[str] = None,
-    sheets_link_writeback_enabled: bool,
-    strip_chapter_timestamps_enabled: bool,
+    llm_summary: LlmSummarySnapshot,
+    run_context: RunContext,
 ) -> None:
-    logger.info("run_id=%s Config loaded successfully for mode=%s.", run_id, mode_label)
+    mode_label: str = f"{run_context.processing_mode}:{run_context.audit_mode}"
+    logger.info(
+        "run_id=%s Config loaded successfully for mode=%s.",
+        run_context.run_id,
+        mode_label,
+    )
     logger.info(
         "run_id=%s Config summary: google=%s telegram=%s templates=%s",
-        run_id,
+        run_context.run_id,
         "enabled" if config.google_enabled else "disabled",
         "enabled" if config.telegram_enabled else "disabled",
         str(config.stg_templates_path),
     )
     logger.info(
         "run_id=%s Config summary: sheets=%s range=%s",
-        run_id,
+        run_context.run_id,
         config.google_sheets_id,
         config.google_sheets_range,
     )
     logger.info(
-        "run_id=%s Config summary: config_processing_mode=%s resolved_processing_mode=%s resolved_audit_mode=%s now_tz_mode=%s llm_provider=%s openai_primary=%s openai_fallback=%s openai_timeout_sec=%.1f openai_max_output_tokens=%d llm_source_desc_max_chars=%d llm_run_if_single_source=%s openai_pre_delay_sec=%.1f",
-        run_id,
+        "run_id=%s Config summary: config_processing_mode=%s resolved_processing_mode=%s resolved_audit_mode=%s now_tz_mode=%s llm_provider=%s configured_main_alias=%s configured_fallback_alias=%s llm_effective_primary_model=%s llm_effective_fallback_model=%s merge_stage_model=%s packaging_stage_model=%s llm_base_url=%s llm_usage_reporting_mode=%s openai_model=%s deepseek_model=%s deepseek_base_url=%s openai_timeout_sec=%.1f deepseek_timeout_sec=%.1f openai_max_output_tokens=%d llm_source_desc_max_chars=%d llm_run_if_single_source=%s openai_pre_delay_sec=%.1f",
+        run_context.run_id,
         config.processing_mode,
-        str(resolved_processing_mode or config.processing_mode),
-        str(resolved_audit_mode or "unknown"),
+        run_context.processing_mode,
+        run_context.audit_mode,
         config.now_tz_mode,
-        config.llm_provider,
+        llm_summary.provider,
+        str(getattr(config, "configured_main_model_alias", "") or "not_set"),
+        str(getattr(config, "configured_fallback_model_alias", "") or "not_set"),
+        llm_summary.effective_primary_model,
+        llm_summary.effective_fallback_model,
+        llm_summary.merge_stage_model,
+        llm_summary.packaging_stage_model,
+        llm_summary.base_url,
+        llm_summary.usage_reporting_mode,
         config.openai_model_primary,
-        config.openai_model_fallback,
+        config.deepseek_model,
+        config.deepseek_base_url,
         config.openai_timeout_sec,
+        config.deepseek_timeout_sec,
         config.openai_max_output_tokens,
         config.llm_source_desc_max_chars,
         config.llm_run_if_single_source,
         config.openai_pre_delay_sec,
     )
     logger.info(
+        "run_id=%s LLM summary: provider=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s merge_stage_model=%s packaging_stage_model=%s base_url=%s usage_reporting_mode=%s providers_used=%s is_mixed_provider=%s",
+        run_context.run_id,
+        llm_summary.provider,
+        llm_summary.primary_provider,
+        llm_summary.fallback_provider,
+        llm_summary.effective_primary_model,
+        llm_summary.effective_fallback_model,
+        llm_summary.merge_stage_model,
+        llm_summary.packaging_stage_model,
+        llm_summary.base_url,
+        llm_summary.usage_reporting_mode,
+        ",".join(llm_summary.providers_used),
+        "yes" if llm_summary.is_mixed_provider else "no",
+    )
+    logger.info(
         "run_id=%s sheets_link_writeback=%s",
-        run_id,
-        "enabled" if sheets_link_writeback_enabled else "disabled",
+        run_context.run_id,
+        "enabled" if run_context.sheets_link_writeback else "disabled",
     )
     logger.info(
         "run_id=%s strip_chapter_timestamps=%s",
-        run_id,
-        "enabled" if strip_chapter_timestamps_enabled else "disabled",
+        run_context.run_id,
+        "enabled" if run_context.strip_chapter_timestamps else "disabled",
     )
     logger.info(
         "run_id=%s local_doc_export_enabled=%s",
-        run_id,
+        run_context.run_id,
         "true" if bool(str(config.local_doc_dir_template or "").strip()) else "false",
     )

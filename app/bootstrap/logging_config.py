@@ -60,7 +60,7 @@ def resolve_logger_name_meta() -> Tuple[str, str, bool]:
 
 
 def resolve_log_dir() -> Path:
-    env_log_dir_raw: str = str(os.getenv("STG_LOG_DIR", "") or "").strip()
+    env_log_dir_raw: str = str(os.getenv("LOG_DIR", "") or "").strip()
     script_dir: Path = Path(__file__).resolve().parents[2]
     if env_log_dir_raw:
         candidate_path: Path = Path(env_log_dir_raw)

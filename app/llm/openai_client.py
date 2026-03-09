@@ -16,7 +16,7 @@ except ImportError:
     OpenAI = None  # type: ignore
 
 LOGGER = _get_logger_impl(__name__)
-_OPENAI_CLIENT: Optional[Any] = None
+_OPENAI_CLIENTS: Dict[Tuple[str, str, float, int], Any] = {}
 _RUN_LOCAL_USAGE_STATE: Optional["RunLocalOpenAIUsageState"] = None
 
 
@@ -153,6 +153,13 @@ def _log_llm_request_start(
     if trace_context is None:
         return
     LOGGER.info(
+        "llm_request_started provider=%s model=%s attempt=%d request_kind=%s",
+        trace_context.provider,
+        trace_context.model_name,
+        trace_context.attempt_index,
+        trace_context.request_kind,
+    )
+    LOGGER.info(
         "llm_request_start branch=%s date_key=%s slot_key=%s lang=%s provider=%s model=%s attempt_index=%d request_kind=%s source_count=%d input_chars=%d estimated_input_tokens=unknown",
         trace_context.branch_label,
         trace_context.date_key,
@@ -181,6 +188,14 @@ def _log_llm_request_finish(
     raw_text: str = _extract_openai_response_text(response)
     finish_reason: str = _openai_incomplete_reason(response) or "completed"
     LOGGER.info(
+        "llm_request_completed provider=%s model=%s success=%s attempt=%d request_kind=%s",
+        trace_context.provider,
+        trace_context.model_name,
+        "yes" if success else "no",
+        trace_context.attempt_index,
+        trace_context.request_kind,
+    )
+    LOGGER.info(
         "llm_request_finish branch=%s date_key=%s slot_key=%s lang=%s provider=%s model=%s attempt_index=%d request_kind=%s success=%s llm_call_ms=%d output_chars=%d input_tokens=%s output_tokens=%s finish_reason=%s max_output_hit=%s",
         trace_context.branch_label,
         trace_context.date_key,
@@ -197,6 +212,25 @@ def _log_llm_request_finish(
         str(output_tokens if output_tokens is not None else "unknown"),
         finish_reason,
         "yes" if max_output_hit else "no",
+    )
+
+
+def _log_llm_request_failed(
+    *,
+    trace_context: Optional[LlmTraceContext],
+    error: Exception,
+    elapsed_ms: int,
+) -> None:
+    if trace_context is None:
+        return
+    LOGGER.warning(
+        "llm_request_failed provider=%s model=%s error_type=%s attempt=%d request_kind=%s elapsed_ms=%d",
+        trace_context.provider,
+        trace_context.model_name,
+        type(error).__name__,
+        trace_context.attempt_index,
+        trace_context.request_kind,
+        elapsed_ms,
     )
 
 
@@ -388,17 +422,38 @@ def _log_openai_rate_limit_snapshot(*, response_or_raw: Any, model_name: str, re
     LOGGER.info("%s", _format_rate_limit_line(snapshot, model_name, request_kind))
 
 
-def get_openai_client(*, timeout_sec: float) -> Any:
-    global _OPENAI_CLIENT
-    if _OPENAI_CLIENT is not None:
-        return _OPENAI_CLIENT
+def get_openai_client(
+    *,
+    provider_name: str,
+    api_key_env: str,
+    timeout_sec: float,
+    base_url: Optional[str] = None,
+    max_retries: int = 0,
+) -> Any:
     if OpenAI is None:
         raise RuntimeError("Package 'openai' is not installed.")
-    api_key: str = os.getenv("GPT_API_KEY", "").strip()
+    api_key: str = os.getenv(api_key_env, "").strip()
     if not api_key:
-        raise RuntimeError("Env var GPT_API_KEY is required for OpenAI calls.")
-    _OPENAI_CLIENT = OpenAI(api_key=api_key, timeout=timeout_sec, max_retries=0)
-    return _OPENAI_CLIENT
+        raise RuntimeError(f"Env var {api_key_env} is required for {provider_name} calls.")
+    normalized_base_url: str = str(base_url or "").strip()
+    cache_key: Tuple[str, str, float, int] = (
+        provider_name,
+        normalized_base_url,
+        float(timeout_sec),
+        int(max_retries),
+    )
+    if cache_key in _OPENAI_CLIENTS:
+        return _OPENAI_CLIENTS[cache_key]
+    client_kwargs: Dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": timeout_sec,
+        "max_retries": max_retries,
+    }
+    if normalized_base_url:
+        client_kwargs["base_url"] = normalized_base_url
+    client: Any = OpenAI(**client_kwargs)
+    _OPENAI_CLIENTS[cache_key] = client
+    return client
 
 
 def _extract_structured_payload_or_none(response: Any) -> Optional[Dict[str, Any]]:
@@ -422,18 +477,28 @@ def _extract_structured_payload_or_none(response: Any) -> Optional[Dict[str, Any
     return None
 
 
-def openai_request_merge(
+def openai_compatible_request_merge(
     *,
+    provider_name: str,
+    api_key_env: str,
+    base_url: Optional[str],
     prompt_text: str,
     model_name: str,
     timeout_sec: float,
+    max_retries: int,
     attempt_label: str,
     max_output_tokens: int,
     structured_schema: Optional[Dict[str, Any]] = None,
     temperature: float = 0.0,
     trace_context: Optional[LlmTraceContext] = None,
 ) -> OpenAITransportResult:
-    client: Any = get_openai_client(timeout_sec=timeout_sec).with_options(timeout=timeout_sec)
+    client: Any = get_openai_client(
+        provider_name=provider_name,
+        api_key_env=api_key_env,
+        timeout_sec=timeout_sec,
+        base_url=base_url,
+        max_retries=max_retries,
+    ).with_options(timeout=timeout_sec, max_retries=max_retries)
     temperature_enabled: bool = _openai_should_send_temperature(model_name)
     reasoning_effort: str = "low"
     request_kind: str = (
@@ -495,6 +560,13 @@ def openai_request_merge(
                 max_output_hit=(_openai_incomplete_reason(response) == "max_output_tokens"),
             )
             return response
+        except Exception as error:
+            _log_llm_request_failed(
+                trace_context=trace_context,
+                error=cast(Exception, error),
+                elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
+            )
+            raise
 
     def _create_with_temp_fallback(max_tokens: int) -> Any:
         nonlocal temperature_enabled
@@ -537,10 +609,37 @@ def openai_request_merge(
 
     raw_text: str = _extract_openai_response_text(response)
     if not raw_text.strip():
-        raise RuntimeError("openai merge returned empty output text")
+        raise RuntimeError(f"{provider_name} merge returned empty output text")
     return OpenAITransportResult(
         raw_text=raw_text,
         structured_payload=_extract_structured_payload_or_none(response) if structured_schema is not None else None,
         incomplete_reason=incomplete_reason,
         output_item_types=_openai_response_output_item_types(response),
+    )
+
+
+def openai_request_merge(
+    *,
+    prompt_text: str,
+    model_name: str,
+    timeout_sec: float,
+    attempt_label: str,
+    max_output_tokens: int,
+    structured_schema: Optional[Dict[str, Any]] = None,
+    temperature: float = 0.0,
+    trace_context: Optional[LlmTraceContext] = None,
+) -> OpenAITransportResult:
+    return openai_compatible_request_merge(
+        provider_name="openai",
+        api_key_env="GPT_API_KEY",
+        base_url=None,
+        prompt_text=prompt_text,
+        model_name=model_name,
+        timeout_sec=timeout_sec,
+        max_retries=0,
+        attempt_label=attempt_label,
+        max_output_tokens=max_output_tokens,
+        structured_schema=structured_schema,
+        temperature=temperature,
+        trace_context=trace_context,
     )
