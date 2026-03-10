@@ -83,7 +83,7 @@ def _log_exit_code(*, logger, exit_code: int) -> None:
 
 
 def _is_openai_usage_reporting_enabled(*, llm_summary) -> bool:
-    return "openai" in llm_summary.providers_used
+    return str(llm_summary.provider or "").strip().lower() == "openai"
 
 
 def _apply_llm_usage_reset(*, logger, llm_summary) -> None:
@@ -101,20 +101,6 @@ def _apply_llm_usage_reset(*, logger, llm_summary) -> None:
 def _log_llm_usage_reports(*, logger, llm_summary) -> None:
     provider_name: str = llm_summary.provider
     logger.info("llm_usage_report_start provider=%s", provider_name)
-    if not _is_openai_usage_reporting_enabled(llm_summary=llm_summary):
-        logger.info(
-            "llm_usage_report_skipped provider=%s reason=provider_not_openai",
-            provider_name,
-        )
-        logger.info(
-            "llm_org_usage_report_skipped provider=%s reason=provider_not_openai",
-            provider_name,
-        )
-        logger.info(
-            "llm_usage_report_completed provider=%s status=skipped_provider_logs_only",
-            provider_name,
-        )
-        return
     try:
         log_run_local_openai_usage(logger)
     except Exception:

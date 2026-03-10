@@ -27,10 +27,9 @@ def emit_final_run_summary(
         processing_mode=summary_context.processing_mode,
         audit_mode=summary_context.audit_mode,
         exit_code=summary_context.exit_code,
-        primary_success=merge_summary.primary_success if merge_summary is not None else 0,
+        merge_success=merge_summary.merge_success if merge_summary is not None else 0,
         validation_rejected=merge_summary.validation_rejected if merge_summary is not None else 0,
-        primary_retry_used=merge_summary.primary_retry_used if merge_summary is not None else 0,
-        fallback_success=merge_summary.fallback_success if merge_summary is not None else 0,
+        retry_used=merge_summary.retry_used if merge_summary is not None else 0,
         final_failure=merge_summary.final_failure if merge_summary is not None else 0,
         paragraph_recovery_used=(
             merge_summary.paragraph_recovery_used if merge_summary is not None else 0

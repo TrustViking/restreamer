@@ -6,7 +6,6 @@ import sys
 from dataclasses import dataclass
 from typing import Optional
 
-from app.config.llm_routing import ResolvedLlmRouting, coerce_llm_routing_from_config
 from app.config.settings import AppConfig
 from app.bootstrap.run_context import RunContext, StartupContext
 from app.core.branching import audit_branch_labels
@@ -15,71 +14,15 @@ from app.core.branching import audit_branch_labels
 @dataclass(frozen=True)
 class LlmSummarySnapshot:
     provider: str
-    primary_provider: str
-    fallback_provider: str
-    effective_primary_model: str
-    effective_fallback_model: str
-    merge_stage_model: str
-    packaging_stage_model: str
-    base_url: str
+    model: str
     usage_reporting_mode: str
-    providers_used: tuple[str, ...]
-    is_mixed_provider: bool
-
-
-def _base_url_for_provider(*, provider_name: str, config: AppConfig) -> str:
-    normalized_provider_name: str = str(provider_name or "").strip().lower()
-    if normalized_provider_name == "deepseek":
-        return str(getattr(config, "deepseek_base_url", "") or "").strip() or "https://api.deepseek.com/v1"
-    return "default_openai"
 
 
 def build_llm_summary_snapshot(config: AppConfig) -> LlmSummarySnapshot:
-    llm_routing: ResolvedLlmRouting = coerce_llm_routing_from_config(config)
-    primary_provider: str = llm_routing.primary.provider
-    fallback_provider: str = llm_routing.fallback.provider
-    effective_primary_model: str = llm_routing.primary.model
-    effective_fallback_model: str = llm_routing.fallback.model
-    base_url: str = (
-        f"primary={_base_url_for_provider(provider_name=primary_provider, config=config)};"
-        f"fallback={_base_url_for_provider(provider_name=fallback_provider, config=config)}"
-        if llm_routing.is_mixed_provider
-        else _base_url_for_provider(provider_name=primary_provider, config=config)
-    )
-    if primary_provider == "deepseek":
-        return LlmSummarySnapshot(
-            provider=primary_provider,
-            primary_provider=primary_provider,
-            fallback_provider=fallback_provider,
-            effective_primary_model=effective_primary_model,
-            effective_fallback_model=effective_fallback_model,
-            merge_stage_model=effective_primary_model,
-            packaging_stage_model=effective_fallback_model,
-            base_url=base_url,
-            usage_reporting_mode=(
-                "openai_run_local+openai_org_snapshot+provider_logs_only"
-                if llm_routing.uses_provider("openai")
-                else "provider_logs_only"
-            ),
-            providers_used=llm_routing.providers_used,
-            is_mixed_provider=llm_routing.is_mixed_provider,
-        )
     return LlmSummarySnapshot(
-        provider=primary_provider,
-        primary_provider=primary_provider,
-        fallback_provider=fallback_provider,
-        effective_primary_model=effective_primary_model,
-        effective_fallback_model=effective_fallback_model,
-        merge_stage_model=effective_primary_model,
-        packaging_stage_model=effective_fallback_model,
-        base_url=base_url,
-        usage_reporting_mode=(
-            "openai_run_local+openai_org_snapshot+provider_logs_only"
-            if llm_routing.uses_provider("deepseek")
-            else "openai_run_local+openai_org_snapshot"
-        ),
-        providers_used=llm_routing.providers_used,
-        is_mixed_provider=llm_routing.is_mixed_provider,
+        provider=config.llm_provider,
+        model=config.llm_model,
+        usage_reporting_mode="openai_run_local+openai_org_snapshot",
     )
 
 
@@ -151,15 +94,9 @@ def _log_startup_banner(
     logger.info("oauth_token_path=%s", startup_context.oauth_token_path)
     if llm_summary is not None:
         logger.info(
-            "llm_provider=%s llm_primary_provider=%s llm_fallback_provider=%s llm_effective_primary_model=%s llm_effective_fallback_model=%s merge_stage_model=%s packaging_stage_model=%s llm_base_url=%s llm_usage_reporting_mode=%s",
+            "llm_provider=%s llm_model=%s llm_usage_reporting_mode=%s",
             llm_summary.provider or "unknown",
-            llm_summary.primary_provider or "unknown",
-            llm_summary.fallback_provider or "unknown",
-            llm_summary.effective_primary_model or "unknown",
-            llm_summary.effective_fallback_model or "not_applicable",
-            llm_summary.merge_stage_model or "unknown",
-            llm_summary.packaging_stage_model or "not_applicable",
-            llm_summary.base_url or "not_applicable",
+            llm_summary.model or "unknown",
             llm_summary.usage_reporting_mode or "unknown",
         )
     logger.info("=== STARTUP BANNER END ===")
@@ -203,13 +140,7 @@ def _log_startup_dump(
         _log_run_startup_line(
             "Run llm: "
             f"provider={llm_summary.provider or 'unknown'} "
-            f"primary_provider={llm_summary.primary_provider or 'unknown'} "
-            f"fallback_provider={llm_summary.fallback_provider or 'unknown'} "
-            f"primary_model={llm_summary.effective_primary_model or 'unknown'} "
-            f"fallback_model={llm_summary.effective_fallback_model or 'not_applicable'} "
-            f"merge_stage_model={llm_summary.merge_stage_model or 'unknown'} "
-            f"packaging_stage_model={llm_summary.packaging_stage_model or 'not_applicable'} "
-            f"base_url={llm_summary.base_url or 'not_applicable'} "
+            f"model={llm_summary.model or 'unknown'} "
             f"usage_reporting_mode={llm_summary.usage_reporting_mode or 'unknown'}"
         )
     _log_run_startup_line("Run startup dump end")
@@ -258,45 +189,27 @@ def log_config_summary(
         config.google_sheets_range,
     )
     logger.info(
-        "run_id=%s Config summary: config_processing_mode=%s resolved_processing_mode=%s resolved_audit_mode=%s now_tz_mode=%s llm_provider=%s configured_main_alias=%s configured_fallback_alias=%s llm_effective_primary_model=%s llm_effective_fallback_model=%s merge_stage_model=%s packaging_stage_model=%s llm_base_url=%s llm_usage_reporting_mode=%s openai_model=%s deepseek_model=%s deepseek_base_url=%s openai_timeout_sec=%.1f deepseek_timeout_sec=%.1f openai_max_output_tokens=%d llm_source_desc_max_chars=%d llm_run_if_single_source=%s openai_pre_delay_sec=%.1f",
+        "run_id=%s Config summary: config_processing_mode=%s resolved_processing_mode=%s resolved_audit_mode=%s now_tz_mode=%s llm_provider=%s llm_model=%s llm_usage_reporting_mode=%s openai_timeout_sec=%.1f openai_max_output_tokens=%d llm_source_desc_max_chars=%d llm_run_if_single_source=%s openai_pre_delay_sec=%.1f",
         run_context.run_id,
         config.processing_mode,
         run_context.processing_mode,
         run_context.audit_mode,
         config.now_tz_mode,
         llm_summary.provider,
-        str(getattr(config, "configured_main_model_alias", "") or "not_set"),
-        str(getattr(config, "configured_fallback_model_alias", "") or "not_set"),
-        llm_summary.effective_primary_model,
-        llm_summary.effective_fallback_model,
-        llm_summary.merge_stage_model,
-        llm_summary.packaging_stage_model,
-        llm_summary.base_url,
+        llm_summary.model,
         llm_summary.usage_reporting_mode,
-        config.openai_model_primary,
-        config.deepseek_model,
-        config.deepseek_base_url,
         config.openai_timeout_sec,
-        config.deepseek_timeout_sec,
         config.openai_max_output_tokens,
         config.llm_source_desc_max_chars,
         config.llm_run_if_single_source,
         config.openai_pre_delay_sec,
     )
     logger.info(
-        "run_id=%s LLM summary: provider=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s merge_stage_model=%s packaging_stage_model=%s base_url=%s usage_reporting_mode=%s providers_used=%s is_mixed_provider=%s",
+        "run_id=%s LLM summary: provider=%s model=%s usage_reporting_mode=%s",
         run_context.run_id,
         llm_summary.provider,
-        llm_summary.primary_provider,
-        llm_summary.fallback_provider,
-        llm_summary.effective_primary_model,
-        llm_summary.effective_fallback_model,
-        llm_summary.merge_stage_model,
-        llm_summary.packaging_stage_model,
-        llm_summary.base_url,
+        llm_summary.model,
         llm_summary.usage_reporting_mode,
-        ",".join(llm_summary.providers_used),
-        "yes" if llm_summary.is_mixed_provider else "no",
     )
     logger.info(
         "run_id=%s sheets_link_writeback=%s",

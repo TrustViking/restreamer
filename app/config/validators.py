@@ -76,12 +76,13 @@ def normalize_audit_mode(value: str, *, source: str) -> str:
         "no-merge": "nomerge",
         "no_merge": "nomerge",
         "merge": "merge",
-        "unite": "unite",
+        "audit": "audit",
+        "unite": "audit",
     }
     normalized_mode: Optional[str] = alias_to_mode.get(normalized_input)
     if normalized_mode is None:
         raise RuntimeError(
-            f"Unsupported {source}={value!r}. Supported audit modes: nomerge, merge, unite."
+            f"Unsupported {source}={value!r}. Supported audit modes: nomerge, merge, audit."
         )
     return normalized_mode
 

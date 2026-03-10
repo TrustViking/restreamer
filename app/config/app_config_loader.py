@@ -7,11 +7,6 @@ from typing import Any, Callable, Dict, Optional, cast
 
 import yaml
 
-from app.config.llm_routing import (
-    build_model_aliases,
-    resolve_model_alias,
-)
-from app.config.model_resolution import resolve_model_configuration
 from app.config.settings import AppConfig
 from app.config.template_loader import load_templates_from_path
 from app.config.validators import (
@@ -217,70 +212,18 @@ def load_config_from_env(
     now_tz_mode_input: str = env_now_tz_raw or config_now_tz_raw or "kyiv"
     now_tz_mode: str = normalize_now_tz_mode(now_tz_mode_input, source="now timezone mode")
 
-    model_aliases: Dict[str, str] = build_model_aliases(
-        explicit_aliases={
-            "OPENAI_MODEL": os.getenv("OPENAI_MODEL", "").strip(),
-            "DEEPSEEK_MODEL": os.getenv("DEEPSEEK_MODEL", "").strip(),
-        }
-    )
-    main_model_raw: str = os.getenv("MAIN_MODEL", "").strip()
-    fallback_model_raw: str = os.getenv("FALLBACK_MODEL", "").strip()
-    resolved_model_config = resolve_model_configuration(
-        model_aliases=model_aliases,
-        main_model_raw=main_model_raw,
-        fallback_model_raw=fallback_model_raw,
-    )
-    llm_routing = resolved_model_config.routing
-    llm_provider: str = llm_routing.primary.provider
-    llm_main_model: str = llm_routing.primary.model
-    llm_fallback_model: str = llm_routing.fallback.model
-    openai_model_primary: str = resolve_model_alias(
-        "OPENAI_MODEL",
-        model_aliases=model_aliases,
-    )
-    openai_model_fallback: str = resolve_model_alias(
-        "OPENAI_MODEL",
-        model_aliases=model_aliases,
-    )
+    openai_model: str = os.getenv("OPENAI_MODEL", "").strip() or "gpt-5.1"
+    llm_provider: str = "openai"
+    llm_model: str = openai_model
     openai_timeout_sec: float = _load_float_env("STG_OPENAI_TIMEOUT_SEC", 120.0, min_value=1.0)
     openai_max_output_tokens: int = _load_int_env("STG_OPENAI_MAX_OUTPUT_TOKENS", 1000, min_value=1)
     openai_pre_delay_sec: float = _load_float_env("STG_OPENAI_PRE_DELAY_SEC", 5.0, min_value=0.0)
-    deepseek_base_url: str = (
-        os.getenv("STG_DEEPSEEK_BASE_URL", "").strip() or "https://api.deepseek.com/v1"
-    )
-    deepseek_model: str = resolve_model_alias(
-        "DEEPSEEK_MODEL",
-        model_aliases=model_aliases,
-    )
-    deepseek_reasoning_model: Optional[str] = (
-        os.getenv("STG_DEEPSEEK_REASONING_MODEL", "").strip() or None
-    )
-    deepseek_timeout_sec: float = _load_float_env(
-        "STG_DEEPSEEK_TIMEOUT_SECONDS",
-        120.0,
-        min_value=1.0,
-    )
-    deepseek_max_retries: int = 0
     llm_source_desc_max_chars: int = 2000
     llm_run_if_single_source: bool = _load_bool_env("STG_LLM_RUN_IF_SINGLE_SOURCE", False)
-    if llm_provider not in {"openai", "deepseek"}:
+    if not os.getenv("GPT_API_KEY", "").strip():
         raise RuntimeError(
-            f"Unsupported llm_provider={llm_provider!r}."
+            "GPT_API_KEY is required when the active merge model uses OpenAI."
         )
-    main_provider_name: str = llm_routing.primary.provider
-    fallback_provider_name: str = llm_routing.fallback.provider
-    if main_provider_name == "deepseek" and not os.getenv("DPSK_API_KEY", "").strip():
-        raise RuntimeError(
-            "DPSK_API_KEY is required when the main model uses DeepSeek."
-        )
-    if main_provider_name == "openai" and not os.getenv("GPT_API_KEY", "").strip():
-        raise RuntimeError(
-            "GPT_API_KEY is required when the main model uses OpenAI."
-        )
-    if fallback_provider_name == "deepseek" and not os.getenv("DPSK_API_KEY", "").strip():
-        logger.warning("DeepSeek fallback model configured but DPSK_API_KEY is missing.")
-    if fallback_provider_name == "openai" and not os.getenv("GPT_API_KEY", "").strip():
-        logger.warning("OpenAI fallback model configured but GPT_API_KEY is missing.")
 
     google_auth_mode: str = load_google_auth_mode_from_env()
     google_service_account_path_raw: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "").strip()
@@ -336,21 +279,11 @@ def load_config_from_env(
         "processing_mode": processing_mode,
         "now_tz_mode": now_tz_mode,
         "llm_provider": llm_provider,
-        "llm_routing": llm_routing,
-        "configured_main_model_alias": resolved_model_config.main_model_alias,
-        "configured_fallback_model_alias": resolved_model_config.fallback_model_alias,
-        "llm_main_model": llm_main_model,
-        "llm_fallback_model": llm_fallback_model,
-        "openai_model_primary": openai_model_primary,
-        "openai_model_fallback": openai_model_fallback,
+        "llm_model": llm_model,
+        "openai_model": openai_model,
         "openai_timeout_sec": openai_timeout_sec,
         "openai_max_output_tokens": openai_max_output_tokens,
         "openai_pre_delay_sec": openai_pre_delay_sec,
-        "deepseek_base_url": deepseek_base_url,
-        "deepseek_model": deepseek_model,
-        "deepseek_reasoning_model": deepseek_reasoning_model,
-        "deepseek_timeout_sec": deepseek_timeout_sec,
-        "deepseek_max_retries": deepseek_max_retries,
         "llm_source_desc_max_chars": llm_source_desc_max_chars,
         "llm_run_if_single_source": llm_run_if_single_source,
         "preview_filename_max_stem": setting_as_int(app_settings, "files.preview_filename_max_stem"),

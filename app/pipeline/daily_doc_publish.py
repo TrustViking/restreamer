@@ -8,10 +8,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig, AppTemplates
-from app.core.branching import (
-    BRANCH_MERGE_MAIN,
-    BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
-)
+from app.core.branching import BRANCH_MERGE
 from app.core.error_summary import summarize_error
 from app.core.models import MergedLanguageContent, PlannedVideo
 from app.google import GoogleDocsClient, GoogleDriveClient
@@ -162,8 +159,7 @@ def publish_daily_document(
     language_time_titles: str = "\n\n".join(header_blocks).strip()
     used_runtime_models = collect_used_runtime_models(
         slot_results=slot_results,
-        configured_primary_model=config.llm_main_model,
-        configured_fallback_model=config.llm_fallback_model,
+        configured_model=config.llm_model,
     )
     doc_title: str = name_builder.build_doc_title(
         date_key=date_key,
@@ -174,7 +170,7 @@ def publish_daily_document(
         ),
         llm_models_segment=(
             render_doc_title_models_segment(used_runtime_models=used_runtime_models)
-            if branch_label in {BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING}
+            if branch_label == BRANCH_MERGE
             else ""
         ),
     )

@@ -22,6 +22,9 @@ LOGGER = _get_logger_impl(__name__)
 _HASHTAG_TOKEN_RE: re.Pattern[str] = re.compile(r"^#[^\s#]+$")
 _URL_LINE_RE: re.Pattern[str] = re.compile(r"^https?://\S+$", re.IGNORECASE)
 _URL_RE: re.Pattern[str] = re.compile(r"https?://\S+", re.IGNORECASE)
+_OFFICIAL_LINKS_HEADING_RE: re.Pattern[str] = re.compile(
+    r"(?im)^\s*(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:\s*$"
+)
 _CTA_HINTS: tuple[str, ...] = (
     "watch",
     "learn more",
@@ -66,6 +69,8 @@ class PostLlmSanitizationResult:
     tail_was_separated: bool
     cta_found: bool
     hashtags_found: bool
+    hashtags_split_from_cta: bool
+    tail_layout: str
     source_urls_found: int
     malformed_source_urls_dropped: int
 
@@ -75,8 +80,18 @@ class AuthoritativeSourceUrlsResult:
     source_urls: List[str]
     inspected_source_videos: int
     emitted_source_urls: int
+    emitted_source_video_urls: int
+    preserved_non_youtube_tail_urls: int
     duplicate_urls_removed: int
     malformed_tail_urls_dropped: int
+
+
+@dataclass(frozen=True)
+class _OfficialLinksExtractionResult:
+    cleaned_text: str
+    heading_found: bool
+    source_urls: List[str]
+    empty_blocks_suppressed: int
 
 
 def sanitize_post_llm_title(text: str) -> str:
@@ -106,7 +121,6 @@ def build_sanitized_merged_publication_payload(
     use_audit_text: bool,
     source_videos: Optional[Sequence[PlannedVideo]] = None,
 ) -> MergedPublicationPayload:
-    del language, merge_attempt, source_videos
     raw_title: str = (
         str(merged_content.title_audit or merged_content.title or "").strip()
         if use_audit_text
@@ -119,9 +133,85 @@ def build_sanitized_merged_publication_payload(
             merged_content.description_selected or merged_content.description or ""
         ).strip()
     )
+    source_label: str = resolve_post_llm_source_label(
+        merge_attempt,
+        default_label="merged_publish",
+    )
+    source_videos_sequence: Sequence[PlannedVideo] = tuple(source_videos or ())
+    official_links_extraction: _OfficialLinksExtractionResult = _extract_official_links_blocks(
+        raw_description
+    )
+    cleanup_event_key: str = (
+        f"{language}:{source_label}:{hash(_normalize_text(official_links_extraction.cleaned_text))}"
+    )
+    sanitization_result: PostLlmSanitizationResult = sanitize_post_llm_text(
+        official_links_extraction.cleaned_text,
+        language=language,
+        source_label=source_label,
+    )
+    extracted_text_source_urls: List[str] = _dedupe_nonempty(
+        official_links_extraction.source_urls + sanitization_result.source_urls
+    )
+    authoritative_source_urls_result: AuthoritativeSourceUrlsResult = (
+        build_authoritative_merged_source_urls(
+            language=language,
+            source_videos=source_videos_sequence,
+            extracted_tail_urls=extracted_text_source_urls,
+            malformed_tail_urls_dropped=sanitization_result.malformed_source_urls_dropped,
+            cleanup_event_key=cleanup_event_key,
+        )
+    )
+    final_official_links_urls: List[str] = authoritative_source_urls_result.source_urls
+    if source_videos_sequence:
+        normalized_body_text: str = normalize_merge_description(
+            description=sanitization_result.body_text,
+            language=language,
+            source_texts=(),
+        ).description_text
+    else:
+        normalized_body_text = sanitization_result.body_text
+    final_description: str = _compose_full_text(
+        language=language,
+        body_text=normalized_body_text,
+        cta_text=sanitization_result.cta_text,
+        hashtags_line=sanitization_result.hashtags_line,
+        source_urls=final_official_links_urls,
+    )
+    official_links_count: int = len(final_official_links_urls)
+    official_links_block_status: str = (
+        "emitted"
+        if official_links_count > 0
+        else (
+            "suppressed"
+            if official_links_extraction.empty_blocks_suppressed > 0
+            else "absent"
+        )
+    )
+    final_layout: str = _resolve_tail_layout(
+        body_text=normalized_body_text,
+        cta_text=sanitization_result.cta_text,
+        hashtags_line=sanitization_result.hashtags_line,
+        source_urls=final_official_links_urls,
+    )
+    LOGGER.info(
+        "merged_publish_sanitation_applied=yes lang=%s source=%s cta_found=%s hashtags_found=%s hashtags_split_from_cta=%s tail_layout=%s official_links_heading_found=%s official_links_text_links=%d official_links_source_links=%d official_links_final_count=%d official_links_block=%s official_links_dedup_applied=%s empty_official_links_suppressed=%d",
+        language,
+        source_label,
+        "yes" if sanitization_result.cta_found else "no",
+        "yes" if sanitization_result.hashtags_found else "no",
+        "yes" if sanitization_result.hashtags_split_from_cta else "no",
+        final_layout,
+        "yes" if official_links_extraction.heading_found else "no",
+        len(extracted_text_source_urls),
+        authoritative_source_urls_result.emitted_source_video_urls,
+        official_links_count,
+        official_links_block_status,
+        "yes" if authoritative_source_urls_result.duplicate_urls_removed > 0 else "no",
+        official_links_extraction.empty_blocks_suppressed,
+    )
     return MergedPublicationPayload(
         title_text=sanitize_post_llm_title(raw_title),
-        description_text=raw_description,
+        description_text=final_description,
     )
 
 
@@ -132,17 +222,25 @@ def sanitize_post_llm_text_for_merged_publish(
     source_label: str,
     source_videos: Sequence[PlannedVideo],
 ) -> str:
-    cleanup_event_key: str = f"{language}:{source_label}:{hash(_normalize_text(text))}"
+    official_links_extraction: _OfficialLinksExtractionResult = _extract_official_links_blocks(
+        text
+    )
+    cleanup_event_key: str = (
+        f"{language}:{source_label}:{hash(_normalize_text(official_links_extraction.cleaned_text))}"
+    )
     sanitization_result: PostLlmSanitizationResult = sanitize_post_llm_text(
-        text,
+        official_links_extraction.cleaned_text,
         language=language,
         source_label=source_label,
+    )
+    extracted_text_source_urls: List[str] = _dedupe_nonempty(
+        official_links_extraction.source_urls + sanitization_result.source_urls
     )
     authoritative_source_urls: AuthoritativeSourceUrlsResult = (
         build_authoritative_merged_source_urls(
             language=language,
             source_videos=source_videos,
-            extracted_tail_urls=sanitization_result.source_urls,
+            extracted_tail_urls=extracted_text_source_urls,
             malformed_tail_urls_dropped=sanitization_result.malformed_source_urls_dropped,
             cleanup_event_key=cleanup_event_key,
         )
@@ -153,6 +251,7 @@ def sanitize_post_llm_text_for_merged_publish(
         source_texts=(),
     ).description_text
     return _compose_full_text(
+        language=language,
         body_text=normalized_body_text,
         cta_text=sanitization_result.cta_text,
         hashtags_line=sanitization_result.hashtags_line,
@@ -179,6 +278,8 @@ def sanitize_post_llm_text(
             tail_was_separated=False,
             cta_found=False,
             hashtags_found=False,
+            hashtags_split_from_cta=False,
+            tail_layout="empty",
             source_urls_found=0,
             malformed_source_urls_dropped=0,
         )
@@ -213,7 +314,30 @@ def sanitize_post_llm_text(
         + body_url_changes
         + cta_url_changes
     )
+    tail_layout: str = _resolve_tail_layout(
+        body_text=body_text,
+        cta_text=cta_text,
+        hashtags_line=hashtags_line,
+        source_urls=source_urls,
+    )
+    LOGGER.info(
+        "tail_parse lang=%s source=%s cta_found=%s hashtags_found=%s hashtags_split_from_cta=%s",
+        language,
+        source_label,
+        "yes" if bool(cta_text) else "no",
+        "yes" if bool(hashtags_line) else "no",
+        "yes"
+        if (embedded_tail.hashtags_split_from_cta or extracted_tail.hashtags_split_from_cta)
+        else "no",
+    )
+    LOGGER.info(
+        "tail_layout lang=%s source=%s layout=%s",
+        language,
+        source_label,
+        tail_layout,
+    )
     full_text: str = _compose_full_text(
+        language=language,
         body_text=body_text,
         cta_text=cta_text,
         hashtags_line=hashtags_line,
@@ -229,6 +353,10 @@ def sanitize_post_llm_text(
         tail_was_separated=bool(cta_text or hashtags_line or source_urls),
         cta_found=bool(cta_text),
         hashtags_found=bool(hashtags_line),
+        hashtags_split_from_cta=(
+            embedded_tail.hashtags_split_from_cta or extracted_tail.hashtags_split_from_cta
+        ),
+        tail_layout=tail_layout,
         source_urls_found=len(source_urls),
         malformed_source_urls_dropped=(
             extracted_tail.malformed_source_urls_dropped
@@ -249,6 +377,7 @@ class _TailParts:
     body_end_index: int
     cta_lines: List[str]
     hashtag_lines: List[str]
+    hashtags_split_from_cta: bool
     source_urls: List[str]
     source_url_change_count: int
     malformed_source_urls_dropped: int
@@ -259,6 +388,7 @@ class _EmbeddedTailParts:
     body_text: str
     cta_lines: List[str]
     hashtag_lines: List[str]
+    hashtags_split_from_cta: bool
     source_urls: List[str]
     source_url_change_count: int
     malformed_source_urls_dropped: int
@@ -275,6 +405,7 @@ def build_authoritative_merged_source_urls(
     authoritative_urls: List[str] = []
     seen_canonical_urls: set[str] = set()
     duplicate_urls_removed: int = 0
+    emitted_source_video_urls: int = 0
 
     for video in source_videos:
         normalized_source_url: Optional[str] = _normalize_authoritative_video_url(video)
@@ -286,6 +417,7 @@ def build_authoritative_merged_source_urls(
             continue
         seen_canonical_urls.add(canonical_key)
         authoritative_urls.append(normalized_source_url)
+        emitted_source_video_urls += 1
 
     preserved_non_youtube_tail_urls: List[str] = []
     for extracted_tail_url in extracted_tail_urls:
@@ -327,6 +459,8 @@ def build_authoritative_merged_source_urls(
         source_urls=authoritative_urls,
         inspected_source_videos=len(source_videos),
         emitted_source_urls=len(authoritative_urls),
+        emitted_source_video_urls=emitted_source_video_urls,
+        preserved_non_youtube_tail_urls=len(preserved_non_youtube_tail_urls),
         duplicate_urls_removed=duplicate_urls_removed,
         malformed_tail_urls_dropped=extracted_tail_dropped_count,
     )
@@ -359,6 +493,7 @@ def _split_tail_parts(lines: Sequence[str]) -> _TailParts:
         body_end_index -= 1
 
     hashtag_lines: List[str] = []
+    hashtags_split_from_cta: bool = False
     while body_end_index > 0:
         candidate = lines[body_end_index - 1].strip()
         if not candidate:
@@ -375,6 +510,18 @@ def _split_tail_parts(lines: Sequence[str]) -> _TailParts:
         if not candidate:
             body_end_index -= 1
             continue
+        candidate_without_hashtags: str
+        extracted_hashtags: str
+        candidate_without_hashtags, extracted_hashtags = _extract_hashtag_tail_from_paragraph(
+            candidate
+        )
+        if extracted_hashtags and _is_standalone_cta_line(candidate_without_hashtags):
+            hashtag_lines.insert(0, extracted_hashtags)
+            hashtags_split_from_cta = True
+            candidate = candidate_without_hashtags
+        if not candidate:
+            body_end_index -= 1
+            continue
         if not _is_standalone_cta_line(candidate):
             break
         cta_lines.insert(0, candidate)
@@ -384,6 +531,7 @@ def _split_tail_parts(lines: Sequence[str]) -> _TailParts:
         body_end_index=body_end_index,
         cta_lines=cta_lines,
         hashtag_lines=hashtag_lines,
+        hashtags_split_from_cta=hashtags_split_from_cta,
         source_urls=source_urls,
         source_url_change_count=source_url_change_count,
         malformed_source_urls_dropped=malformed_source_urls_dropped,
@@ -395,6 +543,7 @@ def _extract_embedded_tail_fragments(text: str) -> _EmbeddedTailParts:
     cleaned_paragraphs: List[str] = []
     cta_lines: List[str] = []
     hashtag_lines: List[str] = []
+    hashtags_split_from_cta: bool = False
     source_urls: List[str] = []
     source_url_change_count: int = 0
     malformed_source_urls_dropped: int = 0
@@ -410,6 +559,8 @@ def _extract_embedded_tail_fragments(text: str) -> _EmbeddedTailParts:
         cleaned_paragraph, extracted_cta = _extract_cta_tail_from_paragraph(
             cleaned_paragraph
         )
+        if extracted_hashtags and extracted_cta:
+            hashtags_split_from_cta = True
         if cleaned_paragraph:
             cleaned_paragraphs.append(cleaned_paragraph)
         source_urls.extend(extracted_urls)
@@ -424,6 +575,7 @@ def _extract_embedded_tail_fragments(text: str) -> _EmbeddedTailParts:
         body_text="\n\n".join(cleaned_paragraphs).strip(),
         cta_lines=cta_lines,
         hashtag_lines=hashtag_lines,
+        hashtags_split_from_cta=hashtags_split_from_cta,
         source_urls=_dedupe_nonempty(source_urls),
         source_url_change_count=source_url_change_count,
         malformed_source_urls_dropped=malformed_source_urls_dropped,
@@ -486,6 +638,8 @@ def _extract_cta_tail_from_paragraph(paragraph: str) -> tuple[str, str]:
         return ("", "")
     sentence_parts: List[str] = re.split(r"(?<=[.!?…])\s+", normalized_paragraph)
     if len(sentence_parts) < 2:
+        if _looks_like_cta_line(normalized_paragraph):
+            return ("", normalized_paragraph)
         return (normalized_paragraph, "")
     cta_candidate: str = sentence_parts[-1].strip()
     if not _looks_like_cta_line(cta_candidate):
@@ -644,8 +798,96 @@ def _merge_hashtag_lines(lines: Sequence[str]) -> str:
     return " ".join(deduped_tokens)
 
 
+def _extract_official_links_blocks(text: str) -> _OfficialLinksExtractionResult:
+    paragraphs: List[str] = _split_paragraphs(text)
+    if not paragraphs:
+        return _OfficialLinksExtractionResult(
+            cleaned_text="",
+            heading_found=False,
+            source_urls=[],
+            empty_blocks_suppressed=0,
+        )
+    kept_paragraphs: List[str] = []
+    extracted_source_urls: List[str] = []
+    suppressed_count: int = 0
+    heading_found: bool = False
+    paragraph_index: int = 0
+    while paragraph_index < len(paragraphs):
+        paragraph: str = paragraphs[paragraph_index]
+        normalized_paragraph: str = str(paragraph or "").strip()
+        paragraph_heading_found, paragraph_source_urls = _extract_official_links_from_heading_paragraph(
+            normalized_paragraph
+        )
+        if not paragraph_heading_found:
+            kept_paragraphs.append(normalized_paragraph)
+            paragraph_index += 1
+            continue
+        heading_found = True
+        if paragraph_source_urls:
+            extracted_source_urls.extend(paragraph_source_urls)
+            paragraph_index += 1
+            continue
+        next_paragraph: str = (
+            str(paragraphs[paragraph_index + 1] or "").strip()
+            if paragraph_index + 1 < len(paragraphs)
+            else ""
+        )
+        next_paragraph_source_urls: List[str] = _extract_official_links_url_lines(
+            next_paragraph.splitlines()
+        )
+        if next_paragraph_source_urls:
+            extracted_source_urls.extend(next_paragraph_source_urls)
+            paragraph_index += 2
+            continue
+        suppressed_count += 1
+        paragraph_index += 1
+    return _OfficialLinksExtractionResult(
+        cleaned_text="\n\n".join(paragraph for paragraph in kept_paragraphs if paragraph).strip(),
+        heading_found=heading_found,
+        source_urls=_dedupe_nonempty(extracted_source_urls),
+        empty_blocks_suppressed=suppressed_count,
+    )
+
+
+def _extract_official_links_from_heading_paragraph(
+    paragraph: str,
+) -> tuple[bool, List[str]]:
+    lines: List[str] = [str(line or "").strip() for line in str(paragraph or "").splitlines()]
+    nonempty_lines: List[str] = [line for line in lines if line]
+    if not nonempty_lines:
+        return (False, [])
+    if not _OFFICIAL_LINKS_HEADING_RE.fullmatch(nonempty_lines[0]):
+        return (False, [])
+    return (True, _extract_official_links_url_lines(nonempty_lines[1:]))
+
+
+def _extract_official_links_url_lines(lines: Sequence[str]) -> List[str]:
+    source_urls: List[str] = []
+    for line in lines:
+        normalized_line: str = str(line or "").strip()
+        if not normalized_line:
+            continue
+        if not _is_source_url_line(normalized_line):
+            return []
+        sanitized_url: Optional[str] = _sanitize_source_url(normalized_line)
+        if sanitized_url is None or _is_youtube_url(sanitized_url):
+            continue
+        source_urls.append(sanitized_url)
+    return _dedupe_nonempty(source_urls)
+
+
+def _resolve_official_links_heading(language: str) -> str:
+    normalized_language: str = str(language or "").strip().lower()
+    if normalized_language == "ru":
+        return "🌐 Официальные ссылки:"
+    if normalized_language == "uk":
+        return "🌐 Офіційні ресурси:"
+    return "🌐 Official links:"
+
+
 def _compose_full_text(
     *,
+    language: str,
     body_text: str,
     cta_text: str,
     hashtags_line: str,
@@ -653,17 +895,42 @@ def _compose_full_text(
 ) -> str:
     parts: List[str] = []
     if body_text:
-        parts.append(body_text)
-    tail_lines: List[str] = []
-    if cta_text:
-        tail_lines.append(cta_text)
-    if hashtags_line:
-        tail_lines.append(hashtags_line)
+        parts.append(body_text.strip())
     if source_urls:
-        tail_lines.extend(source_urls)
-    if tail_lines:
-        parts.append("\n".join(tail_lines).strip())
+        parts.append(
+            "\n".join(
+                [_resolve_official_links_heading(language)]
+                + [
+                    str(source_url or "").strip()
+                    for source_url in source_urls
+                    if str(source_url or "").strip()
+                ]
+            ).strip()
+        )
+    if cta_text:
+        parts.append(cta_text.strip())
+    if hashtags_line:
+        parts.append(hashtags_line.strip())
     return "\n\n".join(part for part in parts if part).strip()
+
+
+def _resolve_tail_layout(
+    *,
+    body_text: str,
+    cta_text: str,
+    hashtags_line: str,
+    source_urls: Sequence[str],
+) -> str:
+    layout_parts: List[str] = []
+    if body_text:
+        layout_parts.append("body")
+    if source_urls:
+        layout_parts.extend(("blank", "official_links"))
+    if cta_text:
+        layout_parts.extend(("blank", "cta"))
+    if hashtags_line:
+        layout_parts.extend(("blank", "hashtags"))
+    return "_".join(layout_parts) if layout_parts else "empty"
 
 
 def _split_paragraphs(text: str) -> List[str]:

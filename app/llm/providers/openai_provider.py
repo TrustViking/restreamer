@@ -12,8 +12,8 @@ class OpenAIProvider(LlmProvider):
 
     def models(self, *, config: AppConfig) -> ProviderModels:
         return ProviderModels(
-            primary=str(getattr(config, "openai_model_primary", "") or "").strip() or "gpt-5.1",
-            fallback=str(getattr(config, "openai_model_fallback", "") or "").strip() or "gpt-5-mini",
+            primary=str(getattr(config, "openai_model", "") or "").strip() or "gpt-5.1",
+            fallback=str(getattr(config, "openai_model", "") or "").strip() or "gpt-5.1",
         )
 
     def timeout_sec(self, *, config: AppConfig) -> float:

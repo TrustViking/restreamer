@@ -8,12 +8,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.config.app_config_loader import load_config_from_env
-from app.config.llm_routing import build_llm_routing
+from app.llm.provider_factory import get_llm_provider
 from app.paths import get_project_paths
-from app.llm.provider_factory import get_llm_provider_for_target
 
 
-class ModelResolutionTests(unittest.TestCase):
+class ActiveModelConfigTests(unittest.TestCase):
     def _write_runtime_config(self) -> str:
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", encoding="utf-8", delete=False) as handle:
             handle.write(
@@ -71,25 +70,15 @@ app:
             "TELEGRAM_BOT_TOKEN": "token",
             "TELEGRAM_CHAT_ID": "chat",
             "GPT_API_KEY": "openai-secret",
-            "DPSK_API_KEY": "deepseek-secret",
             "OPENAI_MODEL": "gpt-5.1",
-            "DEEPSEEK_MODEL": "deepseek-chat",
-            "MAIN_MODEL": "OPENAI_MODEL",
-            "FALLBACK_MODEL": "DEEPSEEK_MODEL",
         }
         with patch.dict(os.environ, env, clear=True):
             config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
         entrypoint_dir = get_project_paths().entrypoint_path.parent.resolve()
-        self.assertEqual(
-            str(entrypoint_dir / Path("image") / "{language}" / "{date}"),
-            config.local_image_dir_template,
-        )
-        self.assertEqual(
-            str(entrypoint_dir / Path("docs") / "{date}"),
-            config.local_doc_dir_template,
-        )
+        self.assertEqual(str(entrypoint_dir / Path("image") / "{language}" / "{date}"), config.local_image_dir_template)
+        self.assertEqual(str(entrypoint_dir / Path("docs") / "{date}"), config.local_doc_dir_template)
 
-    def test_main_and_fallback_are_resolved_only_from_aliases(self) -> None:
+    def test_active_model_is_loaded_from_environment(self) -> None:
         runtime_config_path: str = self._write_runtime_config()
         self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
         env = {
@@ -97,28 +86,15 @@ app:
             "TELEGRAM_BOT_TOKEN": "token",
             "TELEGRAM_CHAT_ID": "chat",
             "GPT_API_KEY": "openai-secret",
-            "DPSK_API_KEY": "deepseek-secret",
-            "OPENAI_MODEL": "gpt-5.1",
-            "DEEPSEEK_MODEL": "deepseek-chat",
-            "MAIN_MODEL": "OPENAI_MODEL",
-            "FALLBACK_MODEL": "DEEPSEEK_MODEL",
-            "STG_LLM_PROVIDER": "deepseek",
-            "STG_OPENAI_MODEL_PRIMARY": "ignored-model",
-            "STG_OPENAI_MODEL_FALLBACK": "ignored-model",
-            "STG_DEEPSEEK_MODEL": "ignored-model",
-            "OPENAI_MODEL_MINI": "ignored-mini",
+            "OPENAI_MODEL": "gpt-5.2",
         }
         with patch.dict(os.environ, env, clear=True):
             config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
-        self.assertEqual("OPENAI_MODEL", config.configured_main_model_alias)
-        self.assertEqual("DEEPSEEK_MODEL", config.configured_fallback_model_alias)
-        self.assertEqual("gpt-5.1", config.llm_main_model)
-        self.assertEqual("deepseek-chat", config.llm_fallback_model)
         self.assertEqual("openai", config.llm_provider)
-        self.assertEqual("openai", config.llm_routing.primary.provider)
-        self.assertEqual("deepseek", config.llm_routing.fallback.provider)
+        self.assertEqual("gpt-5.2", config.llm_model)
+        self.assertEqual("gpt-5.2", config.openai_model)
 
-    def test_invalid_alias_is_rejected(self) -> None:
+    def test_default_active_model_is_gpt_5_1_without_hardcoding_in_callers(self) -> None:
         runtime_config_path: str = self._write_runtime_config()
         self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
         env = {
@@ -126,50 +102,14 @@ app:
             "TELEGRAM_BOT_TOKEN": "token",
             "TELEGRAM_CHAT_ID": "chat",
             "GPT_API_KEY": "openai-secret",
-            "DPSK_API_KEY": "deepseek-secret",
-            "OPENAI_MODEL": "gpt-5.1",
-            "DEEPSEEK_MODEL": "deepseek-chat",
-            "MAIN_MODEL": "gpt-4.1",
-            "FALLBACK_MODEL": "DEEPSEEK_MODEL",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(RuntimeError) as raised:
-                load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
-        self.assertIn("Unsupported model alias", str(raised.exception))
-
-    def test_provider_factory_uses_routing_target(self) -> None:
-        provider = get_llm_provider_for_target(
-            target=build_llm_routing(
-                primary_input="DEEPSEEK_MODEL",
-                fallback_input="OPENAI_MODEL",
-                model_aliases={
-                    "OPENAI_MODEL": "gpt-5.1",
-                    "DEEPSEEK_MODEL": "deepseek-chat",
-                },
-            ).primary
-        )
-        self.assertEqual("deepseek", provider.name)
-
-    def test_alias_values_can_point_to_opposite_model_families(self) -> None:
-        runtime_config_path: str = self._write_runtime_config()
-        self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
-        env = {
-            "APP_CONFIG_PATH": runtime_config_path,
-            "TELEGRAM_BOT_TOKEN": "token",
-            "TELEGRAM_CHAT_ID": "chat",
-            "GPT_API_KEY": "openai-secret",
-            "DPSK_API_KEY": "deepseek-secret",
-            "OPENAI_MODEL": "deepseek-chat",
-            "DEEPSEEK_MODEL": "gpt-5-mini",
-            "MAIN_MODEL": "DEEPSEEK_MODEL",
-            "FALLBACK_MODEL": "OPENAI_MODEL",
         }
         with patch.dict(os.environ, env, clear=True):
             config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
-        self.assertEqual("gpt-5-mini", config.llm_main_model)
-        self.assertEqual("deepseek-chat", config.llm_fallback_model)
-        self.assertEqual("openai", config.llm_routing.primary.provider)
-        self.assertEqual("deepseek", config.llm_routing.fallback.provider)
+        self.assertEqual("gpt-5.1", config.llm_model)
+
+    def test_provider_factory_returns_openai_provider_for_active_model(self) -> None:
+        provider = get_llm_provider(config=SimpleNamespace(llm_model="gpt-5.2"))
+        self.assertEqual("openai", provider.name)
 
 
 if __name__ == "__main__":

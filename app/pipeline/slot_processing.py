@@ -45,14 +45,12 @@ class SlotProcessResult:
 
 def _merge_summary_snapshot(
     merge_run_summary: MergeRunSummary,
-) -> Tuple[int, int, int, int, int, int]:
+) -> Tuple[int, int, int, int]:
     return (
-        merge_run_summary.primary_success,
+        merge_run_summary.merge_success,
         merge_run_summary.validation_rejected,
-        merge_run_summary.primary_retry_used,
-        merge_run_summary.fallback_success,
+        merge_run_summary.retry_used,
         merge_run_summary.final_failure,
-        merge_run_summary.paragraph_recovery_used,
     )
 
 
@@ -63,15 +61,15 @@ def _log_merge_attempt_outcome(
     language: str,
     source_count: int,
     merge_attempt: LanguageMergeAttempt,
-    before_snapshot: Tuple[int, int, int, int, int, int],
-    after_snapshot: Tuple[int, int, int, int, int, int],
+    before_snapshot: Tuple[int, int, int, int],
+    after_snapshot: Tuple[int, int, int, int],
 ) -> None:
     deltas: Tuple[int, int, int, int, int, int] = tuple(
         after_value - before_value
         for before_value, after_value in zip(before_snapshot, after_snapshot)
     )
     logger.info(
-        "merge_attempt_outcome slot_key=%s language=%s source_count=%d success=%s primary_success=%d validation_rejected=%d primary_retry_used=%d fallback_success=%d final_failure=%d paragraph_recovery_used=%d",
+        "merge_attempt_outcome slot_key=%s language=%s source_count=%d success=%s merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d",
         slot_key,
         language,
         source_count,
@@ -80,8 +78,6 @@ def _log_merge_attempt_outcome(
         deltas[1],
         deltas[2],
         deltas[3],
-        deltas[4],
-        deltas[5],
     )
 
 
@@ -266,7 +262,7 @@ def process_slot(
                     language=language,
                     videos=language_items_for_merge,
                     config=config,
-                    attempt_label=f"{config.llm_provider.upper()}_TRANSLATE_{language.upper()}",
+                    attempt_label=f"OPENAI_TRANSLATE_{language.upper()}",
                     summarize_error=summarize_error,
                     no_description_text=_publish_no_description_text(config.templates),
                     merge_run_summary=merge_run_summary,
@@ -279,7 +275,7 @@ def process_slot(
                     language=language,
                     videos=language_items_for_merge,
                     config=config,
-                    attempt_label=f"{config.llm_provider.upper()}_MERGE_{language.upper()}",
+                    attempt_label=f"OPENAI_MERGE_{language.upper()}",
                     summarize_error=summarize_error,
                     normalize_youtube_url=normalize_youtube_video_url,
                     no_description_text=_publish_no_description_text(config.templates),
@@ -289,18 +285,11 @@ def process_slot(
                     slot_key=slot_key,
                 )
             logger.info(
-                "[%s] LLM merge result language=%s provider=%s model=%s generator_model=%s polish_model=%s polish_accepted=%s success=%s",
+                "[%s] LLM merge result language=%s provider=%s model=%s success=%s",
                 branch_label,
                 language,
                 config.llm_provider,
                 merge_attempt.model_name,
-                merge_attempt.generator_model_name or "unknown",
-                merge_attempt.polish_model_name or "none",
-                (
-                    "yes"
-                    if merge_attempt.polish_accepted
-                    else ("no" if merge_attempt.polish_accepted is False else "n/a")
-                ),
                 "yes" if merge_attempt.merged is not None else "no",
             )
             logger.info(

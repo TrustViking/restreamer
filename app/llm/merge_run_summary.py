@@ -6,43 +6,32 @@ import logging
 
 @dataclass
 class MergeRunSummary:
-    primary_success: int = 0
+    merge_success: int = 0
     validation_rejected: int = 0
-    primary_retry_used: int = 0
-    fallback_success: int = 0
+    retry_used: int = 0
     final_failure: int = 0
     paragraph_recovery_used: int = 0
-    polish_requested: int = 0
-    polish_accepted: int = 0
-    polish_rejected: int = 0
 
     @property
     def structured_ok(self) -> int:
-        return self.primary_success
+        return self.merge_success
 
     @property
     def structured_failed(self) -> int:
         return self.validation_rejected
 
     @property
-    def plain_fallback_ok(self) -> int:
-        return self.fallback_success
-
-    @property
     def repair_used(self) -> int:
-        return self.primary_retry_used
+        return self.retry_used
 
-    def record_primary_success(self) -> None:
-        self.primary_success += 1
+    def record_merge_success(self) -> None:
+        self.merge_success += 1
 
     def record_validation_rejected(self) -> None:
         self.validation_rejected += 1
 
-    def record_primary_retry_used(self) -> None:
-        self.primary_retry_used += 1
-
-    def record_fallback_success(self) -> None:
-        self.fallback_success += 1
+    def record_retry_used(self) -> None:
+        self.retry_used += 1
 
     def record_final_failure(self) -> None:
         self.final_failure += 1
@@ -50,25 +39,12 @@ class MergeRunSummary:
     def record_paragraph_recovery_used(self) -> None:
         self.paragraph_recovery_used += 1
 
-    def record_polish_requested(self) -> None:
-        self.polish_requested += 1
-
-    def record_polish_accepted(self) -> None:
-        self.polish_accepted += 1
-
-    def record_polish_rejected(self) -> None:
-        self.polish_rejected += 1
-
     def log_summary(self, logger: logging.Logger) -> None:
         logger.info(
-            "merge_run_summary primary_success=%d validation_rejected=%d primary_retry_used=%d fallback_success=%d final_failure=%d paragraph_recovery_used=%d polish_requested=%d polish_accepted=%d polish_rejected=%d",
-            self.primary_success,
+            "merge_run_summary merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d",
+            self.merge_success,
             self.validation_rejected,
-            self.primary_retry_used,
-            self.fallback_success,
+            self.retry_used,
             self.final_failure,
             self.paragraph_recovery_used,
-            self.polish_requested,
-            self.polish_accepted,
-            self.polish_rejected,
         )

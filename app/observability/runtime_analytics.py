@@ -7,8 +7,7 @@ from typing import Dict, List, Optional, Set
 
 from app.bootstrap.run_context import RunContext
 from app.core.branching import (
-    BRANCH_MERGE_MAIN,
-    BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
+    BRANCH_MERGE,
     BRANCH_NOMERGE,
 )
 
@@ -440,7 +439,7 @@ def log_run_context(
     run_context: RunContext,
 ) -> None:
     logger.info(
-        "run_context run_id=%s processing_mode=%s audit_mode=%s config_processing_mode=%s audit_branches=%s debug=%s dry_run=%s google_enabled=%s telegram_enabled=%s llm_provider=%s llm_primary_provider=%s llm_fallback_provider=%s llm_effective_primary_model=%s llm_effective_fallback_model=%s merge_stage_model=%s packaging_stage_model=%s llm_base_url=%s llm_usage_reporting_mode=%s openai_primary=%s openai_fallback=%s sheet_id=%s sheet_range=%s sheets_link_writeback=%s local_doc_export_enabled=%s strip_chapter_timestamps=%s",
+        "run_context run_id=%s processing_mode=%s audit_mode=%s config_processing_mode=%s audit_branches=%s debug=%s dry_run=%s google_enabled=%s telegram_enabled=%s llm_provider=%s llm_model=%s llm_usage_reporting_mode=%s sheet_id=%s sheet_range=%s sheets_link_writeback=%s local_doc_export_enabled=%s strip_chapter_timestamps=%s",
         run_context.run_id,
         run_context.processing_mode,
         run_context.audit_mode,
@@ -451,16 +450,8 @@ def log_run_context(
         "yes" if run_context.google_enabled else "no",
         "yes" if run_context.telegram_enabled else "no",
         run_context.llm_provider or "unknown",
-        run_context.llm_primary_provider or "unknown",
-        run_context.llm_fallback_provider or "unknown",
-        run_context.llm_effective_primary_model or "unknown",
-        run_context.llm_effective_fallback_model or "not_applicable",
-        run_context.llm_merge_stage_model or "unknown",
-        run_context.llm_packaging_stage_model or "not_applicable",
-        run_context.llm_base_url or "not_applicable",
+        run_context.llm_model or "unknown",
         run_context.llm_usage_reporting_mode or "unknown",
-        run_context.llm_effective_primary_model or "unknown",
-        run_context.llm_effective_fallback_model or "unknown",
         run_context.sheet_id or "unknown",
         run_context.sheet_range or "unknown",
         "yes" if run_context.sheets_link_writeback else "no",
@@ -516,20 +507,18 @@ def log_merge_summary(
     *,
     logger: logging.Logger,
     groups: int,
-    primary_success: int,
+    merge_success: int,
     validation_rejected: int,
-    primary_retry_used: int,
-    fallback_success: int,
+    retry_used: int,
     final_failure: int,
     paragraph_recovery_used: int,
 ) -> None:
     logger.info(
-        "Merge summary: groups=%d primary_success=%d validation_rejected=%d primary_retry_used=%d fallback_success=%d final_failure=%d paragraph_recovery_used=%d",
+        "Merge summary: groups=%d merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d",
         groups,
-        primary_success,
+        merge_success,
         validation_rejected,
-        primary_retry_used,
-        fallback_success,
+        retry_used,
         final_failure,
         paragraph_recovery_used,
     )
@@ -578,10 +567,9 @@ def log_run_completed(
     processing_mode: str,
     audit_mode: str,
     exit_code: int,
-    primary_success: int,
+    merge_success: int,
     validation_rejected: int,
-    primary_retry_used: int,
-    fallback_success: int,
+    retry_used: int,
     final_failure: int,
     paragraph_recovery_used: int,
     run_summary_ms: int = 0,
@@ -594,7 +582,7 @@ def log_run_completed(
         state=_ACTIVE_STATE,
     )
     logger.info(
-        "run_final_summary processing_mode=%s audit_mode=%s status=%s warnings_total=%d warnings_operational=%d warnings_informational=%d errors_total=%d warning_reason_codes=%s error_reason_codes=%s degraded_recovered_count=%d degraded_unrecovered_count=%d rows_processed=%d rows_skipped=%d planned_items=%d unique_dates_processed=%d date_branch_executions=%d docs_created=%d docs_failed=%d telegram_sent=%d telegram_failed=%d telegram_skipped=%d primary_success=%d validation_rejected=%d primary_retry_used=%d fallback_success=%d final_failure=%d paragraph_recovery_used=%d content_contract_failures=%d content_contract_recovered=%d content_contract_unrecovered=%d malformed_tail_urls_dropped=%d startup_health_ms=%d sheet_load_ms=%d shared_preparation_ms=%d planning_ms=%d slot_processing_ms=%d doc_publish_ms=%d telegram_publish_ms=%d run_summary_ms=%d total_run_ms=%d branch_summary=%s",
+        "run_final_summary processing_mode=%s audit_mode=%s status=%s warnings_total=%d warnings_operational=%d warnings_informational=%d errors_total=%d warning_reason_codes=%s error_reason_codes=%s degraded_recovered_count=%d degraded_unrecovered_count=%d rows_processed=%d rows_skipped=%d planned_items=%d unique_dates_processed=%d date_branch_executions=%d docs_created=%d docs_failed=%d telegram_sent=%d telegram_failed=%d telegram_skipped=%d merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d content_contract_failures=%d content_contract_recovered=%d content_contract_unrecovered=%d malformed_tail_urls_dropped=%d startup_health_ms=%d sheet_load_ms=%d shared_preparation_ms=%d planning_ms=%d slot_processing_ms=%d doc_publish_ms=%d telegram_publish_ms=%d run_summary_ms=%d total_run_ms=%d branch_summary=%s",
         processing_mode,
         audit_mode,
         status,
@@ -616,10 +604,9 @@ def log_run_completed(
         _ACTIVE_STATE.telegram_sent,
         _ACTIVE_STATE.telegram_failed,
         _ACTIVE_STATE.telegram_skipped,
-        primary_success,
+        merge_success,
         validation_rejected,
-        primary_retry_used,
-        fallback_success,
+        retry_used,
         final_failure,
         paragraph_recovery_used,
         _ACTIVE_STATE.content_contract_failures,
@@ -657,13 +644,9 @@ def _format_branch_summary(
         )
     branch_labels: tuple[str, ...]
     if audit_mode == "merge":
-        branch_labels = (BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
+        branch_labels = (BRANCH_MERGE,)
     else:
-        branch_labels = (
-            BRANCH_NOMERGE,
-            BRANCH_MERGE_MAIN,
-            BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
-        )
+        branch_labels = (BRANCH_NOMERGE, BRANCH_MERGE)
     branch_parts: list[str] = []
     for branch_label in branch_labels:
         branch_state: BranchAnalyticsState = state.branch_results.get(

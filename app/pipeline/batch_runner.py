@@ -7,11 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig
-from app.core.branching import (
-    BRANCH_MERGE_MAIN,
-    BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
-    BRANCH_NOMERGE,
-)
+from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.core.env_flags import sheets_link_normalize_report_limit_from_env
 from app.core.models import PlannedVideo, PreparedVideo
 from app.ingest.youtube_metadata import YouTubeMetadataFetcher
@@ -30,6 +26,7 @@ from app.observability.runtime_analytics import (
     log_warning_operational,
     record_branch_completed,
     record_branch_failed,
+    record_branch_model_used,
     record_branch_started,
     record_branch_total_ms,
     record_date_branch_execution,
@@ -57,7 +54,6 @@ from app.telegram.bot_client import TelegramBotClient
 from .daily_doc_publish import publish_daily_document
 from .daily_telegram_publish import publish_daily_telegram
 from .runtime_services import BatchServices, build_runtime_services
-from .slot_packaging import build_packaging_slot_result
 from .slot_processing import SlotProcessResult, process_slot
 
 
@@ -66,7 +62,6 @@ class AuditBranch:
     name: str
     processing_mode: str
     llm_merge_enabled: bool
-    packaging_overlay_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,37 +135,14 @@ class BatchRunner:
         audit_mode: str,
         llm_merge_available: bool,
     ) -> List[AuditBranch]:
-        merge_gpt_branch: AuditBranch = AuditBranch(
-            name=BRANCH_MERGE_MAIN,
-            processing_mode="merge",
-            llm_merge_enabled=llm_merge_available,
-            packaging_overlay_enabled=False,
-        )
-        packaging_branch: AuditBranch = AuditBranch(
-            name=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
-            processing_mode="merge",
-            llm_merge_enabled=llm_merge_available,
-            packaging_overlay_enabled=True,
-        )
-        if audit_mode == "unite":
+        if audit_mode == "audit":
             return [
-                AuditBranch(
-                    name=BRANCH_NOMERGE,
-                    processing_mode="nomerge",
-                    llm_merge_enabled=False,
-                ),
-                merge_gpt_branch,
-                packaging_branch,
+                AuditBranch(name=BRANCH_NOMERGE, processing_mode="nomerge", llm_merge_enabled=False),
+                AuditBranch(name=BRANCH_MERGE, processing_mode="merge", llm_merge_enabled=llm_merge_available),
             ]
         if audit_mode == "merge":
-            return [merge_gpt_branch, packaging_branch]
-        return [
-            AuditBranch(
-                name=BRANCH_NOMERGE,
-                processing_mode="nomerge",
-                llm_merge_enabled=False,
-            )
-        ]
+            return [AuditBranch(name=BRANCH_MERGE, processing_mode="merge", llm_merge_enabled=llm_merge_available)]
+        return [AuditBranch(name=BRANCH_NOMERGE, processing_mode="nomerge", llm_merge_enabled=False)]
 
     def run(
         self,
@@ -187,16 +159,7 @@ class BatchRunner:
         merge_run_summary: MergeRunSummary = MergeRunSummary()
         self._last_merge_run_summary = merge_run_summary
         branch_failures: List[str] = []
-        if audit_mode == "unite":
-            branches_for_log = ",".join(
-                (BRANCH_NOMERGE, BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
-            )
-        elif audit_mode == "merge":
-            branches_for_log = ",".join(
-                (BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING)
-            )
-        else:
-            branches_for_log = BRANCH_NOMERGE
+        branches_for_log: str = ",".join(self._resolve_branch_labels_for_log(audit_mode=audit_mode))
         self._logger.info(
             "audit_start audit_mode=%s branches=%s run_id=%s dry_run=%s",
             audit_mode,
@@ -274,6 +237,9 @@ class BatchRunner:
                 run_id,
             )
 
+    def _resolve_branch_labels_for_log(self, *, audit_mode: str) -> List[str]:
+        return [branch.name for branch in self._resolve_audit_branches(audit_mode=audit_mode, llm_merge_available=True)]
+
     def _prepare_run_context(
         self,
         *,
@@ -298,12 +264,7 @@ class BatchRunner:
         )
         startup_health_ms: int = int(round((time.perf_counter() - startup_health_started_at) * 1000.0))
         record_stage_duration(stage_name="startup_health", elapsed_ms=startup_health_ms)
-        log_stage_timing(
-            logger=self._logger,
-            stage_name="startup_health",
-            elapsed_ms=startup_health_ms,
-            scope="run",
-        )
+        log_stage_timing(logger=self._logger, stage_name="startup_health", elapsed_ms=startup_health_ms, scope="run")
 
         self._log_section("Sheet Load")
         sheet_load_started_at: float = time.perf_counter()
@@ -316,12 +277,7 @@ class BatchRunner:
         )
         sheet_load_ms: int = int(round((time.perf_counter() - sheet_load_started_at) * 1000.0))
         record_stage_duration(stage_name="sheet_load", elapsed_ms=sheet_load_ms)
-        log_stage_timing(
-            logger=self._logger,
-            stage_name="sheet_load",
-            elapsed_ms=sheet_load_ms,
-            scope="run",
-        )
+        log_stage_timing(logger=self._logger, stage_name="sheet_load", elapsed_ms=sheet_load_ms, scope="run")
         record_sheet_loaded(rows=len(sheet_state.rows))
         log_sheet_loaded(logger=self._logger, rows=len(sheet_state.rows))
 
@@ -344,13 +300,8 @@ class BatchRunner:
             prepared_videos=prepared_videos,
             dry_run=dry_run,
         )
-        shared_preparation_ms: int = int(
-            round((time.perf_counter() - shared_preparation_started_at) * 1000.0)
-        )
-        record_stage_duration(
-            stage_name="shared_preparation",
-            elapsed_ms=shared_preparation_ms,
-        )
+        shared_preparation_ms: int = int(round((time.perf_counter() - shared_preparation_started_at) * 1000.0))
+        record_stage_duration(stage_name="shared_preparation", elapsed_ms=shared_preparation_ms)
         log_stage_timing(
             logger=self._logger,
             stage_name="shared_preparation",
@@ -360,16 +311,8 @@ class BatchRunner:
 
         rows_skipped: int = max(0, len(sheet_state.rows) - len(prepared_videos))
         prepared_dates_count: int = len({item.date_key for item in prepared_videos})
-        prepared_slots_count: int = len(
-            {
-                f"{item.date_key}_{item.scheduled_at_kiev.strftime('%H%M')}"
-                for item in prepared_videos
-            }
-        )
-        record_planning_completed(
-            planned_items=len(prepared_videos),
-            rows_skipped=rows_skipped,
-        )
+        prepared_slots_count: int = len({f"{item.date_key}_{item.scheduled_at_kiev.strftime('%H%M')}" for item in prepared_videos})
+        record_planning_completed(planned_items=len(prepared_videos), rows_skipped=rows_skipped)
         log_planning_completed(
             logger=self._logger,
             planned_items=len(prepared_videos),
@@ -410,12 +353,7 @@ class BatchRunner:
             )
         planning_ms: int = int(round((time.perf_counter() - planning_started_at) * 1000.0))
         record_stage_duration(stage_name="planning", elapsed_ms=planning_ms)
-        log_stage_timing(
-            logger=self._logger,
-            stage_name="planning",
-            elapsed_ms=planning_ms,
-            scope="run",
-        )
+        log_stage_timing(logger=self._logger, stage_name="planning", elapsed_ms=planning_ms, scope="run")
         return processed_by_branch
 
     def _execute_branch_dates(
@@ -429,15 +367,8 @@ class BatchRunner:
         audit_mode: str,
         branch_failures: List[str],
     ) -> None:
-        date_keys: List[str] = sorted(
-            {
-                date_key
-                for branch_videos in processed_by_branch.values()
-                for date_key in branch_videos.keys()
-            }
-        )
+        date_keys: List[str] = sorted({date_key for branch_videos in processed_by_branch.values() for date_key in branch_videos.keys()})
         for date_key in date_keys:
-            slot_results_cache: Dict[Tuple[str, str, str], SlotProcessResult] = {}
             for branch in branches:
                 self._execute_single_branch_date(
                     services=services,
@@ -448,7 +379,6 @@ class BatchRunner:
                     merge_run_summary=merge_run_summary,
                     audit_mode=audit_mode,
                     branch_failures=branch_failures,
-                    slot_results_cache=slot_results_cache,
                 )
 
     def _execute_single_branch_date(
@@ -462,17 +392,10 @@ class BatchRunner:
         merge_run_summary: MergeRunSummary,
         audit_mode: str,
         branch_failures: List[str],
-        slot_results_cache: Dict[Tuple[str, str, str], SlotProcessResult],
     ) -> None:
         date_videos_all: List[PlannedVideo] = processed_by_branch.get(branch.name, {}).get(date_key, [])
-        if not date_videos_all and branch.packaging_overlay_enabled:
-            date_videos_all = processed_by_branch.get(BRANCH_MERGE_MAIN, {}).get(date_key, [])
         if not date_videos_all:
-            self._logger.info(
-                "audit_branch_skip branch=%s date_key=%s reason=empty_branch_items",
-                branch.name,
-                date_key,
-            )
+            self._logger.info("audit_branch_skip branch=%s date_key=%s reason=empty_branch_items", branch.name, date_key)
             return
         branch_started_at: float = time.perf_counter()
         self._logger.info("audit_branch_start branch=%s", branch.name)
@@ -484,14 +407,9 @@ class BatchRunner:
                 date_videos_all=date_videos_all,
                 dry_run=dry_run,
                 merge_run_summary=merge_run_summary,
-                slot_results_cache=slot_results_cache,
             )
             branch_total_ms: int = int(round((time.perf_counter() - branch_started_at) * 1000.0))
-            record_branch_total_ms(
-                date_key=date_key,
-                branch_label=branch.name,
-                elapsed_ms=branch_total_ms,
-            )
+            record_branch_total_ms(date_key=date_key, branch_label=branch.name, elapsed_ms=branch_total_ms)
             log_stage_timing(
                 logger=self._logger,
                 stage_name="branch_total",
@@ -500,30 +418,13 @@ class BatchRunner:
                 branch_label=branch.name,
                 date_key=date_key,
             )
-            self._logger.info(
-                "audit_branch_done branch=%s status=ok date_key=%s elapsed_ms=%d",
-                branch.name,
-                date_key,
-                branch_total_ms,
-            )
-            if audit_mode == "unite":
+            self._logger.info("audit_branch_done branch=%s status=ok date_key=%s elapsed_ms=%d", branch.name, date_key, branch_total_ms)
+            if audit_mode == "audit":
                 self._log_audit_branch_compare(date_key=date_key)
         except Exception as error:
             branch_failures.append(f"branch={branch.name} date={date_key} failed: {error}")
-            self._logger.error(
-                "audit_branch_done branch=%s status=failed date_key=%s reason=%s",
-                branch.name,
-                date_key,
-                error,
-            )
-            log_error_event(
-                self._logger,
-                "branch=%s date=%s failed: %s",
-                branch.name,
-                date_key,
-                error,
-                reason_code="branch_date_failed",
-            )
+            self._logger.error("audit_branch_done branch=%s status=failed date_key=%s reason=%s", branch.name, date_key, error)
+            log_error_event(self._logger, "branch=%s date=%s failed: %s", branch.name, date_key, error, reason_code="branch_date_failed")
 
     def _run_branch_for_date(
         self,
@@ -534,56 +435,23 @@ class BatchRunner:
         date_videos_all: List[PlannedVideo],
         dry_run: bool,
         merge_run_summary: MergeRunSummary,
-        slot_results_cache: Dict[Tuple[str, str, str], SlotProcessResult],
     ) -> None:
         slot_processing_started_at: float = time.perf_counter()
-        slots_by_time: Dict[str, List[PlannedVideo]] = self._group_date_videos_by_slot_time(
-            date_videos_all=date_videos_all
-        )
-        self._logger.info(
-            "[%s] Date branch started: %s slots=%d items=%d",
-            branch.name,
-            date_key,
-            len(slots_by_time),
-            len(date_videos_all),
-        )
+        slots_by_time: Dict[str, List[PlannedVideo]] = self._group_date_videos_by_slot_time(date_videos_all=date_videos_all)
+        self._logger.info("[%s] Date branch started: %s slots=%d items=%d", branch.name, date_key, len(slots_by_time), len(date_videos_all))
         record_branch_started(branch_label=branch.name)
         record_date_branch_execution(date_key=date_key, branch_label=branch.name)
-        log_date_started(
-            logger=self._logger,
-            date_key=f"{date_key}/{branch.name}",
-            slot_count=len(slots_by_time),
-            item_count=len(date_videos_all),
-        )
+        log_date_started(logger=self._logger, date_key=f"{date_key}/{branch.name}", slot_count=len(slots_by_time), item_count=len(date_videos_all))
 
-        merge_snapshot_before: tuple[int, int, int, int, int, int] = (
-            merge_run_summary.primary_success,
+        merge_snapshot_before: tuple[int, int, int, int, int] = (
+            merge_run_summary.merge_success,
             merge_run_summary.validation_rejected,
-            merge_run_summary.primary_retry_used,
-            merge_run_summary.fallback_success,
+            merge_run_summary.retry_used,
             merge_run_summary.final_failure,
             merge_run_summary.paragraph_recovery_used,
         )
         slot_results: List[SlotProcessResult] = []
         for slot_time_key in sorted(slots_by_time.keys()):
-            if branch.packaging_overlay_enabled:
-                base_slot_result: Optional[SlotProcessResult] = slot_results_cache.get(
-                    (BRANCH_MERGE_MAIN, date_key, slot_time_key)
-                )
-                if base_slot_result is None:
-                    raise RuntimeError(
-                        f"Packaging branch requires {BRANCH_MERGE_MAIN} slot result first: date={date_key} slot={slot_time_key}"
-                    )
-                packaged_slot_result: SlotProcessResult = build_packaging_slot_result(
-                    logger=self._logger,
-                    config=self._config,
-                    source_slot_result=base_slot_result,
-                    branch_label=branch.name,
-                    date_key=date_key,
-                )
-                slot_results.append(packaged_slot_result)
-                slot_results_cache[(branch.name, date_key, slot_time_key)] = packaged_slot_result
-                continue
             processed_slot_result: SlotProcessResult = process_slot(
                 logger=self._logger,
                 config=self._config,
@@ -595,8 +463,10 @@ class BatchRunner:
                 merge_run_summary=merge_run_summary,
                 branch_label=branch.name,
             )
+            for merge_attempt in processed_slot_result.merge_audit_by_language.values():
+                if str(merge_attempt.model_name or "").strip():
+                    record_branch_model_used(date_key=date_key, branch_label=branch.name, model_name=merge_attempt.model_name)
             slot_results.append(processed_slot_result)
-            slot_results_cache[(branch.name, date_key, slot_time_key)] = processed_slot_result
         slot_processing_ms: int = int(round((time.perf_counter() - slot_processing_started_at) * 1000.0))
         record_stage_duration(stage_name="slot_processing", elapsed_ms=slot_processing_ms)
         log_stage_timing(
@@ -608,23 +478,21 @@ class BatchRunner:
             date_key=date_key,
         )
 
-        merge_snapshot_after: tuple[int, int, int, int, int, int] = (
-            merge_run_summary.primary_success,
+        merge_snapshot_after: tuple[int, int, int, int, int] = (
+            merge_run_summary.merge_success,
             merge_run_summary.validation_rejected,
-            merge_run_summary.primary_retry_used,
-            merge_run_summary.fallback_success,
+            merge_run_summary.retry_used,
             merge_run_summary.final_failure,
             merge_run_summary.paragraph_recovery_used,
         )
         log_merge_summary(
             logger=self._logger,
             groups=len(slot_results),
-            primary_success=merge_snapshot_after[0] - merge_snapshot_before[0],
+            merge_success=merge_snapshot_after[0] - merge_snapshot_before[0],
             validation_rejected=merge_snapshot_after[1] - merge_snapshot_before[1],
-            primary_retry_used=merge_snapshot_after[2] - merge_snapshot_before[2],
-            fallback_success=merge_snapshot_after[3] - merge_snapshot_before[3],
-            final_failure=merge_snapshot_after[4] - merge_snapshot_before[4],
-            paragraph_recovery_used=merge_snapshot_after[5] - merge_snapshot_before[5],
+            retry_used=merge_snapshot_after[2] - merge_snapshot_before[2],
+            final_failure=merge_snapshot_after[3] - merge_snapshot_before[3],
+            paragraph_recovery_used=merge_snapshot_after[4] - merge_snapshot_before[4],
         )
 
         self._log_section(f"Publish Daily Docs [{branch.name}]")
@@ -651,14 +519,7 @@ class BatchRunner:
             raise
         doc_publish_ms: int = int(round((time.perf_counter() - doc_publish_started_at) * 1000.0))
         record_stage_duration(stage_name="doc_publish", elapsed_ms=doc_publish_ms)
-        log_stage_timing(
-            logger=self._logger,
-            stage_name="doc_publish",
-            elapsed_ms=doc_publish_ms,
-            scope="branch",
-            branch_label=branch.name,
-            date_key=date_key,
-        )
+        log_stage_timing(logger=self._logger, stage_name="doc_publish", elapsed_ms=doc_publish_ms, scope="branch", branch_label=branch.name, date_key=date_key)
         docs_created_count: int = 0 if dry_run else 1
         record_docs_created(count=docs_created_count, date_key=date_key, branch_label=branch.name)
         log_docs_publish_summary(logger=self._logger, created=docs_created_count, failed=0)
@@ -684,68 +545,34 @@ class BatchRunner:
             record_telegram_failed(count=1, date_key=date_key, branch_label=branch.name)
             log_telegram_publish_summary(logger=self._logger, sent=0, failed=1, skipped=0)
             raise
-        telegram_publish_ms: int = int(
-            round((time.perf_counter() - telegram_publish_started_at) * 1000.0)
-        )
+        telegram_publish_ms: int = int(round((time.perf_counter() - telegram_publish_started_at) * 1000.0))
         record_stage_duration(stage_name="telegram_publish", elapsed_ms=telegram_publish_ms)
-        log_stage_timing(
-            logger=self._logger,
-            stage_name="telegram_publish",
-            elapsed_ms=telegram_publish_ms,
-            scope="branch",
-            branch_label=branch.name,
-            date_key=date_key,
-        )
+        log_stage_timing(logger=self._logger, stage_name="telegram_publish", elapsed_ms=telegram_publish_ms, scope="branch", branch_label=branch.name, date_key=date_key)
         record_telegram_sent(count=telegram_result.sent_count, date_key=date_key, branch_label=branch.name)
         record_telegram_failed(count=telegram_result.failed_count, date_key=date_key, branch_label=branch.name)
         record_telegram_skipped(count=telegram_result.skipped_count, date_key=date_key, branch_label=branch.name)
-        log_telegram_publish_summary(
-            logger=self._logger,
-            sent=telegram_result.sent_count,
-            failed=telegram_result.failed_count,
-            skipped=telegram_result.skipped_count,
-        )
+        log_telegram_publish_summary(logger=self._logger, sent=telegram_result.sent_count, failed=telegram_result.failed_count, skipped=telegram_result.skipped_count)
         record_branch_completed(branch_label=branch.name)
 
     def _log_audit_branch_compare(self, *, date_key: str) -> None:
-        merge_gpt_state = get_branch_date_summary(
-            date_key=date_key,
-            branch_label=BRANCH_MERGE_MAIN,
-        )
-        packaging_state = get_branch_date_summary(
-            date_key=date_key,
-            branch_label=BRANCH_MERGE_MAIN_FALLBACK_PACKAGING,
-        )
+        merge_state = get_branch_date_summary(date_key=date_key, branch_label=BRANCH_MERGE)
         nomerge_state = get_branch_date_summary(date_key=date_key, branch_label=BRANCH_NOMERGE)
-        if merge_gpt_state is None and packaging_state is None and nomerge_state is None:
+        if merge_state is None and nomerge_state is None:
             return
-        comparison_status: str = (
-            "complete"
-            if merge_gpt_state is not None and packaging_state is not None and nomerge_state is not None
-            else "incomplete"
-        )
+        comparison_status: str = "complete" if merge_state is not None and nomerge_state is not None else "incomplete"
         log_method = self._logger.info if comparison_status == "complete" else self._logger.debug
         log_method(
-            "audit_branch_compare date_key=%s merge_main_executed=%s packaging_executed=%s nomerge_executed=%s merge_main_doc_created=%s packaging_doc_created=%s nomerge_doc_created=%s merge_main_telegram_sent=%s packaging_telegram_sent=%s nomerge_telegram_sent=%s merge_main_contract_failures=%d packaging_contract_failures=%d nomerge_contract_failures=%d merge_main_models_used=%s packaging_models_used=%s nomerge_models_used=%s comparison_status=%s",
+            "audit_branch_compare date_key=%s merge_executed=%s nomerge_executed=%s merge_doc_created=%s nomerge_doc_created=%s merge_telegram_sent=%s nomerge_telegram_sent=%s merge_contract_failures=%d nomerge_contract_failures=%d merge_models_used=%s nomerge_models_used=%s comparison_status=%s",
             date_key,
-            "yes" if merge_gpt_state is not None else "no",
-            "yes" if packaging_state is not None else "no",
+            "yes" if merge_state is not None else "no",
             "yes" if nomerge_state is not None else "no",
-            "yes" if merge_gpt_state is not None and merge_gpt_state.docs_created > 0 else "no",
-            "yes" if packaging_state is not None and packaging_state.docs_created > 0 else "no",
+            "yes" if merge_state is not None and merge_state.docs_created > 0 else "no",
             "yes" if nomerge_state is not None and nomerge_state.docs_created > 0 else "no",
-            "yes" if merge_gpt_state is not None and merge_gpt_state.telegram_sent > 0 else "no",
-            "yes" if packaging_state is not None and packaging_state.telegram_sent > 0 else "no",
+            "yes" if merge_state is not None and merge_state.telegram_sent > 0 else "no",
             "yes" if nomerge_state is not None and nomerge_state.telegram_sent > 0 else "no",
-            merge_gpt_state.contract_failures if merge_gpt_state is not None else 0,
-            packaging_state.contract_failures if packaging_state is not None else 0,
+            merge_state.contract_failures if merge_state is not None else 0,
             nomerge_state.contract_failures if nomerge_state is not None else 0,
-            ",".join(sorted(merge_gpt_state.models_used))
-            if merge_gpt_state is not None and merge_gpt_state.models_used
-            else "none",
-            ",".join(sorted(packaging_state.models_used))
-            if packaging_state is not None and packaging_state.models_used
-            else "none",
+            ",".join(sorted(merge_state.models_used)) if merge_state is not None and merge_state.models_used else "none",
             ",".join(sorted(nomerge_state.models_used)) if nomerge_state is not None and nomerge_state.models_used else "none",
             comparison_status,
         )

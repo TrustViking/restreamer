@@ -8,11 +8,8 @@ from app.pipeline.slot_processing import SlotProcessResult
 
 @dataclass(frozen=True)
 class UsedRuntimeModels:
-    configured_primary_model: str
-    configured_fallback_model: str
+    configured_model: str
     used_generation_models: tuple[str, ...]
-    used_polish_models: tuple[str, ...]
-    used_packaging_models: tuple[str, ...]
     all_used_models: tuple[str, ...]
 
 
@@ -28,12 +25,9 @@ def _ordered_unique(values: Iterable[str]) -> tuple[str, ...]:
 def collect_used_runtime_models(
     *,
     slot_results: Sequence[SlotProcessResult],
-    configured_primary_model: str,
-    configured_fallback_model: str,
+    configured_model: str,
 ) -> UsedRuntimeModels:
     generation_models: list[str] = []
-    polish_models: list[str] = []
-    packaging_models: list[str] = []
     all_used_models: list[str] = []
     for slot in slot_results:
         for merge_attempt in slot.merge_audit_by_language.values():
@@ -43,21 +37,12 @@ def collect_used_runtime_models(
             )
             if generator_model_name:
                 generation_models.append(generator_model_name)
-            if merge_attempt.polish_accepted and str(merge_attempt.polish_model_name or "").strip():
-                polish_models.append(str(merge_attempt.polish_model_name or "").strip())
             for model_name in merge_attempt.used_model_names:
                 all_used_models.append(str(model_name or "").strip())
-            packaging_audit = merge_attempt.packaging_audit
-            if packaging_audit is not None and str(packaging_audit.packaging_model or "").strip():
-                packaging_models.append(str(packaging_audit.packaging_model or "").strip())
-                all_used_models.append(str(packaging_audit.packaging_model or "").strip())
     ordered_all_used_models: tuple[str, ...] = _ordered_unique(all_used_models)
     return UsedRuntimeModels(
-        configured_primary_model=str(configured_primary_model or "").strip(),
-        configured_fallback_model=str(configured_fallback_model or "").strip(),
+        configured_model=str(configured_model or "").strip(),
         used_generation_models=_ordered_unique(generation_models),
-        used_polish_models=_ordered_unique(polish_models),
-        used_packaging_models=_ordered_unique(packaging_models),
         all_used_models=ordered_all_used_models,
     )
 

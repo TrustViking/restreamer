@@ -13,8 +13,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--audit-mode",
         default="nomerge",
-        choices=("nomerge", "merge", "unite"),
-        help="Audit branch plan: nomerge, merge, or unite (nomerge then merge).",
+        metavar="{nomerge,merge,audit}",
+        help="Run nomerge only, merge only, or audit (nomerge then merge).",
     )
     parser.add_argument(
         "--dry-run",

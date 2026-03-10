@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppConfig
-from app.core.branching import BRANCH_MERGE_MAIN
+from app.core.branching import BRANCH_MERGE
 from app.core.models import LanguageMergeAttempt, MergedLanguageContent, PlannedVideo
 from app.llm.merge_polish import (
     MergePolishResult,
@@ -31,7 +31,7 @@ from app.llm.merge_parser import (
 )
 from app.llm.merge_run_summary import MergeRunSummary
 from app.llm.openai_client import LlmTraceContext, OpenAITransportResult, openai_request_merge
-from app.llm.provider_factory import get_llm_provider_for_target, get_llm_routing
+from app.llm.provider_factory import get_llm_provider
 from app.llm.providers.base import LlmProvider
 
 LOGGER = _get_logger_impl(__name__)
@@ -1145,9 +1145,8 @@ def attempt_llm_single_source_translate_with_audit(
     if len(videos) != 1:
         raise RuntimeError("single-source translate expects exactly one video")
     source_video: PlannedVideo = videos[0]
-    llm_routing = get_llm_routing(config=config)
-    model_name: str = llm_routing.primary.model
-    provider: LlmProvider = get_llm_provider_for_target(target=llm_routing.primary)
+    model_name: str = config.llm_model
+    provider: LlmProvider = get_llm_provider(config=config)
     main_source_label: str = _main_stage_field_source(provider_name=provider.name)
     try:
         raw_text: str = _request_plain_text(
@@ -1188,7 +1187,7 @@ def attempt_llm_single_source_translate_with_audit(
             raw_response_text=raw_text,
             merged=dataclasses.replace(
                 merged_content,
-                branch_type=BRANCH_MERGE_MAIN,
+                branch_type=BRANCH_MERGE,
                 title_source=main_source_label,
                 hook_source=main_source_label,
                 hashtags_source=main_source_label,
@@ -1199,7 +1198,7 @@ def attempt_llm_single_source_translate_with_audit(
             publish_source_label="single_source_plain_ok",
             generator_model_name=model_name,
             used_model_names=(model_name,),
-            branch_type=BRANCH_MERGE_MAIN,
+            branch_type=BRANCH_MERGE,
             title_source=main_source_label,
             hook_source=main_source_label,
             hashtags_source=main_source_label,
@@ -1216,7 +1215,7 @@ def attempt_llm_single_source_translate_with_audit(
             publish_source_label="single_source_plain_failed",
             generator_model_name=model_name,
             used_model_names=(model_name,),
-            branch_type=BRANCH_MERGE_MAIN,
+            branch_type=BRANCH_MERGE,
             title_source=main_source_label,
             hook_source=main_source_label,
             hashtags_source="fallback_none",
@@ -1576,9 +1575,8 @@ def attempt_llm_merge_with_audit(
     slot_key: str = "unknown",
 ) -> LanguageMergeAttempt:
     del normalize_youtube_url
-    llm_routing = get_llm_routing(config=config)
-    primary_model: str = llm_routing.primary.model
-    primary_provider: LlmProvider = get_llm_provider_for_target(target=llm_routing.primary)
+    primary_model: str = config.llm_model
+    primary_provider: LlmProvider = get_llm_provider(config=config)
     main_source_label: str = _main_stage_field_source(provider_name=primary_provider.name)
     last_raw_response: str = ""
     last_error_summary: str = "unknown error"
@@ -1602,7 +1600,7 @@ def attempt_llm_merge_with_audit(
                 primary_model,
             )
             if merge_run_summary is not None:
-                merge_run_summary.record_primary_retry_used()
+                merge_run_summary.record_retry_used()
         try:
             merged_content, raw_response_text = _attempt_merge_once(
                 language=language,
@@ -1619,9 +1617,9 @@ def attempt_llm_merge_with_audit(
             )
             last_raw_response = raw_response_text
             if merge_run_summary is not None:
-                merge_run_summary.record_primary_success()
+                merge_run_summary.record_merge_success()
             LOGGER.info(
-                "merge_main_branch_ready branch=%s date_key=%s slot_key=%s language=%s generator_model=%s",
+                "merge_branch_ready branch=%s date_key=%s slot_key=%s language=%s generator_model=%s",
                 branch_label,
                 date_key,
                 slot_key,
@@ -1639,7 +1637,7 @@ def attempt_llm_merge_with_audit(
                 raw_response_text=raw_response_text,
                 merged=dataclasses.replace(
                     merged_content,
-                    branch_type=BRANCH_MERGE_MAIN,
+                    branch_type=BRANCH_MERGE,
                     title_source=main_source_label,
                     hook_source=main_source_label,
                     hashtags_source=main_source_label,
@@ -1650,7 +1648,7 @@ def attempt_llm_merge_with_audit(
                 publish_source_label="primary_success",
                 generator_model_name=primary_model,
                 used_model_names=(primary_model,),
-                branch_type=BRANCH_MERGE_MAIN,
+                branch_type=BRANCH_MERGE,
                 title_source=main_source_label,
                 hook_source=main_source_label,
                 hashtags_source=main_source_label,
@@ -1719,7 +1717,7 @@ def attempt_llm_merge_with_audit(
         publish_source_label="merge_failed",
         generator_model_name=primary_model,
         used_model_names=(primary_model,),
-        branch_type=BRANCH_MERGE_MAIN,
+        branch_type=BRANCH_MERGE,
         title_source=main_source_label,
         hook_source=main_source_label,
         hashtags_source="fallback_none",

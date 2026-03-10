@@ -139,7 +139,10 @@ llm:
     Russian: "🌐 Официальные ссылки:"
     Then list 1 to 3 meaningful links from sources only.
     Never include YouTube source links in this official links block.
-    Optional Paragraph 3 (short close): 1 compact practical close line with a light CTA and 2 to 5 relevant hashtags.
+    Optional Paragraph 3 (short close): 1 compact practical CTA close line only.
+    If you add hashtags, they must be written on a separate final line after the CTA line.
+    Never append hashtags at the end of the CTA line.
+    The hashtags line must be a standalone final line containing only 2 to 5 relevant hashtags.
     Keep the close concrete; avoid abstract slogans.
     Do not enumerate sources as 1) 2) 3).
     Do not write a dry digest, protocol, or generic filler text.

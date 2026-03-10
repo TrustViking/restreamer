@@ -36,7 +36,7 @@ def _resolve_llm_merge_enabled(
     resolved_audit_mode: str,
     run_id: str,
 ) -> bool:
-    primary_attempts: int = 2
+    max_attempts: int = 2
     log_section(logger=logger, title="LLM API")
     logger.info(
         "run_id=%s Processing mode selected: audit audit_mode=%s",
@@ -53,54 +53,31 @@ def _resolve_llm_merge_enabled(
         llm_summary.provider,
     )
     logger.info(
-        "LLM policy: provider=%s primary_model=%s fallback_model=%s base_url=%s usage_reporting_mode=%s",
+        "LLM policy: provider=%s model=%s usage_reporting_mode=%s",
         llm_summary.provider,
-        llm_summary.effective_primary_model,
-        llm_summary.effective_fallback_model,
-        llm_summary.base_url,
+        llm_summary.model,
         llm_summary.usage_reporting_mode,
     )
     logger.info(
-        "LLM merge policy provider=%s primary_attempts=%d packaging_stage_enabled=%s merge_stage_model=%s packaging_stage_model=%s max_output_tokens=%d source_desc_max_chars=%d pre_delay_sec=%.1f",
+        "LLM merge policy provider=%s max_attempts=%d max_output_tokens=%d source_desc_max_chars=%d pre_delay_sec=%.1f",
         llm_summary.provider,
-        primary_attempts,
-        "yes" if bool(str(llm_summary.packaging_stage_model or "").strip()) else "no",
-        llm_summary.merge_stage_model,
-        llm_summary.packaging_stage_model,
+        max_attempts,
         config.openai_max_output_tokens,
         config.llm_source_desc_max_chars,
         config.openai_pre_delay_sec,
     )
-    if llm_summary.primary_provider == "deepseek":
-        logger.info(
-            "DeepSeek merge policy model.primary=%s model.fallback=%s timeout_sec=%.1f base_url=%s",
-            llm_summary.effective_primary_model,
-            llm_summary.effective_fallback_model,
-            config.deepseek_timeout_sec,
-            config.deepseek_base_url,
-        )
-        logger.info(
-            "LLM usage reporting note: provider=deepseek openai_usage_summary_expected=no reporting_mode=%s",
-            llm_summary.usage_reporting_mode,
-        )
-    else:
-        logger.info(
-            "OpenAI merge policy model.primary=%s model.fallback=%s timeout_sec=%.1f",
-            llm_summary.effective_primary_model,
-            llm_summary.effective_fallback_model,
-            config.openai_timeout_sec,
-        )
-        logger.info(
-            "LLM usage reporting note: provider=openai openai_usage_summary_expected=yes reporting_mode=%s",
-            llm_summary.usage_reporting_mode,
-        )
-    provider_api_ready: bool = False
-    if "openai" in llm_summary.providers_used and bool(os.getenv("GPT_API_KEY", "").strip()):
-        provider_api_ready = True
-    if "deepseek" in llm_summary.providers_used and bool(os.getenv("DPSK_API_KEY", "").strip()):
-        provider_api_ready = True
+    logger.info(
+        "OpenAI merge policy model=%s timeout_sec=%.1f",
+        llm_summary.model,
+        config.openai_timeout_sec,
+    )
+    logger.info(
+        "LLM usage reporting note: provider=openai openai_usage_summary_expected=yes reporting_mode=%s",
+        llm_summary.usage_reporting_mode,
+    )
+    provider_api_ready: bool = bool(os.getenv("GPT_API_KEY", "").strip())
     llm_merge_enabled: bool = False
-    merge_mode_enabled: bool = resolved_audit_mode in {"merge", "unite"}
+    merge_mode_enabled: bool = resolved_audit_mode in {"merge", "audit"}
     llm_allow_in_dry_run: bool = llm_allow_in_dry_run_from_env()
     if merge_mode_enabled:
         llm_merge_enabled = provider_api_ready

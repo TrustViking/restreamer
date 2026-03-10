@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
@@ -20,6 +21,18 @@ from app.publish.doc_helpers import (
 
 
 LOGGER = _get_logger_impl(__name__)
+
+
+@dataclass(frozen=True)
+class PreviewInsertPlan:
+    row_index: int
+    row_number: int
+    language: str
+    paragraph_insert_index: int
+    plus_one_used: bool
+    effective_offset: int
+    link_index: int
+    image_index: int
 
 
 class GoogleDocsReportWriter:
@@ -304,6 +317,29 @@ class GoogleDocsReportWriter:
             idx: int = _cell_index(row=row_index, col=0, columns=columns)
             return updated_indices[idx] + 1
 
+        def _build_preview_insert_plan(
+            *,
+            row_index: int,
+            row_number: int,
+            language: str,
+            link_text: str,
+            plus_one_used: bool,
+        ) -> PreviewInsertPlan:
+            paragraph_insert_index: int = _refresh_row_start_index(row_index)
+            effective_offset: int = 1 if plus_one_used else 0
+            link_index: int = paragraph_insert_index + effective_offset
+            image_index: int = link_index + len(link_text)
+            return PreviewInsertPlan(
+                row_index=row_index,
+                row_number=row_number,
+                language=language,
+                paragraph_insert_index=paragraph_insert_index,
+                plus_one_used=plus_one_used,
+                effective_offset=effective_offset,
+                link_index=link_index,
+                image_index=image_index,
+            )
+
         indexed_videos: List[Tuple[int, PlannedVideo]] = list(
             enumerate(videos, start=1)
         )
@@ -327,25 +363,38 @@ class GoogleDocsReportWriter:
                     language,
                 )
                 continue
-            link_inserted: bool = False
+            successful_preview_plan: Optional[PreviewInsertPlan] = None
             link_insert_error: str = ""
             for use_plus_one in (False, True):
                 try:
-                    refreshed_start_index: int = _refresh_row_start_index(row_index)
+                    preview_insert_plan: PreviewInsertPlan = _build_preview_insert_plan(
+                        row_index=row_index,
+                        row_number=video.row_number,
+                        language=language,
+                        link_text=link_text,
+                        plus_one_used=use_plus_one,
+                    )
                     self._docs_client.batch_update(
                         document_id=document_id,
                         requests_payload=[
                             {
                                 "insertText": {
-                                    "location": {
-                                        "index": refreshed_start_index + (1 if use_plus_one else 0)
-                                    },
+                                    "location": {"index": preview_insert_plan.link_index},
                                     "text": link_text,
                                 }
                             }
                         ],
                     )
-                    link_inserted = True
+                    successful_preview_plan = preview_insert_plan
+                    LOGGER.info(
+                        "preview_insert row=%d lang=%s stage=link link_plus_one_used=%s effective_offset=%d paragraph_insert_index=%d link_index=%d",
+                        preview_insert_plan.row_number,
+                        preview_insert_plan.language,
+                        "yes" if preview_insert_plan.plus_one_used else "no",
+                        preview_insert_plan.effective_offset,
+                        preview_insert_plan.paragraph_insert_index,
+                        preview_insert_plan.link_index,
+                    )
                     if use_plus_one:
                         LOGGER.info(
                             "Preview link insert recovered with plus_one=True for row %d in language %s.",
@@ -355,7 +404,7 @@ class GoogleDocsReportWriter:
                     break
                 except Exception as error:
                     link_insert_error = str(error)
-            if not link_inserted:
+            if successful_preview_plan is None:
                 LOGGER.warning(
                     "Preview link insert failed for row %d in language %s. row_index=%d start_index=%d link_length=%d reason=%s",
                     video.row_number,
@@ -370,15 +419,12 @@ class GoogleDocsReportWriter:
             inserted: bool = False
             for image_uri in _thumbnail_candidates(video):
                 try:
-                    row_start_index = _refresh_row_start_index(row_index)
                     self._docs_client.batch_update(
                         document_id=document_id,
                         requests_payload=[
                             {
                                 "insertInlineImage": {
-                                    "location": {
-                                        "index": row_start_index + len(link_text)
-                                    },
+                                    "location": {"index": successful_preview_plan.image_index},
                                     "uri": image_uri,
                                     "objectSize": {
                                         "height": {"magnitude": 120, "unit": "PT"},
@@ -387,6 +433,14 @@ class GoogleDocsReportWriter:
                                 }
                             },
                         ],
+                    )
+                    LOGGER.info(
+                        "preview_insert row=%d lang=%s stage=image link_plus_one_used=%s effective_offset=%d image_index=%d link_and_image_mode=aligned",
+                        successful_preview_plan.row_number,
+                        successful_preview_plan.language,
+                        "yes" if successful_preview_plan.plus_one_used else "no",
+                        successful_preview_plan.effective_offset,
+                        successful_preview_plan.image_index,
                     )
                     inserted = True
                     break

@@ -41,13 +41,7 @@ class RunContext:
     google_enabled: bool
     telegram_enabled: bool
     llm_provider: str
-    llm_primary_provider: str
-    llm_fallback_provider: str
-    llm_effective_primary_model: str
-    llm_effective_fallback_model: str
-    llm_merge_stage_model: str
-    llm_packaging_stage_model: str
-    llm_base_url: str
+    llm_model: str
     llm_usage_reporting_mode: str
     sheet_id: str
     sheet_range: str
@@ -115,13 +109,7 @@ def build_run_context(
         google_enabled=config.google_enabled,
         telegram_enabled=config.telegram_enabled,
         llm_provider=config.llm_provider,
-        llm_primary_provider=llm_summary.primary_provider,
-        llm_fallback_provider=llm_summary.fallback_provider,
-        llm_effective_primary_model=llm_summary.effective_primary_model,
-        llm_effective_fallback_model=llm_summary.effective_fallback_model,
-        llm_merge_stage_model=llm_summary.effective_primary_model,
-        llm_packaging_stage_model=llm_summary.effective_fallback_model,
-        llm_base_url=llm_summary.base_url,
+        llm_model=llm_summary.model,
         llm_usage_reporting_mode=llm_summary.usage_reporting_mode,
         sheet_id=config.google_sheets_id,
         sheet_range=config.google_sheets_range,
