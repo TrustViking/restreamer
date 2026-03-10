@@ -132,6 +132,11 @@ llm:
     If names are present in sources, surface 1 to 3 key names in bullets or as a short participants line.
     Avoid asserting strong person titles or role labels unless they are clearly necessary and well-supported by the sources.
     You may use light emoji in the description only, sparingly and only from the allowed marker set above.
+    You may include 0, 1, or 2 YouTube URLs from the allowed candidates block only.
+    Choosing none is valid.
+    Pick only the most relevant main streams, with priority to longer broadcasts.
+    Do not pick short promo, teaser, clip, or secondary videos.
+    If you include selected YouTube URLs, place each selected URL on its own line near the end of the description before any official links block or CTA.
     Optional official links block: if sources contain meaningful official links, you may add a short block before close paragraph.
     Heading must be language-aware:
     Ukrainian: "🌐 Офіційні ресурси:"
@@ -152,10 +157,12 @@ llm:
     title, description.
     Do not output markdown fences, notes, variants, or explanations.
 
+    {youtube_candidates_block}
+
     {sources_block}
 
 files:
-  doc_title_template: "{date}_{processing_mode}_Everyday_streams{llm_models_segment}_{creation_stamp}"
+  doc_title_template: "{date}_{processing_mode}_Ежедневные стримы - Everyday streams{llm_models_segment}_{creation_stamp}"
   preview_name_template: "{index}_{language}_{title}"
   language_codes:
     uk: "UA"

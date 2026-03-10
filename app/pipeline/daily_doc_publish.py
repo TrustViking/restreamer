@@ -29,7 +29,7 @@ from app.paths.output_naming import (
     render_doc_title_models_segment,
 )
 from app.planning import format_time_key_for_display
-from app.publish import GoogleDocsReportWriter
+from app.publish.google_docs_writer import GoogleDocsReportWriter
 from app.publish.doc_helpers import _build_descriptions_summary, _build_titles_summary
 from app.publish.post_llm_sanitation import sanitize_post_llm_title
 

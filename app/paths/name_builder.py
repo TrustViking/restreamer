@@ -14,6 +14,17 @@ def _render_template(template: str, values: Dict[str, Any]) -> str:
         raise RuntimeError(f"Template render failed, missing key: {error}") from error
 
 
+def _normalize_local_filename_stem(value: str) -> str:
+    normalized_value: str = str(value or "").strip()
+    normalized_value = re.sub(r"\s+", "_", normalized_value)
+    normalized_value = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", normalized_value)
+    normalized_value = re.sub(r"_(?:[-_]+)", "_", normalized_value)
+    normalized_value = re.sub(r"(?:[-_]+)_", "_", normalized_value)
+    normalized_value = re.sub(r"_+", "_", normalized_value)
+    normalized_value = re.sub(r"^\W+|\W+$", "", normalized_value, flags=re.UNICODE)
+    return normalized_value.strip("._-")
+
+
 def _transliterate_cyrillic_to_latin(value: str) -> str:
     mapping: Dict[str, str] = {
         "а": "a",
@@ -156,12 +167,7 @@ class NamePathBuilder:
         if self._local_doc_dir_template is None:
             return None
         base_dir: str = self._local_doc_dir_template.format(date=date_key)
-        safe_stem: str = re.sub(
-            r"[^A-Za-z0-9._,\-\[\]]+",
-            "_",
-            str(doc_title or "").strip(),
-        )
-        safe_stem = re.sub(r"_+", "_", safe_stem).strip("._-")
+        safe_stem: str = _normalize_local_filename_stem(str(doc_title or "").strip())
         safe_stem = safe_stem[: self._max_filename_stem].rstrip("._-") or "document"
         return Path(base_dir) / f"{safe_stem}.docx"
 

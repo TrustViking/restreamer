@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Sequence
-
-from app.pipeline.slot_processing import SlotProcessResult
+from typing import Any, Iterable, Sequence
 
 
 @dataclass(frozen=True)
@@ -24,7 +22,7 @@ def _ordered_unique(values: Iterable[str]) -> tuple[str, ...]:
 
 def collect_used_runtime_models(
     *,
-    slot_results: Sequence[SlotProcessResult],
+    slot_results: Sequence[Any],
     configured_model: str,
 ) -> UsedRuntimeModels:
     generation_models: list[str] = []

@@ -11,7 +11,7 @@ from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.core.env_flags import sheets_link_normalize_report_limit_from_env
 from app.core.models import PlannedVideo, PreparedVideo
 from app.ingest.youtube_metadata import YouTubeMetadataFetcher
-from app.llm import MergeRunSummary
+from app.llm.merge_run_summary import MergeRunSummary
 from app.net.http_client import HttpClient
 from app.observability.runtime_analytics import (
     get_branch_date_summary,
@@ -495,6 +495,45 @@ class BatchRunner:
             paragraph_recovery_used=merge_snapshot_after[4] - merge_snapshot_before[4],
         )
 
+        real_merge_blocks: int = sum(slot.real_merge_blocks for slot in slot_results)
+        merge_doc_allowed: bool = (
+            branch.name != BRANCH_MERGE or real_merge_blocks > 0
+        )
+        merge_doc_reason: str = (
+            "real_merge_blocks_present"
+            if branch.name == BRANCH_MERGE and merge_doc_allowed
+            else (
+                "nomerge_branch_publish_mode"
+                if branch.name == BRANCH_NOMERGE and merge_doc_allowed
+                else "no_real_merge_blocks"
+            )
+        )
+        self._logger.info(
+            "[%s] merge_doc_decision date_key=%s had_real_merge_blocks=%s real_merge_blocks=%d merge_doc_allowed=%s reason=%s",
+            branch.name,
+            date_key,
+            "yes" if real_merge_blocks > 0 else "no",
+            real_merge_blocks,
+            "yes" if merge_doc_allowed else "no",
+            merge_doc_reason,
+        )
+        if not merge_doc_allowed:
+            self._logger.info(
+                "[%s] merge_doc_result date_key=%s merge_doc_created=no reason=no_real_merge_blocks",
+                branch.name,
+                date_key,
+            )
+            log_docs_publish_summary(logger=self._logger, created=0, failed=0)
+            log_telegram_publish_summary(logger=self._logger, sent=0, failed=0, skipped=1)
+            record_telegram_skipped(count=1, date_key=date_key, branch_label=branch.name)
+            record_branch_completed(branch_label=branch.name)
+            self._logger.info(
+                "[%s] merge_artifact_skipped date_key=%s reason=no_real_merge_blocks",
+                branch.name,
+                date_key,
+            )
+            return
+
         self._log_section(f"Publish Daily Docs [{branch.name}]")
         doc_publish_started_at: float = time.perf_counter()
         try:
@@ -521,6 +560,13 @@ class BatchRunner:
         record_stage_duration(stage_name="doc_publish", elapsed_ms=doc_publish_ms)
         log_stage_timing(logger=self._logger, stage_name="doc_publish", elapsed_ms=doc_publish_ms, scope="branch", branch_label=branch.name, date_key=date_key)
         docs_created_count: int = 0 if dry_run else 1
+        self._logger.info(
+            "[%s] merge_doc_result date_key=%s merge_doc_created=%s reason=%s",
+            branch.name,
+            date_key,
+            "yes" if doc_publish_result.google_doc_created else "no",
+            "published" if doc_publish_result.google_doc_created else ("dry_run" if dry_run else "not_created"),
+        )
         record_docs_created(count=docs_created_count, date_key=date_key, branch_label=branch.name)
         log_docs_publish_summary(logger=self._logger, created=docs_created_count, failed=0)
 

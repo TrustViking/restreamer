@@ -184,6 +184,42 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
         self.assertIn("official_links_final_count=2", logs)
         self.assertIn("official_links_dedup_applied=yes", logs)
 
+    def test_source_youtube_urls_are_not_auto_injected(self) -> None:
+        merged_content: MergedLanguageContent = self._payload(
+            "Body paragraph.\n\nJoin us tonight and share your thoughts."
+        )
+        payload = build_sanitized_merged_publication_payload(
+            language="en",
+            merged_content=merged_content,
+            merge_attempt=None,
+            use_audit_text=False,
+            source_videos=[
+                self._video("https://youtu.be/aaaaaaaaaaa"),
+                self._video("https://www.youtube.com/watch?v=bbbbbbbbbbb"),
+            ],
+        )
+        self.assertNotIn("youtu", payload.description_text)
+
+    def test_explicit_selected_youtube_urls_are_preserved_without_source_auto_fill(self) -> None:
+        merged_content: MergedLanguageContent = self._payload(
+            "Body paragraph.\n\n"
+            "https://youtu.be/ccccccccccc\n\n"
+            "Join us tonight and share your thoughts."
+        )
+        payload = build_sanitized_merged_publication_payload(
+            language="en",
+            merged_content=merged_content,
+            merge_attempt=None,
+            use_audit_text=False,
+            source_videos=[
+                self._video("https://youtu.be/aaaaaaaaaaa"),
+                self._video("https://youtu.be/bbbbbbbbbbb"),
+            ],
+        )
+        self.assertIn("https://youtu.be/ccccccccccc", payload.description_text)
+        self.assertNotIn("https://youtu.be/aaaaaaaaaaa", payload.description_text)
+        self.assertNotIn("https://youtu.be/bbbbbbbbbbb", payload.description_text)
+
 
 if __name__ == "__main__":
     unittest.main()

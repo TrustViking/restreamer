@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 import restreamer
 from app.bootstrap.run_context import RunContext, StartupContext
-from app.core.branching import BRANCH_MERGE_MAIN, BRANCH_MERGE_MAIN_FALLBACK_PACKAGING
 from app.observability.runtime_analytics import log_run_context
 from app.observability.startup_health import run_startup_health_checks
 from app.observability.startup_summary import log_config_summary, log_startup_summary
@@ -19,20 +18,14 @@ from restreamer import _apply_llm_usage_reset, _log_llm_usage_reports
 class ProviderAwareUsageHooksTests(unittest.TestCase):
     def test_openai_usage_hooks_are_active(self) -> None:
         logger = logging.getLogger("provider-aware-openai-usage")
-        config = SimpleNamespace(llm_provider="openai", openai_model_primary="gpt-5.1", openai_model_fallback="gpt-5-mini")
         with patch("restreamer.reset_run_local_openai_usage") as reset_mock, patch(
             "restreamer.log_run_local_openai_usage"
         ) as local_usage_mock, patch("restreamer.log_openai_limits_and_usage") as org_usage_mock, self.assertLogs(
             logger, level="INFO"
         ) as captured:
-            _apply_llm_usage_reset(
-                logger=logger,
-                llm_summary=SimpleNamespace(provider="openai", providers_used=("openai",)),
-            )
-            _log_llm_usage_reports(
-                logger=logger,
-                llm_summary=SimpleNamespace(provider="openai", providers_used=("openai",)),
-            )
+            llm_summary = SimpleNamespace(provider="openai")
+            _apply_llm_usage_reset(logger=logger, llm_summary=llm_summary)
+            _log_llm_usage_reports(logger=logger, llm_summary=llm_summary)
         self.assertEqual(1, reset_mock.call_count)
         self.assertEqual(1, local_usage_mock.call_count)
         self.assertEqual(1, org_usage_mock.call_count)
@@ -40,57 +33,22 @@ class ProviderAwareUsageHooksTests(unittest.TestCase):
         self.assertIn("llm_usage_reset_applied provider=openai", text)
         self.assertIn("llm_usage_report_completed provider=openai status=completed", text)
 
-    def test_deepseek_usage_hooks_are_skipped(self) -> None:
+    def test_non_openai_provider_skips_reset_but_keeps_usage_report_logging(self) -> None:
         logger = logging.getLogger("provider-aware-deepseek-usage")
-        config = SimpleNamespace(llm_provider="deepseek", deepseek_model="deepseek-chat")
         with patch("restreamer.reset_run_local_openai_usage") as reset_mock, patch(
             "restreamer.log_run_local_openai_usage"
         ) as local_usage_mock, patch("restreamer.log_openai_limits_and_usage") as org_usage_mock, self.assertLogs(
             logger, level="INFO"
         ) as captured:
-            _apply_llm_usage_reset(
-                logger=logger,
-                llm_summary=SimpleNamespace(provider="deepseek", providers_used=("deepseek",)),
-            )
-            _log_llm_usage_reports(
-                logger=logger,
-                llm_summary=SimpleNamespace(provider="deepseek", providers_used=("deepseek",)),
-            )
-        self.assertEqual(0, reset_mock.call_count)
-        self.assertEqual(0, local_usage_mock.call_count)
-        self.assertEqual(0, org_usage_mock.call_count)
-        text: str = "\n".join(captured.output)
-        self.assertIn("llm_usage_reset_skipped provider=deepseek reason=provider_not_openai", text)
-        self.assertIn("llm_usage_report_skipped provider=deepseek reason=provider_not_openai", text)
-        self.assertIn("llm_org_usage_report_skipped provider=deepseek reason=provider_not_openai", text)
-        self.assertIn(
-            "llm_usage_report_completed provider=deepseek status=skipped_provider_logs_only",
-            text,
-        )
-
-    def test_openai_usage_hooks_remain_active_when_openai_is_only_fallback(self) -> None:
-        logger = logging.getLogger("provider-aware-mixed-usage")
-        config = SimpleNamespace(
-            llm_provider="deepseek",
-            llm_main_model="deepseek-chat",
-            llm_fallback_model="gpt-5.1",
-            deepseek_model="deepseek-chat",
-            openai_model_primary="gpt-5.1",
-            openai_model_fallback="gpt-5-mini",
-        )
-        with patch("restreamer.reset_run_local_openai_usage") as reset_mock, patch(
-            "restreamer.log_run_local_openai_usage"
-        ) as local_usage_mock, patch("restreamer.log_openai_limits_and_usage") as org_usage_mock, self.assertLogs(
-            logger, level="INFO"
-        ) as captured:
-            llm_summary = SimpleNamespace(provider="deepseek", providers_used=("deepseek", "openai"))
+            llm_summary = SimpleNamespace(provider="deepseek")
             _apply_llm_usage_reset(logger=logger, llm_summary=llm_summary)
             _log_llm_usage_reports(logger=logger, llm_summary=llm_summary)
-        self.assertEqual(1, reset_mock.call_count)
+        self.assertEqual(0, reset_mock.call_count)
         self.assertEqual(1, local_usage_mock.call_count)
         self.assertEqual(1, org_usage_mock.call_count)
         text: str = "\n".join(captured.output)
-        self.assertIn("llm_usage_reset_applied provider=deepseek", text)
+        self.assertIn("llm_usage_reset_skipped provider=deepseek reason=provider_not_openai", text)
+        self.assertIn("llm_usage_report_start provider=deepseek", text)
         self.assertIn("llm_usage_report_completed provider=deepseek status=completed", text)
 
 
@@ -99,31 +57,21 @@ class ProviderAwareSummaryTests(unittest.TestCase):
         self,
         *,
         provider: str,
-        primary_provider: str,
-        fallback_provider: str,
-        primary_model: str,
-        fallback_model: str,
-        base_url: str,
+        model: str,
         usage_reporting_mode: str,
     ) -> RunContext:
         return RunContext(
             run_id="run",
             processing_mode="audit",
-            audit_mode="merge",
+            audit_mode="audit",
             config_processing_mode="audit",
-            audit_branches=["merge"],
+            audit_branches=["nomerge", "merge"],
             debug_enabled=False,
             dry_run=False,
             google_enabled=False,
             telegram_enabled=False,
             llm_provider=provider,
-            llm_primary_provider=primary_provider,
-            llm_fallback_provider=fallback_provider,
-            llm_effective_primary_model=primary_model,
-            llm_effective_fallback_model=fallback_model,
-            llm_merge_stage_model=primary_model,
-            llm_packaging_stage_model=fallback_model,
-            llm_base_url=base_url,
+            llm_model=model,
             llm_usage_reporting_mode=usage_reporting_mode,
             sheet_id="sheet-id",
             sheet_range="A:F",
@@ -136,7 +84,7 @@ class ProviderAwareSummaryTests(unittest.TestCase):
         return StartupContext(
             run_id="run",
             argv_list=[],
-            args_audit_mode="merge",
+            args_audit_mode="audit",
             args_debug=False,
             args_dry_run=False,
             processing_mode="audit",
@@ -160,15 +108,8 @@ class ProviderAwareSummaryTests(unittest.TestCase):
             processing_mode="audit",
             now_tz_mode="kyiv",
             llm_provider=provider,
-            llm_main_model="gpt-5.1" if provider == "openai" else "deepseek-chat",
-            llm_fallback_model="gpt-5-mini" if provider == "openai" else "deepseek-chat",
-            openai_model_primary="gpt-5.1",
-            openai_model_fallback="gpt-5-mini",
+            llm_model="gpt-5.1" if provider == "openai" else "deepseek-chat",
             openai_timeout_sec=30.0,
-            deepseek_model="deepseek-chat",
-            deepseek_base_url="https://api.deepseek.com/v1",
-            deepseek_timeout_sec=45.0,
-            deepseek_max_retries=2,
             openai_max_output_tokens=1000,
             llm_source_desc_max_chars=500,
             llm_run_if_single_source=False,
@@ -176,7 +117,7 @@ class ProviderAwareSummaryTests(unittest.TestCase):
             local_doc_dir_template="D:\\docs\\{date}",
         )
 
-    def test_openai_summary_fields_show_provider_aware_values(self) -> None:
+    def test_openai_summary_fields_show_current_values(self) -> None:
         logger = logging.getLogger("provider-aware-openai-summary")
         config = self._config("openai")
         with self.assertLogs(logger, level="INFO") as captured:
@@ -185,24 +126,12 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 config,
                 SimpleNamespace(
                     provider="openai",
-                    primary_provider="openai",
-                    fallback_provider="openai",
-                    effective_primary_model="gpt-5.1",
-                    effective_fallback_model="gpt-5-mini",
-                    merge_stage_model="gpt-5.1",
-                    packaging_stage_model="gpt-5-mini",
-                    base_url="default_openai",
+                    model="gpt-5.1",
                     usage_reporting_mode="openai_run_local+openai_org_snapshot",
-                    providers_used=("openai",),
-                    is_mixed_provider=False,
                 ),
                 self._run_context(
                     provider="openai",
-                    primary_provider="openai",
-                    fallback_provider="openai",
-                    primary_model="gpt-5.1",
-                    fallback_model="gpt-5-mini",
-                    base_url="default_openai",
+                    model="gpt-5.1",
                     usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
             )
@@ -210,26 +139,16 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 logger,
                 self._run_context(
                     provider="openai",
-                    primary_provider="openai",
-                    fallback_provider="openai",
-                    primary_model="gpt-5.1",
-                    fallback_model="gpt-5-mini",
-                    base_url="default_openai",
+                    model="gpt-5.1",
                     usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
             )
         text: str = "\n".join(captured.output)
         self.assertIn("llm_provider=openai", text)
-        self.assertIn("llm_primary_provider=openai", text)
-        self.assertIn("llm_fallback_provider=openai", text)
-        self.assertIn("llm_effective_primary_model=gpt-5.1", text)
-        self.assertIn("llm_effective_fallback_model=gpt-5-mini", text)
-        self.assertIn("merge_stage_model=gpt-5.1", text)
-        self.assertIn("packaging_stage_model=gpt-5-mini", text)
-        self.assertIn("llm_base_url=default_openai", text)
+        self.assertIn("llm_model=gpt-5.1", text)
         self.assertIn("llm_usage_reporting_mode=openai_run_local+openai_org_snapshot", text)
 
-    def test_deepseek_summary_fields_show_provider_aware_values(self) -> None:
+    def test_deepseek_summary_fields_show_current_values(self) -> None:
         logger = logging.getLogger("provider-aware-deepseek-summary")
         config = self._config("deepseek")
         with self.assertLogs(logger, level="INFO") as captured:
@@ -238,25 +157,13 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 config,
                 SimpleNamespace(
                     provider="deepseek",
-                    primary_provider="deepseek",
-                    fallback_provider="openai",
-                    effective_primary_model="deepseek-chat",
-                    effective_fallback_model="gpt-5.1",
-                    merge_stage_model="deepseek-chat",
-                    packaging_stage_model="gpt-5.1",
-                    base_url="primary=https://api.deepseek.com/v1;fallback=default_openai",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot+provider_logs_only",
-                    providers_used=("deepseek", "openai"),
-                    is_mixed_provider=True,
+                    model="deepseek-chat",
+                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
                 self._run_context(
                     provider="deepseek",
-                    primary_provider="deepseek",
-                    fallback_provider="openai",
-                    primary_model="deepseek-chat",
-                    fallback_model="gpt-5.1",
-                    base_url="primary=https://api.deepseek.com/v1;fallback=default_openai",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot+provider_logs_only",
+                    model="deepseek-chat",
+                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
             )
             log_startup_summary(
@@ -264,43 +171,25 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 self._startup_context(),
                 SimpleNamespace(
                     provider="deepseek",
-                    primary_provider="deepseek",
-                    fallback_provider="openai",
-                    effective_primary_model="deepseek-chat",
-                    effective_fallback_model="gpt-5.1",
-                    merge_stage_model="deepseek-chat",
-                    packaging_stage_model="gpt-5.1",
-                    base_url="primary=https://api.deepseek.com/v1;fallback=default_openai",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot+provider_logs_only",
-                    providers_used=("deepseek", "openai"),
-                    is_mixed_provider=True,
+                    model="deepseek-chat",
+                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
             )
         text: str = "\n".join(captured.output)
         self.assertIn("llm_provider=deepseek", text)
-        self.assertIn("llm_primary_provider=deepseek", text)
-        self.assertIn("llm_fallback_provider=openai", text)
-        self.assertIn("llm_effective_primary_model=deepseek-chat", text)
-        self.assertIn("llm_effective_fallback_model=gpt-5.1", text)
-        self.assertIn("merge_stage_model=deepseek-chat", text)
-        self.assertIn("packaging_stage_model=gpt-5.1", text)
-        self.assertIn("llm_base_url=primary=https://api.deepseek.com/v1;fallback=default_openai", text)
-        self.assertIn("llm_usage_reporting_mode=openai_run_local+openai_org_snapshot+provider_logs_only", text)
+        self.assertIn("llm_model=deepseek-chat", text)
+        self.assertIn("llm_usage_reporting_mode=openai_run_local+openai_org_snapshot", text)
+        self.assertIn("resolved_audit_mode=audit branches=nomerge,merge", text)
 
-    def test_startup_health_logs_deepseek_usage_reporting_expectation(self) -> None:
+    def test_startup_health_logs_current_merge_policy(self) -> None:
         logger = logging.getLogger("provider-aware-health-deepseek")
         config = SimpleNamespace(
             llm_provider="deepseek",
-            openai_model_primary="gpt-5.1",
-            openai_model_fallback="gpt-5-mini",
+            llm_model="deepseek-chat",
             openai_timeout_sec=30.0,
             openai_max_output_tokens=1000,
             llm_source_desc_max_chars=500,
             openai_pre_delay_sec=0.0,
-            deepseek_model="deepseek-chat",
-            deepseek_timeout_sec=45.0,
-            deepseek_max_retries=2,
-            deepseek_base_url="https://api.deepseek.com/v1",
             telegram_enabled=True,
             google_sheets_id="sheet-id",
         )
@@ -327,15 +216,8 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 config=config,
                 llm_summary=SimpleNamespace(
                     provider="deepseek",
-                    primary_provider="deepseek",
-                    fallback_provider="openai",
-                    effective_primary_model="deepseek-chat",
-                    effective_fallback_model="gpt-5.1",
-                    merge_stage_model="deepseek-chat",
-                    packaging_stage_model="gpt-5.1",
-                    base_url="primary=https://api.deepseek.com/v1;fallback=default_openai",
-                    usage_reporting_mode="provider_logs_only",
-                    providers_used=("deepseek",),
+                    model="deepseek-chat",
+                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
                 services=services,
                 telegram_client=telegram_client,
@@ -345,14 +227,11 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 run_id="run",
             )
         text: str = "\n".join(captured.output)
-        self.assertIn("LLM policy: provider=deepseek primary_model=deepseek-chat", text)
-        self.assertIn("usage_reporting_mode=provider_logs_only", text)
+        self.assertIn("LLM policy: provider=deepseek model=deepseek-chat", text)
+        self.assertIn("usage_reporting_mode=openai_run_local+openai_org_snapshot", text)
+        self.assertIn("LLM selection: audit branch execution=merge", text)
         self.assertIn(
-            f"LLM selection: audit branch execution={BRANCH_MERGE_MAIN},{BRANCH_MERGE_MAIN_FALLBACK_PACKAGING}",
-            text,
-        )
-        self.assertIn(
-            "LLM usage reporting note: provider=deepseek openai_usage_summary_expected=no",
+            "LLM usage reporting note: provider=openai openai_usage_summary_expected=yes",
             text,
         )
 
@@ -369,15 +248,8 @@ class EntrypointRegressionTests(unittest.TestCase):
     def _llm_summary(self) -> SimpleNamespace:
         return SimpleNamespace(
             provider="openai",
-            primary_provider="openai",
-            fallback_provider="deepseek",
-            effective_primary_model="gpt-5.1",
-            effective_fallback_model="deepseek-chat",
-            merge_stage_model="gpt-5.1",
-            packaging_stage_model="deepseek-chat",
-            base_url="default_openai",
-            usage_reporting_mode="openai_run_local+openai_org_snapshot+provider_logs_only",
-            providers_used=("openai", "deepseek"),
+            model="gpt-5.1",
+            usage_reporting_mode="openai_run_local+openai_org_snapshot",
         )
 
     def _run_main(self) -> tuple[int, MagicMock, MagicMock, MagicMock]:

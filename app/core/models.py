@@ -14,6 +14,8 @@ class VideoMetadata:
     thumbnail_url: str
     youtube_language: Optional[str]
     channel_language: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    canonical_url: Optional[str] = None
 
 
 @dataclass(frozen=True)

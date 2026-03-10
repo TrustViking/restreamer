@@ -12,7 +12,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_image_dir_template="./image/{language}/{date}",
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
-            doc_title_template="{date}_{processing_mode}_Everyday_streams{llm_models_segment}_{creation_stamp}",
+            doc_title_template="{date}_{processing_mode}_Ежедневные стримы - Everyday streams{llm_models_segment}_{creation_stamp}",
             language_codes_json='{"uk":"UA","en":"EN","ru":"RU"}',
             max_filename_stem=120,
         )
@@ -23,13 +23,32 @@ class NamePathBuilderTests(unittest.TestCase):
             llm_models_segment="_[gpt-5.1,deepseek-chat]",
         )
         self.assertEqual(
-            "090326_merge_Everyday_streams_[gpt-5.1,deepseek-chat]_1350_080326",
+            "090326_merge_Ежедневные стримы - Everyday streams_[gpt-5.1,deepseek-chat]_1350_080326",
             doc_title,
         )
         docx_path = builder.build_docx_path("090326", doc_title)
         self.assertIsNotNone(docx_path)
         self.assertEqual(
-            "090326_merge_Everyday_streams_[gpt-5.1,deepseek-chat]_1350_080326.docx",
+            "090326_merge_Ежедневные_стримы_Everyday_streams_[gpt-5.1,deepseek-chat]_1350_080326.docx",
+            docx_path.name,
+        )
+
+    def test_local_docx_slug_normalization_removes_separator_artifacts(self) -> None:
+        builder = NamePathBuilder(
+            local_image_dir_template="./image/{language}/{date}",
+            local_doc_dir_template="./docs/{date}",
+            preview_name_template="{index}_{language}_{title}",
+            doc_title_template="{date}_{processing_mode}_Ежедневные стримы - Everyday streams{llm_models_segment}_{creation_stamp}",
+            language_codes_json='{"uk":"UA","en":"EN","ru":"RU"}',
+            max_filename_stem=120,
+        )
+        docx_path = builder.build_docx_path(
+            "190326",
+            "190326_merge_-_Everyday_streams_[gpt-5.1]_2000_100326",
+        )
+        self.assertIsNotNone(docx_path)
+        self.assertEqual(
+            "190326_merge_Everyday_streams_[gpt-5.1]_2000_100326.docx",
             docx_path.name,
         )
 

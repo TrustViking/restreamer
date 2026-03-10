@@ -16,8 +16,8 @@ from app.core.models import (
     RowVideoCharacteristics,
 )
 from app.ingest.youtube_metadata import normalize_youtube_video_url
-from app.llm import (
-    MergeRunSummary,
+from app.llm.merge_run_summary import MergeRunSummary
+from app.llm.merge_service import (
     attempt_llm_merge_with_audit,
     attempt_llm_single_source_translate_with_audit,
     enforce_openai_merged_paragraphs,
@@ -41,6 +41,7 @@ class SlotProcessResult:
     language_groups: Dict[str, List[PlannedVideo]]
     merged_content_by_language: Dict[str, MergedLanguageContent]
     merge_audit_by_language: Dict[str, LanguageMergeAttempt]
+    real_merge_blocks: int
 
 
 def _merge_summary_snapshot(
@@ -107,15 +108,22 @@ def _log_merge_input_summary(
     )
     source_desc_chars_total: int = sum(len(description) for description in descriptions)
     stripped_descriptions: List[str] = [_strip_urls_for_summary(text) for text in descriptions]
+    trimmed_source_details: List[str] = []
     source_desc_chars_after_trim: int = sum(
         min(len(description), desc_max_chars_limit) for description in stripped_descriptions
     )
-    trimmed_sources: int = sum(
-        1 for description in stripped_descriptions if len(description) > desc_max_chars_limit
-    )
+    for index, description in enumerate(stripped_descriptions, start=1):
+        if len(description) <= desc_max_chars_limit:
+            continue
+        trimmed_chars: int = len(description) - desc_max_chars_limit
+        source_row_number: int = int(language_items_for_merge[index - 1].row_number)
+        trimmed_source_details.append(
+            f"src{index}:row{source_row_number}:{len(description)}->{desc_max_chars_limit}(-{trimmed_chars})"
+        )
+    trimmed_sources: int = len(trimmed_source_details)
     non_empty_descriptions: int = sum(1 for description in descriptions if description)
     logger.info(
-        "merge_input_summary branch=%s date_key=%s slot_key=%s lang=%s source_count=%d non_empty_descriptions=%d titles_non_empty=%d source_desc_chars_total=%d source_desc_chars_after_trim=%d trimmed_sources=%d desc_max_chars_limit=%d single_source_run_allowed=%s merge_expected=%s merge_skip_reason=%s",
+        "merge_input_summary branch=%s date_key=%s slot_key=%s lang=%s source_count=%d non_empty_descriptions=%d titles_non_empty=%d source_desc_chars_total=%d source_desc_chars_after_trim=%d trimmed_sources=%d trimmed_source_details=%s desc_max_chars_limit=%d single_source_run_allowed=%s merge_expected=%s merge_skip_reason=%s",
         branch_label,
         date_key,
         slot_key,
@@ -126,6 +134,7 @@ def _log_merge_input_summary(
         source_desc_chars_total,
         source_desc_chars_after_trim,
         trimmed_sources,
+        ",".join(trimmed_source_details) or "none",
         desc_max_chars_limit,
         "yes" if single_source_run_allowed else "no",
         "yes" if merge_expected else "no",
@@ -193,6 +202,7 @@ def process_slot(
         language_groups[language].extend(language_items)
     merged_content_by_language: Dict[str, MergedLanguageContent] = {}
     merge_audit_by_language: Dict[str, LanguageMergeAttempt] = {}
+    real_merge_blocks: int = 0
     if llm_merge_enabled:
         for language in ("uk", "en", "ru", "other"):
             language_items_for_merge: List[PlannedVideo] = sorted(
@@ -313,6 +323,9 @@ def process_slot(
             if merge_attempt.merged is not None:
                 merged_content_value: MergedLanguageContent = merge_attempt.merged
                 if len(language_items_for_merge) > 1:
+                    real_merge_blocks += 1
+                    merge_run_summary.record_real_merge_block()
+                if len(language_items_for_merge) > 1:
                     merged_content_value = enforce_openai_merged_paragraphs(
                         language=language,
                         merged_content=merged_content_value,
@@ -409,6 +422,13 @@ def process_slot(
         len(day_videos),
         sorted(merged_content_by_language.keys()),
     )
+    logger.info(
+        "[%s] slot_merge_decision slot_key=%s real_merge_blocks=%d merge_doc_eligible=%s",
+        branch_label,
+        slot_key,
+        real_merge_blocks,
+        "yes" if real_merge_blocks > 0 else "no",
+    )
     slot_total_ms: int = int(round((time.perf_counter() - slot_started_at) * 1000.0))
     record_slot_total_ms(slot_key=slot_key, elapsed_ms=slot_total_ms)
     log_stage_timing(
@@ -428,4 +448,5 @@ def process_slot(
         language_groups=language_groups,
         merged_content_by_language=merged_content_by_language,
         merge_audit_by_language=merge_audit_by_language,
+        real_merge_blocks=real_merge_blocks,
     )

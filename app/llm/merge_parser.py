@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
@@ -20,6 +21,24 @@ _EMOJI_PATTERN: re.Pattern[str] = re.compile(
     r"[\U0001F300-\U0001FAFF\u2600-\u27BF]",
     flags=re.UNICODE,
 )
+_URL_LINE_RE: re.Pattern[str] = re.compile(r"^https?://\S+$", re.IGNORECASE)
+_OFFICIAL_LINKS_HEADING_RE: re.Pattern[str] = re.compile(
+    r"(?im)^\s*(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:\s*$"
+)
+_HASHTAG_TOKEN_RE: re.Pattern[str] = re.compile(r"^#[^\s#]+$")
+
+
+@dataclass(frozen=True)
+class MergeTailSeparationResult:
+    body_text: str
+    full_text: str
+    raw_paragraph_count: int
+    body_paragraph_count: int
+    body_paragraph_count_after_recovery: int
+    tail_blocks: tuple[str, ...]
+    tail_detected: bool
+    recovery_applied: bool
+    recovery_note: str
 
 
 def normalize_single_line_text(text: str) -> str:
@@ -145,6 +164,208 @@ def clean_and_validate_llm_description(*, text: str) -> Tuple[str, bool, List[st
     return (cleaned, ok, reasons)
 
 
+def _normalize_multiline_text(text: str) -> str:
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _split_paragraphs(text: str) -> List[str]:
+    normalized_text: str = _normalize_multiline_text(text)
+    if not normalized_text:
+        return []
+    return [
+        paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n", normalized_text)
+        if paragraph.strip()
+    ]
+
+
+def _looks_like_hashtags_paragraph(paragraph_text: str) -> bool:
+    tokens: List[str] = [token.strip() for token in str(paragraph_text or "").split() if token.strip()]
+    return bool(tokens) and all(_HASHTAG_TOKEN_RE.fullmatch(token) for token in tokens)
+
+
+def _looks_like_cta_paragraph(paragraph_text: str) -> bool:
+    lines: List[str] = _paragraph_lines(paragraph_text)
+    if not lines:
+        return False
+    if len(lines) > 2:
+        return False
+    if any(_OFFICIAL_LINKS_HEADING_RE.match(line) for line in lines):
+        return False
+    if any(line.startswith(tuple(("🔹 ", "📌 ", "🎤 ", "🎥 ", "⚖ ", "🌐 ", "✅ "))) for line in lines):
+        return False
+    if any(_URL_LINE_RE.fullmatch(line) for line in lines):
+        return False
+    normalized: str = re.sub(r"\s+", " ", str(paragraph_text or "")).strip().lower()
+    if not normalized:
+        return False
+    if "#" in normalized and len(normalized) <= 220:
+        return True
+    return any(
+        hint in normalized
+        for hint in (
+            "watch",
+            "join",
+            "share",
+            "follow",
+            "subscribe",
+            "learn more",
+            "дивіться",
+            "долуч",
+            "підпис",
+            "смотрите",
+            "присоединяйтесь",
+            "делитесь",
+            "подпис",
+        )
+    )
+
+
+def _paragraph_lines(paragraph_text: str) -> List[str]:
+    return [line.strip() for line in str(paragraph_text or "").split("\n") if line.strip()]
+
+
+def _looks_like_official_links_paragraph(paragraph_text: str) -> bool:
+    lines: List[str] = _paragraph_lines(paragraph_text)
+    if not lines or not _OFFICIAL_LINKS_HEADING_RE.match(lines[0]):
+        return False
+    if len(lines) == 1:
+        return True
+    return all(_URL_LINE_RE.fullmatch(line) for line in lines[1:])
+
+
+def _looks_like_youtube_links_paragraph(paragraph_text: str) -> bool:
+    lines: List[str] = _paragraph_lines(paragraph_text)
+    if not lines:
+        return False
+    for line in lines:
+        if not _URL_LINE_RE.fullmatch(line):
+            return False
+        if "youtu" not in line.lower():
+            return False
+    return True
+
+
+def _split_body_and_allowed_tail(text: str) -> tuple[List[str], List[str], List[str]]:
+    paragraphs: List[str] = _split_paragraphs(text)
+    if not paragraphs:
+        return ([], [], [])
+    body_paragraphs: List[str] = list(paragraphs)
+    tail_paragraphs_reversed: List[str] = []
+    tail_blocks_reversed: List[str] = []
+    while body_paragraphs:
+        candidate: str = body_paragraphs[-1]
+        if _looks_like_hashtags_paragraph(candidate):
+            tail_paragraphs_reversed.append(body_paragraphs.pop())
+            tail_blocks_reversed.append("hashtags")
+            continue
+        if _looks_like_cta_paragraph(candidate):
+            tail_paragraphs_reversed.append(body_paragraphs.pop())
+            tail_blocks_reversed.append("cta")
+            continue
+        if _looks_like_official_links_paragraph(candidate):
+            tail_paragraphs_reversed.append(body_paragraphs.pop())
+            tail_blocks_reversed.append("official_links")
+            continue
+        if _looks_like_youtube_links_paragraph(candidate):
+            tail_paragraphs_reversed.append(body_paragraphs.pop())
+            tail_blocks_reversed.append("youtube_links")
+            continue
+        break
+    tail_paragraphs: List[str] = list(reversed(tail_paragraphs_reversed))
+    tail_blocks: List[str] = list(reversed(tail_blocks_reversed))
+    return (body_paragraphs, tail_paragraphs, tail_blocks)
+
+
+def _split_single_paragraph_safely(paragraph_text: str) -> Optional[List[str]]:
+    sentence_parts: List[str] = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?…])\s+", str(paragraph_text or "").strip())
+        if part.strip()
+    ]
+    if len(sentence_parts) < 4:
+        return None
+    split_index: int = max(2, len(sentence_parts) // 2)
+    left_part: str = " ".join(sentence_parts[:split_index]).strip()
+    right_part: str = " ".join(sentence_parts[split_index:]).strip()
+    if not left_part or not right_part:
+        return None
+    return [left_part, right_part]
+
+
+def _collapse_paragraphs_to_limit(
+    paragraphs: List[str],
+    *,
+    max_paragraphs: int,
+) -> Optional[List[str]]:
+    cleaned_paragraphs: List[str] = [item.strip() for item in paragraphs if item.strip()]
+    if not cleaned_paragraphs:
+        return None
+    if len(cleaned_paragraphs) <= max_paragraphs:
+        return cleaned_paragraphs
+    if len(cleaned_paragraphs) > max_paragraphs + 2:
+        return None
+    total_items: int = len(cleaned_paragraphs)
+    base_group_size: int = total_items // max_paragraphs
+    remainder: int = total_items % max_paragraphs
+    collapsed: List[str] = []
+    start_index: int = 0
+    for group_index in range(max_paragraphs):
+        group_size: int = base_group_size + (1 if group_index < remainder else 0)
+        next_index: int = start_index + max(1, group_size)
+        group_items: List[str] = cleaned_paragraphs[start_index:next_index]
+        if not group_items:
+            break
+        collapsed.append("\n".join(group_items).strip())
+        start_index = next_index
+    return collapsed if len(collapsed) <= max_paragraphs else None
+
+
+def separate_merge_body_and_tail(*, text: str) -> MergeTailSeparationResult:
+    normalized_text: str = _normalize_multiline_text(text)
+    raw_paragraphs: List[str] = _split_paragraphs(normalized_text)
+    body_paragraphs, tail_paragraphs, tail_blocks = _split_body_and_allowed_tail(normalized_text)
+    recovered_body_paragraphs: List[str] = list(body_paragraphs)
+    recovery_applied: bool = False
+    recovery_note: str = "not_needed"
+
+    if len(recovered_body_paragraphs) == 1:
+        safely_split: Optional[List[str]] = _split_single_paragraph_safely(recovered_body_paragraphs[0])
+        if safely_split is not None:
+            recovered_body_paragraphs = safely_split
+            recovery_applied = True
+            recovery_note = "split_single_body_paragraph"
+    elif len(recovered_body_paragraphs) > 4:
+        collapsed_paragraphs: Optional[List[str]] = _collapse_paragraphs_to_limit(
+            recovered_body_paragraphs,
+            max_paragraphs=4,
+        )
+        if collapsed_paragraphs is not None and len(collapsed_paragraphs) <= 4:
+            recovered_body_paragraphs = collapsed_paragraphs
+            recovery_applied = True
+            recovery_note = "collapsed_excess_body_paragraphs"
+        else:
+            recovery_note = "body_recovery_not_possible"
+
+    body_text: str = "\n\n".join(recovered_body_paragraphs).strip()
+    full_text: str = "\n\n".join(
+        paragraph
+        for paragraph in [body_text, *tail_paragraphs]
+        if paragraph.strip()
+    ).strip()
+    return MergeTailSeparationResult(
+        body_text=body_text,
+        full_text=full_text,
+        raw_paragraph_count=len(raw_paragraphs),
+        body_paragraph_count=len(body_paragraphs),
+        body_paragraph_count_after_recovery=len(recovered_body_paragraphs),
+        tail_blocks=tuple(tail_blocks),
+        tail_detected=bool(tail_blocks),
+        recovery_applied=recovery_applied,
+        recovery_note=recovery_note,
+    )
+
+
 def build_plain_merged_content_or_raise(
     *,
     model_name: str,
@@ -180,15 +401,13 @@ def _is_forbidden_multi_variant_payload(payload: Dict[str, Any]) -> Optional[str
     return None
 
 
-def _validate_paragraph_count(description: str) -> int:
-    paragraphs: List[str] = [
-        part.strip()
-        for part in re.split(r"\n\s*\n", description.replace("\r\n", "\n").replace("\r", "\n"))
-        if part.strip()
-    ]
-    if not 2 <= len(paragraphs) <= 4:
-        raise RuntimeError(f"description paragraph count must be between 2 and 4, got {len(paragraphs)}")
-    return len(paragraphs)
+def _validate_body_paragraph_count(body_text: str) -> int:
+    body_paragraphs: List[str] = _split_paragraphs(body_text)
+    if not 2 <= len(body_paragraphs) <= 4:
+        raise RuntimeError(
+            f"description body paragraph count must be between 2 and 4, got {len(body_paragraphs)}"
+        )
+    return len(body_paragraphs)
 
 
 def parse_merge_response_or_raise(
@@ -216,10 +435,29 @@ def parse_merge_response_or_raise(
     if not isinstance(description_value, str) or not description_value.strip():
         raise RuntimeError("description must be a non-empty string")
 
-    paragraph_count: int = _validate_paragraph_count(description_value)
-    cleaned_description, ok, reasons = clean_and_validate_llm_description(text=description_value)
+    tail_separation: MergeTailSeparationResult = separate_merge_body_and_tail(
+        text=description_value
+    )
+    cleaned_description, ok, reasons = clean_and_validate_llm_description(
+        text=tail_separation.full_text
+    )
     if not ok or not cleaned_description:
         raise RuntimeError("description validation failed: " + ("; ".join(reasons) or "unknown"))
+    try:
+        paragraph_count: int = _validate_body_paragraph_count(tail_separation.body_text)
+    except Exception as error:
+        LOGGER.info(
+            "merge_description_tail_analysis model=%s raw_paragraph_count=%d tail_separated=%s tail_blocks=%s body_paragraph_count=%d recovery_applied=%s body_paragraph_count_after_recovery=%d final_status=rejected reject_reason=%s",
+            model_name,
+            tail_separation.raw_paragraph_count,
+            "yes" if tail_separation.tail_detected else "no",
+            ",".join(tail_separation.tail_blocks) or "none",
+            tail_separation.body_paragraph_count,
+            "yes" if tail_separation.recovery_applied else "no",
+            tail_separation.body_paragraph_count_after_recovery,
+            str(error),
+        )
+        raise
 
     title: str = sanitize_title(title_value, min_chars=1, max_chars=99)
     if not title:
@@ -233,6 +471,16 @@ def parse_merge_response_or_raise(
         len(title),
         len(cleaned_description),
         paragraph_count,
+    )
+    LOGGER.info(
+        "merge_description_tail_analysis model=%s raw_paragraph_count=%d tail_separated=%s tail_blocks=%s body_paragraph_count=%d recovery_applied=%s body_paragraph_count_after_recovery=%d final_status=accepted",
+        model_name,
+        tail_separation.raw_paragraph_count,
+        "yes" if tail_separation.tail_detected else "no",
+        ",".join(tail_separation.tail_blocks) or "none",
+        tail_separation.body_paragraph_count,
+        "yes" if tail_separation.recovery_applied else "no",
+        tail_separation.body_paragraph_count_after_recovery,
     )
     return (
         MergedLanguageContent(

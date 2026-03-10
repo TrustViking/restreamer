@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Optional, Tuple, cast
 
-from yt_dlp import YoutubeDL
-
 from app.bootstrap.logging_config import get_logger
 from app.core.models import VideoMetadata
 
@@ -22,6 +20,8 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
         self._timeout_seconds: float = timeout_seconds
 
     def fetch(self, video_url: str) -> VideoMetadata:
+        from yt_dlp import YoutubeDL
+
         ydl_options: Dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -49,6 +49,14 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
         youtube_language: Optional[str] = str(info.get("language") or "").strip() or None
         channel_language: Optional[str] = (
             str(info.get("channel_language") or "").strip() or None
+        )
+        duration_value: Any = info.get("duration")
+        duration_seconds: Optional[int] = None
+        if isinstance(duration_value, (int, float)) and duration_value > 0:
+            duration_seconds = int(duration_value)
+        canonical_url: str = (
+            str(info.get("webpage_url") or info.get("original_url") or video_url).strip()
+            or video_url
         )
 
         if not title:
@@ -90,6 +98,8 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
             thumbnail_url=thumbnail_url,
             youtube_language=youtube_language,
             channel_language=channel_language,
+            duration_seconds=duration_seconds,
+            canonical_url=canonical_url,
         )
 
 

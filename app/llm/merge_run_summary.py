@@ -11,6 +11,7 @@ class MergeRunSummary:
     retry_used: int = 0
     final_failure: int = 0
     paragraph_recovery_used: int = 0
+    real_merge_blocks: int = 0
 
     @property
     def structured_ok(self) -> int:
@@ -39,12 +40,21 @@ class MergeRunSummary:
     def record_paragraph_recovery_used(self) -> None:
         self.paragraph_recovery_used += 1
 
+    def record_real_merge_block(self) -> None:
+        self.real_merge_blocks += 1
+
+    @property
+    def had_real_merge_blocks(self) -> bool:
+        return self.real_merge_blocks > 0
+
     def log_summary(self, logger: logging.Logger) -> None:
         logger.info(
-            "merge_run_summary merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d",
+            "merge_run_summary merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d real_merge_blocks=%d had_real_merge_blocks=%s",
             self.merge_success,
             self.validation_rejected,
             self.retry_used,
             self.final_failure,
             self.paragraph_recovery_used,
+            self.real_merge_blocks,
+            "yes" if self.had_real_merge_blocks else "no",
         )

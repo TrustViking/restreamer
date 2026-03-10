@@ -9,7 +9,7 @@ from app.google import (
     GoogleServicesFactory,
     GoogleSheetsClient,
 )
-from app.publish import GoogleDocsReportWriter
+from app.publish.google_docs_writer import GoogleDocsReportWriter
 
 
 @dataclass(frozen=True)

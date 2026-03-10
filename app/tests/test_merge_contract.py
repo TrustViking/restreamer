@@ -6,7 +6,11 @@ from unittest.mock import patch
 
 from app.core.models import MergedLanguageContent
 from app.llm.merge_quality import normalize_merge_description
-from app.llm.merge_parser import parse_merge_response_or_raise, sanitize_title
+from app.llm.merge_parser import (
+    parse_merge_response_or_raise,
+    sanitize_title,
+    separate_merge_body_and_tail,
+)
 from app.llm.merge_service import (
     MergeAttemptFailure,
     attempt_openai_merge_with_audit,
@@ -80,10 +84,75 @@ class MergeContractParserTests(unittest.TestCase):
             )
         self.assertIn("title must not contain emoji", str(raised.exception))
 
+    def test_allowed_tail_blocks_do_not_break_body_paragraph_count(self) -> None:
+        merged_content, paragraph_count = parse_merge_response_or_raise(
+            provider_name="openai",
+            model_name="gpt-5.1",
+            raw_text=(
+                '{"title":"Final title","description":"Hook paragraph.\\n\\n'
+                'In this stream you will see:\\n🔹 point one\\n🔹 point two\\n\\n'
+                'https://youtu.be/aaaaaaaaaaa\\n\\n'
+                '🌐 Official links:\\nhttps://example.org\\n\\n'
+                'Watch the stream and share your thoughts.\\n\\n'
+                '#stream #topic"}'
+            ),
+        )
+        self.assertEqual(2, paragraph_count)
+        self.assertIn("https://youtu.be/aaaaaaaaaaa", merged_content.description)
+        self.assertIn("🌐 Official links:", merged_content.description)
+
+    def test_body_only_recovery_accepts_near_good_body(self) -> None:
+        merged_content, paragraph_count = parse_merge_response_or_raise(
+            provider_name="openai",
+            model_name="gpt-5.1",
+            raw_text=(
+                '{"title":"Recovered title","description":"Paragraph one.\\n\\nParagraph two.\\n\\n'
+                'Paragraph three.\\n\\nParagraph four.\\n\\nParagraph five.\\n\\n'
+                'Watch the stream and share your thoughts.\\n\\n#topic"}'
+            ),
+        )
+        self.assertEqual(4, paragraph_count)
+        self.assertIn("Paragraph one.", merged_content.description)
+        self.assertIn("#topic", merged_content.description)
+
+    def test_body_that_stays_invalid_after_tail_split_and_recovery_is_rejected(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            parse_merge_response_or_raise(
+                provider_name="openai",
+                model_name="gpt-5.1",
+                raw_text=(
+                    '{"title":"Bad title","description":"Paragraph one.\\n\\nParagraph two.\\n\\n'
+                    'Paragraph three.\\n\\nParagraph four.\\n\\nParagraph five.\\n\\n'
+                    'Paragraph six.\\n\\nParagraph seven.\\n\\n#topic"}'
+                ),
+            )
+        self.assertIn("body paragraph count", str(raised.exception))
+
+    def test_tail_separation_recognizes_multiple_allowed_tail_blocks_in_order(self) -> None:
+        separation = separate_merge_body_and_tail(
+            text=(
+                "Hook paragraph.\n\n"
+                "In this stream you'll see:\n"
+                "🔹 main point\n"
+                "✅ practical follow-up\n\n"
+                "https://youtu.be/aaaaaaaaaaa\n\n"
+                "🌐 Official links:\n"
+                "https://example.org\n\n"
+                "Watch the stream and share your thoughts.\n\n"
+                "#topic #update"
+            )
+        )
+        self.assertEqual(2, separation.body_paragraph_count_after_recovery)
+        self.assertEqual(
+            ("youtube_links", "official_links", "cta", "hashtags"),
+            separation.tail_blocks,
+        )
+
 
 class MergeContractServiceTests(unittest.TestCase):
     def _config(self) -> SimpleNamespace:
         return SimpleNamespace(
+            llm_model="gpt-5.1",
             llm_main_model="gpt-5.1",
             llm_fallback_model="deepseek-chat",
             openai_model_primary="gpt-5.1",
@@ -117,6 +186,8 @@ Avoid asserting strong person titles or role labels unless they are clearly nece
 Optional official links block is allowed before close line with 1 to 3 non-YouTube links from sources.
 An optional one-line close should be practical CTA + 2 to 5 hashtags.
 Return strict JSON with title and description only.
+
+{youtube_candidates_block}
 
 {sources_block}
 """.strip(),
@@ -163,6 +234,116 @@ Return strict JSON with title and description only.
         self.assertIn("optional one-line close", prompt_text.lower())
         self.assertNotIn("URL:", prompt_text)
         self.assertIn("Paragraph one.\n\nParagraph two.", prompt_text)
+
+    def test_merge_prompt_includes_sorted_youtube_candidates_and_output_does_not_auto_fill_them(self) -> None:
+        videos = [
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="Source 1",
+                    description=(
+                        "Main stream link https://youtu.be/aaaaaaaaaaa\n"
+                        "Duplicate main stream https://www.youtube.com/watch?v=aaaaaaaaaaa&feature=share\n"
+                        "Broken link https://www.youtube.com/watch?v=short\n"
+                        "Short clip https://youtu.be/bbbbbbbbbbb"
+                    ),
+                ),
+                normalized_link="https://youtube.com/watch?v=sourcevideo01",
+            ),
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    title="Source 2",
+                    description="Extended version https://youtube.com/watch?v=ccccccccccc",
+                ),
+                normalized_link="https://youtube.com/watch?v=sourcevideo02",
+            ),
+        ]
+        response_without_links = SimpleNamespace(
+            raw_text=(
+                '{"title":"Merged title","description":"Focused hook with concrete context!\\n\\n'
+                'In this stream you will see:\\n🔹 first point\\n🔹 second point\\n🔹 third point"}'
+            ),
+            structured_payload={
+                "title": "Merged title",
+                "description": (
+                    "Focused hook with concrete context!\n\n"
+                    "In this stream you will see:\n"
+                    "🔹 first point\n"
+                    "🔹 second point\n"
+                    "🔹 third point"
+                ),
+            },
+        )
+
+        def fake_metadata(url: str) -> SimpleNamespace:
+            metadata_by_url = {
+                "https://youtu.be/aaaaaaaaaaa": SimpleNamespace(
+                    title="Main stream",
+                    duration_seconds=7200,
+                    canonical_url="https://youtu.be/aaaaaaaaaaa",
+                    url="https://youtu.be/aaaaaaaaaaa",
+                ),
+                "https://youtu.be/bbbbbbbbbbb": SimpleNamespace(
+                    title="Short clip",
+                    duration_seconds=300,
+                    canonical_url="https://youtu.be/bbbbbbbbbbb",
+                    url="https://youtu.be/bbbbbbbbbbb",
+                ),
+                "https://youtu.be/ccccccccccc": SimpleNamespace(
+                    title="Extended version",
+                    duration_seconds=None,
+                    canonical_url="https://youtu.be/ccccccccccc",
+                    url="https://youtu.be/ccccccccccc",
+                ),
+            }
+            return metadata_by_url[url]
+
+        with patch("app.llm.merge_service._fetch_merge_youtube_candidate_metadata", side_effect=fake_metadata), patch(
+            "app.llm.merge_service.openai_request_merge",
+            side_effect=[response_without_links],
+        ) as request_mock, patch(
+            "app.llm.merge_service._validate_coverage_preserving_merge_or_raise",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "app.llm.merge_service._log_merge_style_diagnostics",
+            return_value=None,
+        ), self.assertLogs(level="INFO") as captured:
+            attempt = attempt_openai_merge_with_audit(
+                language="en",
+                videos=videos,
+                config=self._config(),
+                attempt_label="TEST",
+                summarize_error=lambda error: str(error),
+                normalize_youtube_url=lambda url: url,
+                no_description_text="no description",
+                branch_label="merge",
+                date_key="100326",
+                slot_key="100326_1800",
+            )
+
+        self.assertIsNotNone(attempt.merged)
+        prompt_text: str = request_mock.call_args.kwargs["prompt_text"]
+        self.assertIn("YOUTUBE CANDIDATES", prompt_text)
+        self.assertIn("You may include 0, 1, or 2 YouTube URLs", prompt_text)
+        self.assertLess(
+            prompt_text.index("TITLE: Main stream"),
+            prompt_text.index("TITLE: Short clip"),
+        )
+        self.assertLess(
+            prompt_text.index("TITLE: Short clip"),
+            prompt_text.index("TITLE: Extended version"),
+        )
+        self.assertEqual(1, prompt_text.count("URL: https://youtu.be/aaaaaaaaaaa"))
+        self.assertNotIn("URL: https://www.youtube.com/watch?v=short", prompt_text)
+        self.assertNotIn("https://youtu.be/aaaaaaaaaaa", attempt.merged.description)
+        self.assertNotIn("https://youtu.be/bbbbbbbbbbb", attempt.merged.description)
+        self.assertNotIn("https://youtu.be/ccccccccccc", attempt.merged.description)
+        joined_logs: str = "\n".join(captured.output)
+        self.assertIn("merge_youtube_candidates_prepared", joined_logs)
+        self.assertIn("extracted=5", joined_logs)
+        self.assertIn("invalid_skipped=1", joined_logs)
+        self.assertIn("deduped=3", joined_logs)
+        self.assertIn("metadata_resolved=3", joined_logs)
+        self.assertIn("youtube_links_selected=0", joined_logs)
 
     def test_invalid_primary_response_triggers_retry_then_final_failure_when_deepseek_is_polish_only(self) -> None:
         responses = [
@@ -377,6 +558,7 @@ Return strict JSON with title and description only.
         self.assertIn("bullet_points_count=3", joined_logs)
         self.assertIn("semantic_bullets_count=3", joined_logs)
         self.assertIn("named_entities_preserved=2", joined_logs)
+        self.assertIn("named_entities_metric=informational", joined_logs)
         self.assertIn("emoji_count=4", joined_logs)
         self.assertIn("source_coverage_total=2/2", joined_logs)
         self.assertIn("source_coverage_ok=yes", joined_logs)
