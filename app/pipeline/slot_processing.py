@@ -108,22 +108,10 @@ def _log_merge_input_summary(
     )
     source_desc_chars_total: int = sum(len(description) for description in descriptions)
     stripped_descriptions: List[str] = [_strip_urls_for_summary(text) for text in descriptions]
-    trimmed_source_details: List[str] = []
-    source_desc_chars_after_trim: int = sum(
-        min(len(description), desc_max_chars_limit) for description in stripped_descriptions
-    )
-    for index, description in enumerate(stripped_descriptions, start=1):
-        if len(description) <= desc_max_chars_limit:
-            continue
-        trimmed_chars: int = len(description) - desc_max_chars_limit
-        source_row_number: int = int(language_items_for_merge[index - 1].row_number)
-        trimmed_source_details.append(
-            f"src{index}:row{source_row_number}:{len(description)}->{desc_max_chars_limit}(-{trimmed_chars})"
-        )
-    trimmed_sources: int = len(trimmed_source_details)
+    source_desc_chars_after_trim: int = sum(len(description) for description in stripped_descriptions)
     non_empty_descriptions: int = sum(1 for description in descriptions if description)
     logger.info(
-        "merge_input_summary branch=%s date_key=%s slot_key=%s lang=%s source_count=%d non_empty_descriptions=%d titles_non_empty=%d source_desc_chars_total=%d source_desc_chars_after_trim=%d trimmed_sources=%d trimmed_source_details=%s desc_max_chars_limit=%d single_source_run_allowed=%s merge_expected=%s merge_skip_reason=%s",
+        "merge_input_summary branch=%s date_key=%s slot_key=%s lang=%s source_count=%d non_empty_descriptions=%d titles_non_empty=%d source_desc_chars_total=%d source_desc_chars_passed_to_llm=%d hard_truncation=%s configured_desc_max_chars_limit=%d single_source_run_allowed=%s merge_expected=%s merge_skip_reason=%s",
         branch_label,
         date_key,
         slot_key,
@@ -133,8 +121,7 @@ def _log_merge_input_summary(
         titles_non_empty,
         source_desc_chars_total,
         source_desc_chars_after_trim,
-        trimmed_sources,
-        ",".join(trimmed_source_details) or "none",
+        "disabled",
         desc_max_chars_limit,
         "yes" if single_source_run_allowed else "no",
         "yes" if merge_expected else "no",

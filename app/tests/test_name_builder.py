@@ -52,6 +52,48 @@ class NamePathBuilderTests(unittest.TestCase):
             docx_path.name,
         )
 
+    def test_local_docx_slug_normalization_keeps_mixed_language_title_readable(self) -> None:
+        builder = NamePathBuilder(
+            local_image_dir_template="./image/{language}/{date}",
+            local_doc_dir_template="./docs/{date}",
+            preview_name_template="{index}_{language}_{title}",
+            doc_title_template="{date}_{processing_mode}_{title_fragment}{llm_models_segment}_{creation_stamp}",
+            language_codes_json='{"uk":"UA","en":"EN","ru":"RU"}',
+            max_filename_stem=120,
+        )
+        docx_path = builder.build_docx_path(
+            "190326",
+            "190326_merge_Новини дня - Everyday streams_日本語_[gpt-5.1]_2000_100326",
+        )
+        self.assertIsNotNone(docx_path)
+        self.assertEqual(
+            "190326_merge_Новини_дня_Everyday_streams_日本語_[gpt-5.1]_2000_100326.docx",
+            docx_path.name,
+        )
+        self.assertNotIn("merge_-_", docx_path.name)
+        self.assertNotIn("__", docx_path.name)
+
+    def test_local_docx_slug_normalization_drops_empty_title_segment_without_garbage(self) -> None:
+        builder = NamePathBuilder(
+            local_image_dir_template="./image/{language}/{date}",
+            local_doc_dir_template="./docs/{date}",
+            preview_name_template="{index}_{language}_{title}",
+            doc_title_template="{date}_{processing_mode}_{title_fragment}{llm_models_segment}_{creation_stamp}",
+            language_codes_json='{"uk":"UA","en":"EN","ru":"RU"}',
+            max_filename_stem=120,
+        )
+        docx_path = builder.build_docx_path(
+            "190326",
+            "190326_merge___-___[gpt-5.1]_2000_100326",
+        )
+        self.assertIsNotNone(docx_path)
+        self.assertEqual(
+            "190326_merge_[gpt-5.1]_2000_100326.docx",
+            docx_path.name,
+        )
+        self.assertNotIn("-_", docx_path.name)
+        self.assertNotIn("__", docx_path.name)
+
 
 if __name__ == "__main__":
     unittest.main()

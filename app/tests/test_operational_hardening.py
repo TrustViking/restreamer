@@ -204,6 +204,7 @@ class OperationalHardeningTests(unittest.TestCase):
         with patch("app.pipeline.slot_processing.planned_video_block_language", return_value="en"), patch(
             "app.pipeline.slot_processing.attempt_llm_merge_with_audit"
         ) as merge_mock:
+            merge_run_summary = MergeRunSummary()
             process_slot(
                 logger=logger,
                 config=config,
@@ -212,14 +213,7 @@ class OperationalHardeningTests(unittest.TestCase):
                 slot_time_key="1000",
                 llm_merge_enabled=False,
                 cet_tz=timezone.utc,
-                merge_run_summary=SimpleNamespace(
-                    primary_success=0,
-                    validation_rejected=0,
-                    primary_retry_used=0,
-                    fallback_success=0,
-                    final_failure=0,
-                    paragraph_recovery_used=0,
-                ),
+                merge_run_summary=merge_run_summary,
                 branch_label="nomerge",
             )
         self.assertEqual(0, merge_mock.call_count)

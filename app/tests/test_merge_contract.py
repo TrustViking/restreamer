@@ -101,6 +101,28 @@ class MergeContractParserTests(unittest.TestCase):
         self.assertIn("https://youtu.be/aaaaaaaaaaa", merged_content.description)
         self.assertIn("🌐 Official links:", merged_content.description)
 
+    def test_body_paragraph_count_ignores_realistic_service_tail_mass(self) -> None:
+        merged_content, paragraph_count = parse_merge_response_or_raise(
+            provider_name="openai",
+            model_name="gpt-5.1",
+            raw_text=(
+                '{"title":"Final title","description":"Hook paragraph with the core conflict and verified context.\\n\\n'
+                "In this stream you\\u0027ll see:\\n🔹 point one\\n🔹 point two\\n🔹 point three\\n\\n"
+                "Paragraph three keeps the broader context and timeline grounded in the sources.\\n\\n"
+                "Paragraph four closes with the practical context and concrete next developments.\\n\\n"
+                "https://youtu.be/aaaaaaaaaaa\\nhttps://www.youtube.com/watch?v=bbbbbbbbbbb\\n\\n"
+                "🌐 Official links:\\nhttps://example.org/official\\nhttps://allatra.org/resource\\n\\n"
+                'Watch the stream and share your thoughts.\\n\\n#stream #topic"}'
+            ),
+        )
+        self.assertEqual(4, paragraph_count)
+        self.assertEqual(
+            8,
+            len([part for part in merged_content.description.split("\n\n") if part.strip()]),
+        )
+        self.assertIn("https://www.youtube.com/watch?v=bbbbbbbbbbb", merged_content.description)
+        self.assertIn("#stream #topic", merged_content.description)
+
     def test_body_only_recovery_accepts_near_good_body(self) -> None:
         merged_content, paragraph_count = parse_merge_response_or_raise(
             provider_name="openai",
@@ -145,6 +167,30 @@ class MergeContractParserTests(unittest.TestCase):
         self.assertEqual(2, separation.body_paragraph_count_after_recovery)
         self.assertEqual(
             ("youtube_links", "official_links", "cta", "hashtags"),
+            separation.tail_blocks,
+        )
+
+    def test_realistic_merge_output_with_five_service_tail_paragraphs_is_accepted(self) -> None:
+        merged_content, paragraph_count = parse_merge_response_or_raise(
+            provider_name="openai",
+            model_name="gpt-5.1",
+            raw_text=(
+                '{"title":"Conference and initiative briefing tonight","description":"Tonight we track the conference agenda and initiative updates with concrete facts.\\n\\n'
+                "In this stream you\\u0027ll see:\\n🔹 conference timeline and priorities\\n🎤 speaker remarks and context\\n✅ practical next steps for viewers\\n\\n"
+                "The second body paragraph keeps the legal and organizational context tied to the sources.\\n\\n"
+                "The third body paragraph highlights what changed since the previous stream and why it matters.\\n\\n"
+                "https://youtu.be/aaaaaaaaaaa\\n\\n"
+                "https://www.youtube.com/watch?v=bbbbbbbbbbb\\n\\n"
+                "🌐 Official links:\\nhttps://interfaithconf.org/about\\nhttps://spiritualdiplomats.org/resources\\n\\n"
+                'Join and follow updates.\\n\\n#conference #initiative"}'
+            ),
+        )
+        self.assertEqual(4, paragraph_count)
+        separation = separate_merge_body_and_tail(text=merged_content.description)
+        self.assertEqual(9, separation.raw_paragraph_count)
+        self.assertEqual(4, separation.body_paragraph_count_after_recovery)
+        self.assertEqual(
+            ("youtube_links", "youtube_links", "official_links", "cta", "hashtags"),
             separation.tail_blocks,
         )
 
@@ -229,121 +275,64 @@ Return strict JSON with title and description only.
         self.assertIn("Most bullets should start with 🔹", prompt_text)
         self.assertIn("no more than 3 accent markers", prompt_text)
         self.assertIn("Avoid asserting strong person titles", prompt_text)
-        self.assertIn("Optional official links block", prompt_text)
+        self.assertIn("If the sources touch different semantic domains, do not compress them into one sentence.", prompt_text)
+        self.assertIn("These topics may stay in one final description, but present them as separate lines of discussion in separate sentences.", prompt_text)
+        self.assertIn("Do not build one long cause-and-effect chain across all of those domains in a single sentence.", prompt_text)
+        self.assertIn("Do not include any URLs in the output.", prompt_text)
+        self.assertIn("Link blocks will be assembled later by the system.", prompt_text)
         self.assertIn("Do not use emoji in the title.", prompt_text)
         self.assertIn("optional one-line close", prompt_text.lower())
         self.assertNotIn("URL:", prompt_text)
         self.assertIn("Paragraph one.\n\nParagraph two.", prompt_text)
 
-    def test_merge_prompt_includes_sorted_youtube_candidates_and_output_does_not_auto_fill_them(self) -> None:
+    def test_merge_prompt_uses_clean_full_source_text_without_urls_hashtags_or_truncation(self) -> None:
         videos = [
             SimpleNamespace(
+                row_number=1,
                 metadata=SimpleNamespace(
                     title="Source 1",
                     description=(
+                        "Hook paragraph with concrete facts and named people. "
+                        + ("A" * 2600)
+                        + "\n\n"
                         "Main stream link https://youtu.be/aaaaaaaaaaa\n"
-                        "Duplicate main stream https://www.youtube.com/watch?v=aaaaaaaaaaa&feature=share\n"
-                        "Broken link https://www.youtube.com/watch?v=short\n"
-                        "Short clip https://youtu.be/bbbbbbbbbbb"
+                        "Official links:\nhttps://example.org/details\n\n"
+                        "Join and follow updates. #topic #update"
                     ),
                 ),
                 normalized_link="https://youtube.com/watch?v=sourcevideo01",
             ),
             SimpleNamespace(
+                row_number=2,
                 metadata=SimpleNamespace(
                     title="Source 2",
-                    description="Extended version https://youtube.com/watch?v=ccccccccccc",
+                    description="Second source keeps the semantic context intact without extra links.",
                 ),
                 normalized_link="https://youtube.com/watch?v=sourcevideo02",
             ),
         ]
-        response_without_links = SimpleNamespace(
-            raw_text=(
-                '{"title":"Merged title","description":"Focused hook with concrete context!\\n\\n'
-                'In this stream you will see:\\n🔹 first point\\n🔹 second point\\n🔹 third point"}'
-            ),
-            structured_payload={
-                "title": "Merged title",
-                "description": (
-                    "Focused hook with concrete context!\n\n"
-                    "In this stream you will see:\n"
-                    "🔹 first point\n"
-                    "🔹 second point\n"
-                    "🔹 third point"
-                ),
-            },
-        )
-
-        def fake_metadata(url: str) -> SimpleNamespace:
-            metadata_by_url = {
-                "https://youtu.be/aaaaaaaaaaa": SimpleNamespace(
-                    title="Main stream",
-                    duration_seconds=7200,
-                    canonical_url="https://youtu.be/aaaaaaaaaaa",
-                    url="https://youtu.be/aaaaaaaaaaa",
-                ),
-                "https://youtu.be/bbbbbbbbbbb": SimpleNamespace(
-                    title="Short clip",
-                    duration_seconds=300,
-                    canonical_url="https://youtu.be/bbbbbbbbbbb",
-                    url="https://youtu.be/bbbbbbbbbbb",
-                ),
-                "https://youtu.be/ccccccccccc": SimpleNamespace(
-                    title="Extended version",
-                    duration_seconds=None,
-                    canonical_url="https://youtu.be/ccccccccccc",
-                    url="https://youtu.be/ccccccccccc",
-                ),
-            }
-            return metadata_by_url[url]
-
-        with patch("app.llm.merge_service._fetch_merge_youtube_candidate_metadata", side_effect=fake_metadata), patch(
-            "app.llm.merge_service.openai_request_merge",
-            side_effect=[response_without_links],
-        ) as request_mock, patch(
-            "app.llm.merge_service._validate_coverage_preserving_merge_or_raise",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "app.llm.merge_service._log_merge_style_diagnostics",
-            return_value=None,
-        ), self.assertLogs(level="INFO") as captured:
-            attempt = attempt_openai_merge_with_audit(
+        with self.assertLogs(level="INFO") as captured:
+            prompt_text: str = build_llm_merge_prompt_text(
                 language="en",
                 videos=videos,
                 config=self._config(),
-                attempt_label="TEST",
-                summarize_error=lambda error: str(error),
-                normalize_youtube_url=lambda url: url,
                 no_description_text="no description",
-                branch_label="merge",
-                date_key="100326",
-                slot_key="100326_1800",
             )
-
-        self.assertIsNotNone(attempt.merged)
-        prompt_text: str = request_mock.call_args.kwargs["prompt_text"]
-        self.assertIn("YOUTUBE CANDIDATES", prompt_text)
-        self.assertIn("You may include 0, 1, or 2 YouTube URLs", prompt_text)
-        self.assertLess(
-            prompt_text.index("TITLE: Main stream"),
-            prompt_text.index("TITLE: Short clip"),
-        )
-        self.assertLess(
-            prompt_text.index("TITLE: Short clip"),
-            prompt_text.index("TITLE: Extended version"),
-        )
-        self.assertEqual(1, prompt_text.count("URL: https://youtu.be/aaaaaaaaaaa"))
-        self.assertNotIn("URL: https://www.youtube.com/watch?v=short", prompt_text)
-        self.assertNotIn("https://youtu.be/aaaaaaaaaaa", attempt.merged.description)
-        self.assertNotIn("https://youtu.be/bbbbbbbbbbb", attempt.merged.description)
-        self.assertNotIn("https://youtu.be/ccccccccccc", attempt.merged.description)
+        self.assertNotIn("https://youtu.be/aaaaaaaaaaa", prompt_text)
+        self.assertNotIn("https://example.org/details", prompt_text)
+        self.assertNotIn("#topic", prompt_text)
+        self.assertNotIn("Official links:", prompt_text)
+        self.assertNotIn("Join and follow updates.", prompt_text)
+        self.assertIn("Hook paragraph with concrete facts and named people.", prompt_text)
+        self.assertIn("Second source keeps the semantic context intact without extra links.", prompt_text)
+        self.assertIn("Do not add a recommended materials block", prompt_text)
+        self.assertIn("A" * 2400, prompt_text)
+        self.assertNotIn("YOUTUBE CANDIDATES", prompt_text)
         joined_logs: str = "\n".join(captured.output)
-        self.assertIn("merge_youtube_candidates_prepared", joined_logs)
-        self.assertIn("extracted=5", joined_logs)
-        self.assertIn("invalid_skipped=1", joined_logs)
-        self.assertIn("deduped=3", joined_logs)
-        self.assertIn("metadata_resolved=3", joined_logs)
-        self.assertIn("youtube_links_selected=0", joined_logs)
+        self.assertIn("hard_truncation=disabled", joined_logs)
+        self.assertIn("merge_source_text_prepared language=en source_index=1", joined_logs)
+        self.assertIn("urls_removed=", joined_logs)
+        self.assertIn("hashtags_removed=", joined_logs)
 
     def test_invalid_primary_response_triggers_retry_then_final_failure_when_deepseek_is_polish_only(self) -> None:
         responses = [
@@ -714,7 +703,7 @@ Return strict JSON with title and description only.
         self.assertIn("bullets_with_emoji_count=4", joined_logs)
         self.assertIn("bullets_with_plain_marker_count=0", joined_logs)
 
-    def test_official_links_injected_when_missing_in_llm_output(self) -> None:
+    def test_merge_stage_does_not_inject_official_links_when_missing_in_llm_output(self) -> None:
         videos = [
             SimpleNamespace(
                 metadata=SimpleNamespace(
@@ -752,7 +741,7 @@ Return strict JSON with title and description only.
                     "Join and follow updates. #conference #initiative"
                 ),
             },
-        )
+            )
         with patch("app.llm.merge_service.openai_request_merge", side_effect=[response_without_links]):
             attempt = attempt_openai_merge_with_audit(
                 language="en",
@@ -765,11 +754,9 @@ Return strict JSON with title and description only.
             )
         self.assertIsNotNone(attempt.merged)
         description: str = attempt.merged.description if attempt.merged else ""
-        self.assertIn("🌐 Official links:", description)
-        self.assertIn("https://interfaithconf.org/about", description)
-        self.assertIn("https://spiritualdiplomats.org/resources", description)
-        self.assertNotIn("utm_source", description)
-        self.assertNotIn("fbclid", description)
+        self.assertNotIn("🌐 Official links:", description)
+        self.assertNotIn("https://interfaithconf.org/about", description)
+        self.assertNotIn("https://spiritualdiplomats.org/resources", description)
 
     def test_official_links_dedup_and_non_youtube_selection(self) -> None:
         videos = [
@@ -819,9 +806,8 @@ Return strict JSON with title and description only.
             )
         self.assertIsNotNone(attempt.merged)
         description: str = attempt.merged.description if attempt.merged else ""
-        self.assertIn("https://interfaithconf.org/about", description)
-        self.assertEqual(1, description.count("https://interfaithconf.org/about"))
-        self.assertIn("https://allatra.org/", description)
+        self.assertNotIn("https://interfaithconf.org/about", description)
+        self.assertNotIn("https://allatra.org/", description)
         self.assertNotIn("youtu.be", description)
 
     def test_short_service_lines_are_normalized_to_expected_language(self) -> None:

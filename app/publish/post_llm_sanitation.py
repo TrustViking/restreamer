@@ -12,7 +12,7 @@ from app.core.models import (
     MergedPublicationPayload,
     PlannedVideo,
 )
-from app.ingest.youtube_metadata import normalize_youtube_video_url
+from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher, normalize_youtube_video_url
 from app.llm.merge_quality import normalize_merge_description
 from app.observability.runtime_analytics import record_malformed_tail_url_cleanup
 
@@ -56,6 +56,47 @@ _TRACKING_QUERY_KEYS: tuple[str, ...] = (
     "ref_url",
     "spm",
 )
+_SEMANTIC_TOKEN_RE: re.Pattern[str] = re.compile(
+    r"[0-9A-Za-zА-Яа-яЁёІіЇїЄєҐґ]{3,}",
+    flags=re.UNICODE,
+)
+_SEMANTIC_STOPWORDS: set[str] = {
+    "about",
+    "after",
+    "again",
+    "also",
+    "and",
+    "details",
+    "follow",
+    "from",
+    "join",
+    "links",
+    "materials",
+    "more",
+    "stream",
+    "this",
+    "update",
+    "updates",
+    "watch",
+    "with",
+    "для",
+    "материал",
+    "материалы",
+    "подробности",
+    "сегодня",
+    "смотрите",
+    "стрим",
+    "эфир",
+    "для",
+    "долуч",
+    "ефір",
+    "матеріали",
+    "оновлення",
+    "підпис",
+    "подія",
+    "сьогодні",
+    "стрімі",
+}
 
 
 @dataclass(frozen=True)
@@ -86,6 +127,19 @@ class AuthoritativeSourceUrlsResult:
     preserved_non_youtube_tail_urls: int
     duplicate_urls_removed: int
     malformed_tail_urls_dropped: int
+    raw_youtube_urls_found: int
+    deduped_youtube_candidates: int
+    repeated_youtube_candidates: int
+    ignored_llm_youtube_urls: int
+
+
+@dataclass(frozen=True)
+class _RecommendedYouTubeCandidate:
+    url: str
+    source_hits: int
+    total_occurrences: int
+    semantic_overlap_count: int
+    first_seen_order: int
 
 
 @dataclass(frozen=True)
@@ -154,15 +208,13 @@ def build_sanitized_merged_publication_payload(
     extracted_text_source_urls: List[str] = _dedupe_nonempty(
         official_links_extraction.source_urls + sanitization_result.source_urls
     )
-    selected_youtube_urls: List[str] = [
-        url for url in extracted_text_source_urls if _is_youtube_url(url)
-    ]
     authoritative_source_urls_result: AuthoritativeSourceUrlsResult = (
         build_authoritative_merged_source_urls(
             language=language,
             source_videos=source_videos_sequence,
             extracted_tail_urls=extracted_text_source_urls,
             malformed_tail_urls_dropped=sanitization_result.malformed_source_urls_dropped,
+            summary_text=f"{raw_title}\n{sanitization_result.body_text}".strip(),
             cleanup_event_key=cleanup_event_key,
         )
     )
@@ -183,7 +235,7 @@ def build_sanitized_merged_publication_payload(
         body_text=normalized_body_text,
         cta_text=sanitization_result.cta_text,
         hashtags_line=sanitization_result.hashtags_line,
-        youtube_urls=final_selected_youtube_urls,
+        recommended_youtube_urls=final_selected_youtube_urls,
         source_urls=final_official_links_urls,
     )
     official_links_count: int = len(final_official_links_urls)
@@ -200,26 +252,32 @@ def build_sanitized_merged_publication_payload(
         body_text=normalized_body_text,
         cta_text=sanitization_result.cta_text,
         hashtags_line=sanitization_result.hashtags_line,
-        youtube_urls=final_selected_youtube_urls,
+        recommended_youtube_urls=final_selected_youtube_urls,
         source_urls=final_official_links_urls,
     )
+    recommended_block_status: str = "emitted" if final_selected_youtube_urls else "skipped"
     LOGGER.info(
-        "merged_publish_sanitation_applied=yes lang=%s source=%s cta_found=%s hashtags_found=%s hashtags_split_from_cta=%s tail_layout=%s youtube_links_text_candidates=%d youtube_links_final_count=%d official_links_heading_found=%s official_links_text_links=%d official_links_source_links=%d official_links_final_count=%d official_links_block=%s official_links_dedup_applied=%s empty_official_links_suppressed=%d",
+        "merged_publish_sanitation_applied=yes lang=%s source=%s cta_found=%s hashtags_found=%s hashtags_split_from_cta=%s tail_layout=%s recommended_materials_text_candidates_ignored=%d raw_youtube_urls_found=%d deduped_youtube_candidates=%d repeated_youtube_candidates=%d recommended_materials_final_count=%d recommended_materials_block=%s official_links_heading_found=%s official_links_text_links=%d official_links_source_links=%d official_links_final_count=%d official_links_block=%s official_links_dedup_applied=%s official_links_non_youtube_only=yes empty_official_links_suppressed=%d ignored_llm_youtube_urls=%d",
         language,
         source_label,
         "yes" if sanitization_result.cta_found else "no",
         "yes" if sanitization_result.hashtags_found else "no",
         "yes" if sanitization_result.hashtags_split_from_cta else "no",
         final_layout,
-        len(selected_youtube_urls),
+        len([url for url in extracted_text_source_urls if _is_youtube_url(url)]),
+        authoritative_source_urls_result.raw_youtube_urls_found,
+        authoritative_source_urls_result.deduped_youtube_candidates,
+        authoritative_source_urls_result.repeated_youtube_candidates,
         len(final_selected_youtube_urls),
+        recommended_block_status,
         "yes" if official_links_extraction.heading_found else "no",
-        len(extracted_text_source_urls),
+        len([url for url in extracted_text_source_urls if not _is_youtube_url(url)]),
         authoritative_source_urls_result.emitted_source_video_urls,
         official_links_count,
         official_links_block_status,
         "yes" if authoritative_source_urls_result.duplicate_urls_removed > 0 else "no",
         official_links_extraction.empty_blocks_suppressed,
+        authoritative_source_urls_result.ignored_llm_youtube_urls,
     )
     return MergedPublicationPayload(
         title_text=sanitize_post_llm_title(raw_title),
@@ -254,6 +312,7 @@ def sanitize_post_llm_text_for_merged_publish(
             source_videos=source_videos,
             extracted_tail_urls=extracted_text_source_urls,
             malformed_tail_urls_dropped=sanitization_result.malformed_source_urls_dropped,
+            summary_text=sanitization_result.body_text,
             cleanup_event_key=cleanup_event_key,
         )
     )
@@ -267,7 +326,7 @@ def sanitize_post_llm_text_for_merged_publish(
         body_text=normalized_body_text,
         cta_text=sanitization_result.cta_text,
         hashtags_line=sanitization_result.hashtags_line,
-        youtube_urls=authoritative_source_urls.selected_youtube_urls,
+        recommended_youtube_urls=authoritative_source_urls.selected_youtube_urls,
         source_urls=authoritative_source_urls.source_urls,
     )
 
@@ -335,7 +394,7 @@ def sanitize_post_llm_text(
         body_text=body_text,
         cta_text=cta_text,
         hashtags_line=hashtags_line,
-        youtube_urls=youtube_urls,
+        recommended_youtube_urls=youtube_urls,
         source_urls=non_youtube_source_urls,
     )
     LOGGER.info(
@@ -359,7 +418,7 @@ def sanitize_post_llm_text(
         body_text=body_text,
         cta_text=cta_text,
         hashtags_line=hashtags_line,
-        youtube_urls=youtube_urls,
+        recommended_youtube_urls=youtube_urls,
         source_urls=non_youtube_source_urls,
     )
     result = PostLlmSanitizationResult(
@@ -413,46 +472,191 @@ class _EmbeddedTailParts:
     malformed_source_urls_dropped: int
 
 
-def build_authoritative_merged_source_urls(
+def _extract_semantic_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for token in _SEMANTIC_TOKEN_RE.findall(str(text or "").lower()):
+        normalized_token: str = token.strip().lower()
+        if not normalized_token or normalized_token in _SEMANTIC_STOPWORDS:
+            continue
+        tokens.add(normalized_token)
+    return tokens
+
+
+def _strip_urls_and_hashtags_for_context(text: str) -> str:
+    cleaned_text: str = _URL_RE.sub(" ", str(text or ""))
+    cleaned_text = re.sub(r"(?<!\w)#[^\s#]+", " ", cleaned_text, flags=re.UNICODE)
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text)
+    return cleaned_text.strip(" ,;:-")
+
+
+def _extract_raw_description_urls(
+    source_videos: Sequence[PlannedVideo],
+) -> tuple[List[tuple[str, str, int, int]], List[tuple[str, str]], int]:
+    all_occurrences: List[tuple[str, str, int, int]] = []
+    non_youtube_occurrences: List[tuple[str, str]] = []
+    raw_youtube_urls_found: int = 0
+    for source_index, video in enumerate(source_videos):
+        lines: List[str] = str(video.metadata.description or "").replace("\r\n", "\n").replace(
+            "\r", "\n"
+        ).split("\n")
+        for line_index, raw_line in enumerate(lines):
+            line: str = str(raw_line or "").strip()
+            if not line:
+                continue
+            urls: List[str] = [str(match.group(0) or "").strip() for match in _URL_RE.finditer(line)]
+            if not urls:
+                continue
+            fallback_context: str = (
+                _strip_urls_and_hashtags_for_context(line)
+                or str(video.metadata.title or "").strip()
+            )
+            for raw_url in urls:
+                sanitized_url: Optional[str] = _sanitize_source_url(raw_url)
+                if sanitized_url is None:
+                    continue
+                if _is_youtube_url(sanitized_url):
+                    raw_youtube_urls_found += 1
+                all_occurrences.append((sanitized_url, fallback_context, source_index, line_index))
+                if not _is_youtube_url(sanitized_url):
+                    non_youtube_occurrences.append((sanitized_url, line))
+    return (all_occurrences, non_youtube_occurrences, raw_youtube_urls_found)
+
+
+def _select_recommended_youtube_urls(
     *,
-    language: str,
+    source_videos: Sequence[PlannedVideo],
+    summary_text: str,
+) -> tuple[List[str], int, int, int]:
+    all_occurrences, _, raw_youtube_urls_found = _extract_raw_description_urls(source_videos)
+    summary_tokens: set[str] = _extract_semantic_tokens(summary_text)
+    candidate_contexts: dict[str, List[str]] = {}
+    candidate_source_indices: dict[str, set[int]] = {}
+    candidate_occurrence_counts: dict[str, int] = {}
+    candidate_first_seen: dict[str, int] = {}
+
+    for normalized_url, context_text, source_index, line_index in all_occurrences:
+        if not _is_youtube_url(normalized_url):
+            continue
+        candidate_contexts.setdefault(normalized_url, []).append(context_text)
+        candidate_source_indices.setdefault(normalized_url, set()).add(source_index)
+        candidate_occurrence_counts[normalized_url] = (
+            candidate_occurrence_counts.get(normalized_url, 0) + 1
+        )
+        candidate_first_seen.setdefault(normalized_url, len(candidate_first_seen))
+
+    candidates: List[_RecommendedYouTubeCandidate] = []
+    repeated_candidates: int = 0
+    for url, contexts in candidate_contexts.items():
+        source_hits: int = len(candidate_source_indices.get(url, set()))
+        if source_hits >= 2:
+            repeated_candidates += 1
+        context_tokens: set[str] = set()
+        for context_text in contexts:
+            context_tokens.update(_extract_semantic_tokens(context_text))
+        semantic_overlap_count: int = len(summary_tokens & context_tokens)
+        candidates.append(
+            _RecommendedYouTubeCandidate(
+                url=url,
+                source_hits=source_hits,
+                total_occurrences=candidate_occurrence_counts.get(url, 0),
+                semantic_overlap_count=semantic_overlap_count,
+                first_seen_order=candidate_first_seen[url],
+            )
+        )
+
+    candidates.sort(
+        key=lambda candidate: (
+            candidate.source_hits >= 2,
+            candidate.source_hits,
+            candidate.semantic_overlap_count,
+            candidate.total_occurrences,
+            -candidate.first_seen_order,
+        ),
+        reverse=True,
+    )
+
+    selected_urls: List[str] = []
+    for candidate in candidates:
+        if not (
+            candidate.source_hits >= 2 or candidate.semantic_overlap_count >= 2
+        ):
+            continue
+        selected_urls.append(candidate.url)
+        if len(selected_urls) >= 2:
+            break
+    LOGGER.info(
+        "recommended_materials_candidates_built summary_tokens=%d raw_youtube_urls_found=%d deduped_candidates=%d repeated_in_multiple_sources=%d selected=%d selection_mode=deterministic_source_hits_then_semantic_overlap",
+        len(summary_tokens),
+        raw_youtube_urls_found,
+        len(candidates),
+        repeated_candidates,
+        len(selected_urls),
+    )
+    return (selected_urls, raw_youtube_urls_found, len(candidates), repeated_candidates)
+
+
+def _select_authoritative_non_youtube_urls(
+    *,
     source_videos: Sequence[PlannedVideo],
     extracted_tail_urls: Sequence[str],
-    malformed_tail_urls_dropped: int,
-    cleanup_event_key: Optional[str] = None,
-) -> AuthoritativeSourceUrlsResult:
+) -> tuple[List[str], int, int]:
     authoritative_urls: List[str] = []
-    selected_youtube_urls: List[str] = []
     seen_canonical_urls: set[str] = set()
     duplicate_urls_removed: int = 0
     emitted_source_video_urls: int = 0
+    _, non_youtube_occurrences, _ = _extract_raw_description_urls(source_videos)
+    domain_counts: dict[str, int] = {}
+    raw_candidates: List[tuple[str, str]] = []
+
+    for normalized_url, line_text in non_youtube_occurrences:
+        raw_candidates.append((normalized_url, line_text))
+        domain: str = urlsplit(normalized_url).netloc.lower().strip()
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
 
     for video in source_videos:
         normalized_source_url: Optional[str] = _normalize_authoritative_video_url(video)
-        if not normalized_source_url:
+        if not normalized_source_url or _is_youtube_url(normalized_source_url):
             continue
-        if _is_youtube_url(normalized_source_url):
-            continue
-        canonical_key: str = normalized_source_url.rstrip("/")
+        raw_candidates.append((normalized_source_url, str(video.metadata.title or "").strip()))
+
+    scored_candidates: List[tuple[int, int, str]] = []
+    for index, (url, line_text) in enumerate(raw_candidates):
+        parts = urlsplit(url)
+        domain: str = parts.netloc.lower().strip()
+        score: int = 0
+        if parts.scheme == "https":
+            score += 20
+        if _OFFICIAL_LINKS_HEADING_RE.search(str(line_text or "")) or any(
+            hint in str(line_text or "").lower()
+            for hint in ("official", "resource", "resources", "details", "site", "website")
+        ):
+            score += 20
+        score += min(20, domain_counts.get(domain, 1) * 5)
+        if parts.query:
+            score -= 5
+        score += max(0, 15 - (len(url) // 15))
+        scored_candidates.append((score, -index, url))
+
+    scored_candidates.sort(reverse=True)
+    for _, _, url in scored_candidates:
+        canonical_key: str = url.rstrip("/")
         if canonical_key in seen_canonical_urls:
             duplicate_urls_removed += 1
             continue
         seen_canonical_urls.add(canonical_key)
-        authoritative_urls.append(normalized_source_url)
+        authoritative_urls.append(url)
         emitted_source_video_urls += 1
+        if len(authoritative_urls) >= 3:
+            break
 
     preserved_non_youtube_tail_urls: List[str] = []
     for extracted_tail_url in extracted_tail_urls:
         cleaned_tail_url: str = str(extracted_tail_url or "").strip()
-        if not cleaned_tail_url or not _is_complete_source_url(cleaned_tail_url):
-            continue
-        if _is_youtube_url(cleaned_tail_url):
-            canonical_key = cleaned_tail_url.rstrip("/")
-            if canonical_key in seen_canonical_urls:
-                duplicate_urls_removed += 1
-                continue
-            seen_canonical_urls.add(canonical_key)
-            selected_youtube_urls.append(cleaned_tail_url)
+        if (
+            not cleaned_tail_url
+            or not _is_complete_source_url(cleaned_tail_url)
+            or _is_youtube_url(cleaned_tail_url)
+        ):
             continue
         canonical_key = cleaned_tail_url.rstrip("/")
         if canonical_key in seen_canonical_urls:
@@ -462,17 +666,56 @@ def build_authoritative_merged_source_urls(
         authoritative_urls.append(cleaned_tail_url)
         preserved_non_youtube_tail_urls.append(cleaned_tail_url)
 
+    return (authoritative_urls, emitted_source_video_urls, duplicate_urls_removed)
+
+
+def build_authoritative_merged_source_urls(
+    *,
+    language: str,
+    source_videos: Sequence[PlannedVideo],
+    extracted_tail_urls: Sequence[str],
+    malformed_tail_urls_dropped: int,
+    summary_text: str,
+    cleanup_event_key: Optional[str] = None,
+) -> AuthoritativeSourceUrlsResult:
+    selected_youtube_urls, raw_youtube_urls_found, deduped_youtube_candidates, repeated_youtube_candidates = (
+        _select_recommended_youtube_urls(
+            source_videos=source_videos,
+            summary_text=summary_text,
+        )
+    )
+    authoritative_urls, emitted_source_video_urls, duplicate_urls_removed = (
+        _select_authoritative_non_youtube_urls(
+            source_videos=source_videos,
+            extracted_tail_urls=extracted_tail_urls,
+        )
+    )
+    preserved_non_youtube_tail_urls: List[str] = [
+        str(item or "").strip()
+        for item in extracted_tail_urls
+        if str(item or "").strip()
+        and _is_complete_source_url(str(item or "").strip())
+        and not _is_youtube_url(str(item or "").strip())
+    ]
+    ignored_llm_youtube_urls: int = sum(
+        1 for item in extracted_tail_urls if _is_youtube_url(str(item or "").strip())
+    )
+
     extracted_tail_dropped_count: int = malformed_tail_urls_dropped + sum(
         1 for item in extracted_tail_urls if not _is_complete_source_url(item)
     )
     LOGGER.info(
-        "merged_source_urls_built lang=%s inspected=%d emitted=%d selected_youtube_urls=%d deduped=%d preserved_non_youtube_tail_urls=%d source_urls_mode=authoritative_non_youtube_from_inputs_plus_explicit_tail_selection",
+        "merged_source_urls_built lang=%s inspected=%d emitted=%d selected_youtube_urls=%d deduped=%d preserved_non_youtube_tail_urls=%d raw_youtube_urls_found=%d deduped_youtube_candidates=%d repeated_youtube_candidates=%d ignored_llm_youtube_urls=%d source_urls_mode=authoritative_non_youtube_from_inputs_plus_script_selected_recommended_materials",
         language,
         len(source_videos),
         len(authoritative_urls),
         len(selected_youtube_urls),
         duplicate_urls_removed,
         len(preserved_non_youtube_tail_urls),
+        raw_youtube_urls_found,
+        deduped_youtube_candidates,
+        repeated_youtube_candidates,
+        ignored_llm_youtube_urls,
     )
     if extracted_tail_dropped_count > 0:
         LOGGER.info(
@@ -494,6 +737,10 @@ def build_authoritative_merged_source_urls(
         preserved_non_youtube_tail_urls=len(preserved_non_youtube_tail_urls),
         duplicate_urls_removed=duplicate_urls_removed,
         malformed_tail_urls_dropped=extracted_tail_dropped_count,
+        raw_youtube_urls_found=raw_youtube_urls_found,
+        deduped_youtube_candidates=deduped_youtube_candidates,
+        repeated_youtube_candidates=repeated_youtube_candidates,
+        ignored_llm_youtube_urls=ignored_llm_youtube_urls,
     )
 
 
@@ -916,26 +1163,97 @@ def _resolve_official_links_heading(language: str) -> str:
     return "🌐 Official links:"
 
 
+def _resolve_recommended_materials_heading(language: str) -> str:
+    normalized_language: str = str(language or "").strip().lower()
+    if normalized_language == "uk":
+        return "Рекомендовані матеріали:"
+    if normalized_language == "en":
+        return "Recommended materials:"
+    return "Рекомендуемые материалы:"
+
+
+def _fetch_recommended_youtube_title(url: str) -> Optional[str]:
+    recommended_url: str = str(url or "").strip()
+    if not recommended_url:
+        return None
+    LOGGER.info("recommended_title_fetch_started url=%s", recommended_url)
+    try:
+        metadata = YtDlpYouTubeMetadataFetcher().fetch(recommended_url)
+    except Exception as error:
+        LOGGER.info(
+            "recommended_title_fetch_failed url=%s reason=%s",
+            recommended_url,
+            error,
+        )
+        return None
+    title_text: str = str(metadata.title or "")
+    if not title_text:
+        LOGGER.info("recommended_title_fetch_failed url=%s reason=empty_title", recommended_url)
+        return None
+    LOGGER.info("recommended_title_fetch_success url=%s", recommended_url)
+    return title_text
+
+
+def _render_recommended_materials_block(
+    *,
+    language: str,
+    recommended_youtube_urls: Sequence[str],
+) -> str:
+    if not recommended_youtube_urls:
+        return ""
+    rendered_entries: List[str] = []
+    titles_rendered: int = 0
+    for recommended_url in recommended_youtube_urls:
+        cleaned_url: str = str(recommended_url or "").strip()
+        if not cleaned_url:
+            continue
+        try:
+            title_text: Optional[str] = _fetch_recommended_youtube_title(cleaned_url)
+        except Exception as error:
+            LOGGER.info(
+                "recommended_title_fetch_failed url=%s reason=%s",
+                cleaned_url,
+                error,
+            )
+            title_text = None
+        if title_text:
+            rendered_entries.append(f"✅ {title_text}\n👉 {cleaned_url}")
+            titles_rendered += 1
+            continue
+        rendered_entries.append(f"👉 {cleaned_url}")
+    if not rendered_entries:
+        return ""
+    block_text: str = "\n\n".join(
+        [_resolve_recommended_materials_heading(language), *rendered_entries]
+    ).strip()
+    LOGGER.info(
+        "recommended_block_rendered_with_titles urls=%d titles_rendered=%d title_fetch_failures=%d",
+        len(rendered_entries),
+        titles_rendered,
+        len(rendered_entries) - titles_rendered,
+    )
+    return block_text
+
+
 def _compose_full_text(
     *,
     language: str,
     body_text: str,
     cta_text: str,
     hashtags_line: str,
-    youtube_urls: Sequence[str],
+    recommended_youtube_urls: Sequence[str],
     source_urls: Sequence[str],
 ) -> str:
     parts: List[str] = []
     if body_text:
         parts.append(body_text.strip())
-    if youtube_urls:
-        parts.append(
-            "\n".join(
-                str(youtube_url or "").strip()
-                for youtube_url in youtube_urls
-                if str(youtube_url or "").strip()
-            ).strip()
+    if recommended_youtube_urls:
+        recommended_block_text: str = _render_recommended_materials_block(
+            language=language,
+            recommended_youtube_urls=recommended_youtube_urls,
         )
+        if recommended_block_text:
+            parts.append(recommended_block_text)
     if source_urls:
         parts.append(
             "\n".join(
@@ -959,14 +1277,14 @@ def _resolve_tail_layout(
     body_text: str,
     cta_text: str,
     hashtags_line: str,
-    youtube_urls: Sequence[str],
+    recommended_youtube_urls: Sequence[str],
     source_urls: Sequence[str],
 ) -> str:
     layout_parts: List[str] = []
     if body_text:
         layout_parts.append("body")
-    if youtube_urls:
-        layout_parts.extend(("blank", "youtube_links"))
+    if recommended_youtube_urls:
+        layout_parts.extend(("blank", "recommended_materials"))
     if source_urls:
         layout_parts.extend(("blank", "official_links"))
     if cta_text:

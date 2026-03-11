@@ -248,6 +248,16 @@ class MergeYouTubeCandidatesResult:
     metadata_resolved_count: int
 
 
+@dataclass(frozen=True)
+class PreparedMergeSourceDescription:
+    text: str
+    raw_chars: int
+    cleaned_chars: int
+    urls_removed: int
+    hashtags_removed: int
+    service_paragraphs_dropped: int
+
+
 def _reason_code_from_error(error: Exception) -> str:
     error_text: str = str(error or "")
     if "not a valid single JSON object" in error_text:
@@ -292,12 +302,133 @@ def _language_name_for_merge_prompt(language: str, llm_language_names_json: str)
     return default_names.get(language, default_names["other"])
 
 
-def _prepare_source_description(text: str, *, limit: int) -> str:
+def _normalize_source_description_text(text: str) -> str:
     normalized: str = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: limit - 1].rstrip() + "…"
+    return re.sub(r"\n{3,}", "\n\n", normalized)
+
+
+def _strip_source_urls_from_text(text: str) -> tuple[str, int]:
+    removed_urls: int = 0
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal removed_urls
+        removed_urls += 1
+        return ""
+
+    cleaned_text: str = _URL_PATTERN.sub(_replace, str(text or ""))
+    cleaned_text = re.sub(r"\s{2,}", " ", cleaned_text)
+    return (cleaned_text.strip(" ,;:-"), removed_urls)
+
+
+def _strip_source_hashtags_from_text(text: str) -> tuple[str, int]:
+    hashtag_pattern: re.Pattern[str] = re.compile(r"(?<!\w)#[^\s#]+", flags=re.UNICODE)
+    removed_hashtags: int = 0
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal removed_hashtags
+        removed_hashtags += 1
+        return ""
+
+    cleaned_text: str = hashtag_pattern.sub(_replace, str(text or ""))
+    cleaned_text = re.sub(r"\s{2,}", " ", cleaned_text)
+    return (cleaned_text.strip(" ,;:-"), removed_hashtags)
+
+
+def _is_official_links_heading_line(text: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?im)(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:",
+            str(text or "").strip(),
+        )
+    )
+
+
+def _looks_like_service_tail_paragraph(text: str) -> bool:
+    normalized_text: str = re.sub(r"\s+", " ", str(text or "").strip()).lower()
+    if not normalized_text:
+        return True
+    if _is_official_links_heading_line(normalized_text):
+        return True
+    service_hints: tuple[str, ...] = (
+        "watch",
+        "join",
+        "share",
+        "follow",
+        "subscribe",
+        "learn more",
+        "links below",
+        "details below",
+        "диві",
+        "долуч",
+        "підпис",
+        "смотрите",
+        "подпис",
+        "подробности",
+    )
+    semantic_tokens: List[str] = _SEMANTIC_TOKEN_PATTERN.findall(normalized_text)
+    return (
+        len(normalized_text) <= 220
+        and len(semantic_tokens) <= 12
+        and any(hint in normalized_text for hint in service_hints)
+    )
+
+
+def _clean_source_description_for_llm(text: str) -> PreparedMergeSourceDescription:
+    normalized_text: str = _normalize_source_description_text(text)
+    raw_chars: int = len(normalized_text)
+    if not normalized_text:
+        return PreparedMergeSourceDescription(
+            text="",
+            raw_chars=0,
+            cleaned_chars=0,
+            urls_removed=0,
+            hashtags_removed=0,
+            service_paragraphs_dropped=0,
+        )
+
+    cleaned_paragraphs: List[str] = []
+    urls_removed: int = 0
+    hashtags_removed: int = 0
+    service_paragraphs_dropped: int = 0
+
+    for paragraph in _extract_description_paragraphs_raw(normalized_text):
+        cleaned_lines: List[str] = []
+        for raw_line in str(paragraph or "").split("\n"):
+            line: str = str(raw_line or "").strip()
+            if not line:
+                continue
+            cleaned_line, line_urls_removed = _strip_source_urls_from_text(line)
+            cleaned_line, line_hashtags_removed = _strip_source_hashtags_from_text(
+                cleaned_line
+            )
+            urls_removed += line_urls_removed
+            hashtags_removed += line_hashtags_removed
+            cleaned_line = re.sub(r"\s{2,}", " ", cleaned_line).strip(" ,;:-")
+            if not cleaned_line or _is_official_links_heading_line(cleaned_line):
+                continue
+            cleaned_lines.append(cleaned_line)
+
+        cleaned_paragraph: str = "\n".join(cleaned_lines).strip()
+        if not cleaned_paragraph:
+            service_paragraphs_dropped += 1
+            continue
+        cleaned_paragraphs.append(cleaned_paragraph)
+
+    while cleaned_paragraphs and _looks_like_service_tail_paragraph(cleaned_paragraphs[-1]):
+        cleaned_paragraphs.pop()
+        service_paragraphs_dropped += 1
+
+    cleaned_text: str = "\n\n".join(
+        paragraph for paragraph in cleaned_paragraphs if paragraph.strip()
+    ).strip()
+    return PreparedMergeSourceDescription(
+        text=cleaned_text,
+        raw_chars=raw_chars,
+        cleaned_chars=len(cleaned_text),
+        urls_removed=urls_removed,
+        hashtags_removed=hashtags_removed,
+        service_paragraphs_dropped=service_paragraphs_dropped,
+    )
 
 
 def _extract_description_paragraphs_raw(text: str) -> List[str]:
@@ -970,7 +1101,6 @@ def build_llm_merge_prompt_text(
     videos: List[PlannedVideo],
     config: AppConfig,
     no_description_text: str,
-    youtube_candidates_result: Optional[MergeYouTubeCandidatesResult] = None,
 ) -> str:
     if len(videos) < 2:
         raise ValueError("Expected at least 2 videos for merged generation.")
@@ -979,36 +1109,64 @@ def build_llm_merge_prompt_text(
         config.templates.llm_language_names_json,
     )
     source_blocks: List[str] = []
+    raw_source_chars_total: int = 0
+    cleaned_source_chars_total: int = 0
     for index, video in enumerate(videos, start=1):
+        prepared_description: PreparedMergeSourceDescription = _clean_source_description_for_llm(
+            video.metadata.description.strip() or no_description_text
+        )
+        description_for_prompt: str = prepared_description.text or no_description_text
+        raw_source_chars_total += prepared_description.raw_chars
+        cleaned_source_chars_total += len(description_for_prompt)
+        LOGGER.info(
+            "merge_source_text_prepared language=%s source_index=%d row=%s raw_chars=%d cleaned_chars=%d urls_removed=%d hashtags_removed=%d service_paragraphs_dropped=%d hard_truncation=disabled",
+            language,
+            index,
+            getattr(video, "row_number", "unknown"),
+            prepared_description.raw_chars,
+            len(description_for_prompt),
+            prepared_description.urls_removed,
+            prepared_description.hashtags_removed,
+            prepared_description.service_paragraphs_dropped,
+        )
         source_blocks.append(
             "\n".join(
                 [
                     f"SOURCE {index}",
                     f"TITLE: {video.metadata.title.strip()}",
-                    (
-                        "DESCRIPTION: "
-                        f"{_prepare_source_description(video.metadata.description.strip() or no_description_text, limit=config.llm_source_desc_max_chars)}"
-                    ),
+                    f"DESCRIPTION: {description_for_prompt}",
                 ]
             )
         )
-    youtube_candidates_block: str = _build_youtube_candidates_block(
-        youtube_candidates_result
-        if youtube_candidates_result is not None
-        else MergeYouTubeCandidatesResult(
-            raw_youtube_urls_found=0,
-            invalid_youtube_urls_skipped=0,
-            deduped_candidates=(),
-            metadata_resolved_count=0,
-        )
+    LOGGER.info(
+        "merge_prompt_sources_ready language=%s source_count=%d raw_source_chars_total=%d cleaned_source_chars_total=%d hard_truncation=disabled",
+        language,
+        len(videos),
+        raw_source_chars_total,
+        cleaned_source_chars_total,
+    )
+    link_policy_block: str = (
+        "SYSTEM LINK POLICY\n"
+        "Do not include any URLs in the output.\n"
+        "Do not add a recommended materials block or an official links block.\n"
+        "Link blocks will be assembled later by the system."
+    )
+    cross_domain_sentence_policy_block: str = (
+        "CROSS-DOMAIN SENTENCE POLICY\n"
+        "If the sources touch different semantic domains, do not compress them into one sentence.\n"
+        "Especially do not merge medicine or biology or neurobiology, climate or weather or ecology, disasters or geophysics or natural hazards, psychology or thinking or behavior, and social or moral or civilizational conclusions into one sentence.\n"
+        "These topics may stay in one final description, but present them as separate lines of discussion in separate sentences.\n"
+        "Do not build one long cause-and-effect chain across all of those domains in a single sentence.\n"
+        "Several calm sentences are better than one overloaded super-sentence."
     )
     template_prompt: str = str(config.templates.llm_merge_title_description_prompt or "").strip()
     if template_prompt:
-        return template_prompt.format(
+        formatted_template: str = template_prompt.format(
             language_name=language_name,
             sources_block="\n\n".join(source_blocks),
-            youtube_candidates_block=youtube_candidates_block,
+            youtube_candidates_block="",
         ).strip()
+        return f"{formatted_template}\n\n{cross_domain_sentence_policy_block}\n\n{link_policy_block}".strip()
     return (
         "You are writing a YouTube stream title and description.\n"
         f"Write output only in {language_name}.\n"
@@ -1033,19 +1191,14 @@ def build_llm_merge_prompt_text(
         "Preserve important recognizable names from sources when relevant; never invent names.\n"
         "Avoid asserting strong person titles or role labels unless they are clearly necessary and well-supported by the sources.\n"
         "Keep marker usage controlled and readable; do not use dash-only bullets as the sole style.\n"
-        "You may include 0, 1, or 2 YouTube URLs from the allowed candidates block only.\n"
-        "Choosing none is valid.\n"
-        "Pick only the most relevant main streams, with priority to longer broadcasts.\n"
-        "Do not pick short promo, teaser, clip, or secondary videos.\n"
-        "If you include selected YouTube URLs, place each selected URL on its own line near the end of the description before any official links block or CTA.\n"
-        "Optional official links block is allowed before close paragraph, with 1 to 3 non-YouTube links from sources.\n"
+        f"{cross_domain_sentence_policy_block}\n"
+        f"{link_policy_block}\n"
         "An optional one-line closing sentence should be a light practical CTA with 2 to 5 hashtags.\n"
         "Do not enumerate sources as 1) 2) 3).\n"
         "Do not write a dry digest, protocol, or generic CTA block.\n"
         "Do not output generic slogans, abstract editorial text, or propagandistic phrasing.\n"
         "Do not replace concrete facts with broad statements like 'an important conversation about everything'.\n"
         'Output only one strict JSON object with exactly these keys: title, description.\n\n'
-        f"{youtube_candidates_block}\n\n"
         f"{'\n\n'.join(source_blocks)}"
     ).strip()
 
@@ -1523,14 +1676,12 @@ def _attempt_merge_once(
     date_key: str,
     slot_key: str,
     no_description_text: str,
-    youtube_candidates_result: MergeYouTubeCandidatesResult,
 ) -> tuple[MergedLanguageContent, str]:
     prompt_text: str = build_llm_merge_prompt_text(
         language=language,
         videos=videos,
         config=config,
         no_description_text=no_description_text,
-        youtube_candidates_result=youtube_candidates_result,
     )
     if provider.pre_delay_sec(config=config) > 0:
         time.sleep(max(0.0, float(provider.pre_delay_sec(config=config))))
@@ -1573,23 +1724,20 @@ def _attempt_merge_once(
     official_links_selection: OfficialLinksSelection = _extract_official_links_from_sources(
         videos
     )
-    official_links_fill: OfficialLinksFillResult = _inject_official_links_block_if_missing(
+    official_links_fill: OfficialLinksFillResult = OfficialLinksFillResult(
         description=merged_content.description,
-        language=language,
-        official_links=official_links_selection.kept_links,
+        links_in_output=_count_output_official_links(merged_content.description),
+        fill_applied=False,
     )
-    if official_links_fill.fill_applied:
-        merged_content = dataclasses.replace(
-            merged_content,
-            description=official_links_fill.description,
-            description_selected=official_links_fill.description,
-            description_audit=official_links_fill.description,
-        )
     quality_result: MergeQualityNormalizationResult = normalize_merge_description(
         description=merged_content.description,
         language=language,
         source_texts=tuple(
-            f"{video.metadata.title.strip()}\n{video.metadata.description.strip()}" for video in videos
+            (
+                f"{video.metadata.title.strip()}\n"
+                f"{_clean_source_description_for_llm(video.metadata.description.strip()).text}"
+            ).strip()
+            for video in videos
         ),
     )
     if quality_result.description_text != merged_content.description:
@@ -1616,7 +1764,7 @@ def _attempt_merge_once(
             raw_response_text=raw_response_text,
         ) from error
     LOGGER.info(
-        "merge_llm_response_valid model=%s attempt=%d title_length=%d description_length=%d paragraph_count=%d youtube_links_selected=%d",
+        "merge_llm_response_valid model=%s attempt=%d title_length=%d description_length=%d paragraph_count=%d youtube_links_in_llm_output=%d",
         model_name,
         attempt_index,
         len(merged_content.title),
@@ -1685,21 +1833,6 @@ def attempt_llm_merge_with_audit(
     main_source_label: str = _main_stage_field_source(provider_name=primary_provider.name)
     last_raw_response: str = ""
     last_error_summary: str = "unknown error"
-    youtube_candidates_result: MergeYouTubeCandidatesResult = _extract_merge_youtube_candidates(
-        videos
-    )
-    LOGGER.info(
-        "merge_youtube_candidates_prepared branch=%s date_key=%s slot_key=%s language=%s extracted=%d invalid_skipped=%d deduped=%d metadata_resolved=%d candidates_passed=%d sort_rule=duration_desc_unknown_last",
-        branch_label,
-        date_key,
-        slot_key,
-        language,
-        youtube_candidates_result.raw_youtube_urls_found,
-        youtube_candidates_result.invalid_youtube_urls_skipped,
-        len(youtube_candidates_result.deduped_candidates),
-        youtube_candidates_result.metadata_resolved_count,
-        len(youtube_candidates_result.deduped_candidates),
-    )
 
     for attempt_index in range(1, PRIMARY_ATTEMPTS + 1):
         _log_merge_attempt_start(
@@ -1734,7 +1867,6 @@ def attempt_llm_merge_with_audit(
                 date_key=date_key,
                 slot_key=slot_key,
                 no_description_text=no_description_text,
-                youtube_candidates_result=youtube_candidates_result,
             )
             last_raw_response = raw_response_text
             if merge_run_summary is not None:
