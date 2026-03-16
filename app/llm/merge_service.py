@@ -10,7 +10,15 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppConfig
 from app.core.branching import BRANCH_MERGE
-from app.core.models import LanguageMergeAttempt, MergedLanguageContent, PlannedVideo, VideoMetadata
+from app.core.models import (
+    BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
+    BLOCK_GENERATION_MODE_REAL_MERGE,
+    LanguageMergeAttempt,
+    MergedLanguageContent,
+    PlannedVideo,
+    RejectedMergeAttempt,
+    VideoMetadata,
+)
 from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher, normalize_youtube_link
 from app.llm.merge_polish import (
     MergePolishResult,
@@ -25,15 +33,20 @@ from app.llm.merge_quality import (
     normalize_merge_description,
 )
 from app.llm.merge_parser import (
+    MergeTailSeparationResult,
     build_plain_merged_content_or_raise,
     clean_and_validate_llm_description,
+    parse_json_tolerant,
     parse_merge_response_or_raise,
     separate_merge_body_and_tail,
 )
+from app.llm.model_compatibility import LlmModelConfigurationError
+from app.llm.model_identity import resolve_effective_llm_model
 from app.llm.merge_run_summary import MergeRunSummary
 from app.llm.openai_client import LlmTraceContext, OpenAITransportResult, openai_request_merge
 from app.llm.provider_factory import get_llm_provider
 from app.llm.providers.base import LlmProvider
+from app.observability.runtime_analytics import log_warning_operational
 
 LOGGER = _get_logger_impl(__name__)
 PRIMARY_ATTEMPTS: int = 2
@@ -59,6 +72,18 @@ _TRACKING_QUERY_KEYS: tuple[str, ...] = (
     "ref_url",
     "spm",
 )
+
+
+def _fallback_title_source_label() -> str:
+    return "fallback_titles"
+
+
+def _fallback_hook_source_label() -> str:
+    return "fallback_none"
+
+
+def _fallback_body_source_label() -> str:
+    return "fallback_source_descriptions"
 _OFFICIAL_LINK_CONTEXT_HINTS: tuple[str, ...] = (
     "official",
     "website",
@@ -172,6 +197,54 @@ _SEMANTIC_STOPWORDS: set[str] = {
     "цей",
     "ефір",
 }
+_EXPANDED_RETRY_FOCUS_ORDER: tuple[str, ...] = (
+    "body_depth",
+    "bullet_sufficiency",
+    "source_specificity",
+    "hook_restraint",
+    "source_spread",
+)
+_EXPANDED_RETRY_REASON_TO_FOCUS: dict[str, str] = {
+    "insufficient_expanded_body": "body_depth",
+    "too_few_expanded_bullets": "bullet_sufficiency",
+    "overly_generic_body": "source_specificity",
+    "hook_dominates_body": "hook_restraint",
+    "weak_source_coverage": "source_spread",
+    "insufficient_topic_spread": "source_spread",
+}
+_EXPANDED_RETRY_FOCUS_LINES: dict[str, str] = {
+    "body_depth": "Make the post-hook body clearly denser: after the opening, carry most of the useful information in a fuller factual agenda instead of a thin bridge into bullets.",
+    "bullet_sufficiency": "Make sure the agenda reaches enough distinct, meaningful bullets; each bullet should add a separate fact, actor, place, event, timeline, or operational consequence rather than rephrasing one idea.",
+    "source_specificity": "Use source-grounded specifics instead of broad editorial wording: preserve concrete names, places, institutions, numbers, timings, or clearly observable actions whenever the sources provide them.",
+    "hook_restraint": "Keep the hook brief and functional so the main body carries the value; do not spend two long scene-setting sentences if that causes the agenda to stay thin.",
+    "source_spread": "Restore distinguishable spread across source lines or topic nodes so the body does not collapse into one blended lane; keep separate angles recognizably separate without turning the text into SOURCE 1 / SOURCE 2 enumeration.",
+}
+_THREE_SOURCE_EXPANDED_RETRY_COMBINED_LINES: tuple[tuple[frozenset[str], str], ...] = (
+    (
+        frozenset({"body_depth", "bullet_sufficiency"}),
+        "After the hook, move quickly into 2 to 3 short agenda tracks with enough fact-bearing bullets to sustain them; do not spend the remaining space on a thin bridge or a generic wrap-up.",
+    ),
+    (
+        frozenset({"source_specificity", "source_spread"}),
+        "Make the contribution of different sources visibly distinguishable across multiple meaningful lines of discussion; cut generic filler bridges and keep concrete source facts attached to the right lane.",
+    ),
+)
+_FOUR_PLUS_EXPANDED_RETRY_REASON_CODES: frozenset[str] = frozenset(
+    {
+        "too_few_expanded_bullets",
+        "insufficient_expanded_body",
+        "overly_generic_body",
+        "insufficient_topic_spread",
+        "weak_source_coverage",
+    }
+)
+_FORMATTING_ONLY_SALVAGE_REASON_CODES: frozenset[str] = frozenset(
+    {"excessive_emoji_usage"}
+)
+_EMOJI_PATTERN: re.Pattern[str] = re.compile(
+    r"[\U0001F300-\U0001FAFF\u2600-\u27BF]",
+    flags=re.UNICODE,
+)
 
 
 @dataclass(frozen=True)
@@ -181,9 +254,20 @@ class MergeAttemptFailure(RuntimeError):
     model_name: str
     attempt_stage: str
     raw_response_text: str
+    reason_codes: tuple[str, ...] = ()
+    rejected_attempt: Optional[RejectedMergeAttempt] = None
 
     def __str__(self) -> str:
         return self.reason
+
+
+@dataclass(frozen=True)
+class DescriptionValidationFailure(RuntimeError):
+    reason_codes: tuple[str, ...]
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @dataclass(frozen=True)
@@ -216,6 +300,30 @@ class MergeSemanticDiagnostics:
     official_links_in_output: int
     official_links_fill_applied: bool
     merge_quality: MergeQualityDiagnostics
+    expanded_quality: "ExpandedMergeDiagnostics"
+
+
+@dataclass(frozen=True)
+class ExpandedMergeDiagnostics:
+    enabled: bool
+    body_paragraph_count: int
+    body_char_count: int
+    body_non_hook_char_count: int
+    compact_body_relaxed: bool
+    hook_char_count: int
+    hook_share: float
+    bullet_lines_with_anchor_count: int
+    detailed_bullet_count: int
+    thematic_spread_count: int
+    body_anchor_count: int
+    distinctive_coverage_hits: int
+    distinctive_coverage_total: int
+    distinctive_coverage_by_item: tuple[int, ...]
+    distinctive_coverage_targets: tuple[int, ...]
+    softened_distinctive_source_coverage_applied: bool
+    quality_gate_status: str
+    quality_gate_reason_codes: tuple[str, ...]
+    quality_gate_reason_details: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -258,8 +366,54 @@ class PreparedMergeSourceDescription:
     service_paragraphs_dropped: int
 
 
+@dataclass(frozen=True)
+class MergeContractMode:
+    mode_label: str
+    source_count: int
+    bullet_range_label: str
+    expanded_structure_enabled: bool
+    contract_block: str
+
+
+@dataclass(frozen=True)
+class ExpandedRetryProfile:
+    retry_mode: str
+    reject_signals: tuple[str, ...]
+    focus_tags: tuple[str, ...]
+    reinforcement_lines: tuple[str, ...]
+
+    @property
+    def enabled(self) -> bool:
+        return self.retry_mode == "targeted" and bool(self.reinforcement_lines)
+
+    @property
+    def focus_label(self) -> str:
+        return ",".join(self.focus_tags) or "none"
+
+    @property
+    def reject_signal_label(self) -> str:
+        return ",".join(self.reject_signals) or "none"
+
+
+@dataclass(frozen=True)
+class FormattingNormalizationResult:
+    description_text: str
+    actions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MergeValidationRecoveryAttempt:
+    merged_content: Optional[MergedLanguageContent]
+    diagnostics: Optional[MergeSemanticDiagnostics]
+    validation_error: Optional[Exception]
+    actions: tuple[str, ...]
+
+
 def _reason_code_from_error(error: Exception) -> str:
     error_text: str = str(error or "")
+    validation_reason_codes: tuple[str, ...] = _reason_codes_from_error(error)
+    if validation_reason_codes:
+        return validation_reason_codes[0]
     if "not a valid single JSON object" in error_text:
         return "not_json_object"
     if error_text.startswith("missing_keys:"):
@@ -282,6 +436,483 @@ def _reason_code_from_error(error: Exception) -> str:
     ):
         return "invalid_description"
     return "unexpected_error"
+
+
+def _reason_codes_from_error(error: Exception) -> tuple[str, ...]:
+    if isinstance(error, MergeAttemptFailure):
+        if error.reason_codes:
+            return error.reason_codes
+        # Defensive fallback for legacy failures that still carry only human-readable text.
+        return _extract_description_validation_reason_codes(str(error or ""))
+    if isinstance(error, DescriptionValidationFailure):
+        if error.reason_codes:
+            return error.reason_codes
+        # Defensive fallback for legacy failures that still carry only human-readable text.
+        return _extract_description_validation_reason_codes(str(error or ""))
+    # Defensive fallback for legacy string-only validation errors.
+    return _extract_description_validation_reason_codes(str(error or ""))
+
+
+def _normalize_description_validation_reason_code(reason_code: str) -> str:
+    normalized_reason_code: str = str(reason_code or "").strip()
+    if not normalized_reason_code:
+        return ""
+    if re.fullmatch(r"semantic_source_\d+_coverage_missing", normalized_reason_code):
+        return "weak_source_coverage"
+    reason_aliases: dict[str, str] = {
+        "semantic_source_grounding_too_low": "weak_source_coverage",
+        "semantic_too_generic": "overly_generic_body",
+    }
+    return reason_aliases.get(normalized_reason_code, normalized_reason_code)
+
+
+def _normalize_description_validation_reason_codes(
+    reason_codes: Sequence[str],
+) -> tuple[str, ...]:
+    normalized_reason_codes: list[str] = []
+    for raw_reason_code in reason_codes:
+        normalized_reason_code: str = _normalize_description_validation_reason_code(
+            raw_reason_code
+        )
+        if normalized_reason_code and normalized_reason_code not in normalized_reason_codes:
+            normalized_reason_codes.append(normalized_reason_code)
+    return tuple(normalized_reason_codes)
+
+
+def _build_description_validation_failure(
+    *,
+    reason_codes: Sequence[str],
+    message: str,
+) -> DescriptionValidationFailure:
+    return DescriptionValidationFailure(
+        reason_codes=_normalize_description_validation_reason_codes(reason_codes),
+        message=message,
+    )
+
+
+def _extract_description_validation_reason_codes(error_text: str) -> tuple[str, ...]:
+    marker: str = "description validation failed:"
+    if marker not in error_text:
+        return ()
+    raw_reason_codes: str = error_text.split(marker, maxsplit=1)[1].strip()
+    if not raw_reason_codes:
+        return ()
+    return _normalize_description_validation_reason_codes(
+        raw_reason_codes.split(",")
+    )
+
+def _standard_expanded_retry_profile(
+    *,
+    reject_signals: Sequence[str] = (),
+) -> ExpandedRetryProfile:
+    normalized_reject_signals: tuple[str, ...] = tuple(
+        signal for signal in dict.fromkeys(reject_signals) if str(signal or "").strip()
+    )
+    return ExpandedRetryProfile(
+        retry_mode="standard",
+        reject_signals=normalized_reject_signals,
+        focus_tags=(),
+        reinforcement_lines=(),
+    )
+
+
+def _build_expanded_retry_profile(
+    *,
+    source_count: int,
+    reject_signals: Sequence[str],
+) -> ExpandedRetryProfile:
+    normalized_reject_signals: tuple[str, ...] = tuple(
+        _normalize_description_validation_reason_code(signal)
+        for signal in dict.fromkeys(reject_signals)
+        if _normalize_description_validation_reason_code(signal)
+    )
+    if source_count < 3:
+        return _standard_expanded_retry_profile(
+            reject_signals=normalized_reject_signals
+        )
+    focus_tags: list[str] = []
+    for focus_tag in _EXPANDED_RETRY_FOCUS_ORDER:
+        if any(
+            _EXPANDED_RETRY_REASON_TO_FOCUS.get(reason_code) == focus_tag
+            for reason_code in normalized_reject_signals
+        ):
+            focus_tags.append(focus_tag)
+    if not focus_tags:
+        return _standard_expanded_retry_profile(
+            reject_signals=normalized_reject_signals
+        )
+    return ExpandedRetryProfile(
+        retry_mode="targeted",
+        reject_signals=normalized_reject_signals,
+        focus_tags=tuple(focus_tags),
+        reinforcement_lines=_build_expanded_retry_reinforcement_lines(
+            source_count=source_count,
+            focus_tags=tuple(focus_tags),
+            reject_signals=normalized_reject_signals,
+        ),
+    )
+
+
+def _build_retry_profile_from_reason_codes(
+    *,
+    source_count: int,
+    reject_signals: Sequence[str],
+    fallback_reason_code: str,
+) -> ExpandedRetryProfile:
+    normalized_reject_signals: tuple[str, ...] = (
+        _normalize_description_validation_reason_codes(reject_signals)
+    )
+    if not normalized_reject_signals and str(fallback_reason_code or "").strip():
+        normalized_reject_signals = (
+            _normalize_description_validation_reason_code(fallback_reason_code),
+        )
+    return _build_expanded_retry_profile(
+        source_count=source_count,
+        reject_signals=normalized_reject_signals,
+    )
+
+
+def _expanded_retry_reinforcement_block(
+    profile: Optional[ExpandedRetryProfile],
+) -> str:
+    if profile is None or not profile.enabled:
+        return ""
+    return (
+        "EXPANDED RETRY FOCUS\n"
+        "Keep the same expanded contract, but correct the weak points from the previous draft.\n"
+        f"{'\n'.join(profile.reinforcement_lines)}"
+    ).strip()
+
+
+def _build_expanded_retry_reinforcement_lines(
+    *,
+    source_count: int,
+    focus_tags: Sequence[str],
+    reject_signals: Sequence[str],
+) -> tuple[str, ...]:
+    ordered_focus_tags: tuple[str, ...] = tuple(
+        tag for tag in dict.fromkeys(focus_tags) if str(tag or "").strip()
+    )
+    ordered_reject_signals: tuple[str, ...] = tuple(
+        signal for signal in dict.fromkeys(reject_signals) if str(signal or "").strip()
+    )
+    reinforcement_lines: list[str] = [
+        _EXPANDED_RETRY_FOCUS_LINES[focus_tag]
+        for focus_tag in ordered_focus_tags
+        if focus_tag in _EXPANDED_RETRY_FOCUS_LINES
+    ]
+    if source_count < 3:
+        return tuple(reinforcement_lines)
+    focus_set: set[str] = set(ordered_focus_tags)
+    for required_tags, combined_line in _THREE_SOURCE_EXPANDED_RETRY_COMBINED_LINES:
+        if required_tags.issubset(focus_set):
+            reinforcement_lines.append(combined_line)
+    if source_count >= 4:
+        reinforcement_lines.extend(
+            _build_four_plus_expanded_retry_reinforcement_lines(
+                reject_signals=ordered_reject_signals,
+            )
+        )
+    return tuple(reinforcement_lines)
+
+
+def _build_four_plus_expanded_retry_reinforcement_lines(
+    *,
+    reject_signals: Sequence[str],
+) -> tuple[str, ...]:
+    ordered_reject_signals: tuple[str, ...] = tuple(
+        signal for signal in dict.fromkeys(reject_signals) if str(signal or "").strip()
+    )
+    reject_signal_set: set[str] = set(ordered_reject_signals)
+    if not reject_signal_set.intersection(_FOUR_PLUS_EXPANDED_RETRY_REASON_CODES):
+        return ()
+    reinforcement_lines: list[str] = [
+        "For 4 or more sources, do not collapse the post-hook body into one umbrella summary. Build 2 to 3 meaningful thematic micro-blocks after the hook and let each micro-block carry distinguishable source-specific contributions.",
+    ]
+    if {
+        "too_few_expanded_bullets",
+        "insufficient_expanded_body",
+    }.intersection(reject_signal_set):
+        reinforcement_lines.append(
+            "Do not compress 4 or 5 sources into only 3 generic bullets. Restore lost source lines with enough fact-bearing bullets inside the micro-blocks so the body gains source-specific density, not just extra length."
+        )
+    if "overly_generic_body" in reject_signal_set:
+        reinforcement_lines.append(
+            "Increase source-specific density inside the micro-blocks: use concrete names, places, institutions, counts, timings, events, or operational consequences from the actual sources instead of broad framing language."
+        )
+    if {
+        "weak_source_coverage",
+        "insufficient_topic_spread",
+    }.intersection(reject_signal_set):
+        reinforcement_lines.append(
+            "Make every source leave a recognizable trace in the body and keep independent topic nodes separate. Do not collapse several inputs into one generic moral, one universal frame, or one blended concluding block."
+        )
+    return tuple(reinforcement_lines)
+
+
+def _source_texts_for_merge_quality(videos: Sequence[PlannedVideo]) -> tuple[str, ...]:
+    return tuple(
+        (
+            f"{video.metadata.title.strip()}\n"
+            f"{_clean_source_description_for_llm(video.metadata.description.strip()).text}"
+        ).strip()
+        for video in videos
+    )
+
+
+def _best_effort_rejected_payload_fields(
+    *,
+    raw_response_text: str,
+    structured_payload: object,
+) -> tuple[str, str]:
+    payload: object = structured_payload
+    if not isinstance(payload, dict):
+        payload, _ = parse_json_tolerant(raw_response_text)
+    if not isinstance(payload, dict):
+        return ("", "")
+    title_text: str = (
+        str(payload.get("title") or "").strip()
+        if isinstance(payload.get("title"), str)
+        else ""
+    )
+    description_text: str = (
+        str(payload.get("description") or "").strip()
+        if isinstance(payload.get("description"), str)
+        else ""
+    )
+    return (title_text, description_text)
+
+
+def _build_rejected_merge_attempt(
+    *,
+    attempt_index: int,
+    model_name: str,
+    reason_codes: Sequence[str],
+    fallback_reason_code: str = "",
+    raw_response_text: str,
+    title_text: str = "",
+    description_text: str = "",
+    structured_payload: object = None,
+) -> Optional[RejectedMergeAttempt]:
+    normalized_reason_codes: tuple[str, ...] = _normalize_description_validation_reason_codes(
+        reason_codes
+    )
+    if not normalized_reason_codes and str(fallback_reason_code or "").strip():
+        normalized_reason_codes = (str(fallback_reason_code).strip(),)
+    best_effort_title: str = str(title_text or "").strip()
+    best_effort_description: str = str(description_text or "").strip()
+    if not best_effort_title and not best_effort_description:
+        best_effort_title, best_effort_description = _best_effort_rejected_payload_fields(
+            raw_response_text=raw_response_text,
+            structured_payload=structured_payload,
+        )
+    if (
+        not best_effort_title
+        and not best_effort_description
+        and not str(raw_response_text or "").strip()
+    ):
+        return None
+    return RejectedMergeAttempt(
+        attempt_index=attempt_index,
+        model_name=str(model_name or "").strip(),
+        reject_reasons=normalized_reason_codes,
+        title=best_effort_title,
+        description=best_effort_description,
+        raw_response_text=str(raw_response_text or ""),
+    )
+
+
+def _is_formatting_only_validation_failure(reason_codes: Sequence[str]) -> bool:
+    normalized_reason_codes: tuple[str, ...] = _normalize_description_validation_reason_codes(
+        reason_codes
+    )
+    return bool(normalized_reason_codes) and all(
+        reason_code in _FORMATTING_ONLY_SALVAGE_REASON_CODES
+        for reason_code in normalized_reason_codes
+    )
+
+
+def _strip_non_structural_emoji_from_line(line: str) -> tuple[str, bool]:
+    raw_line: str = str(line or "")
+    indent_length: int = len(raw_line) - len(raw_line.lstrip())
+    indent: str = raw_line[:indent_length]
+    stripped_line: str = raw_line[indent_length:]
+    protected_prefix: str = ""
+    for marker in _SEMANTIC_BULLET_MARKERS:
+        marker_with_space: str = f"{marker} "
+        if stripped_line.startswith(marker_with_space):
+            protected_prefix = f"{indent}{marker_with_space}"
+            stripped_line = stripped_line[len(marker_with_space) :]
+            break
+    sanitized_tail: str = _EMOJI_PATTERN.sub("", stripped_line)
+    sanitized_tail = re.sub(r"\s+([,.;:!?])", r"\1", sanitized_tail)
+    sanitized_tail = re.sub(r"\s{2,}", " ", sanitized_tail).strip()
+    sanitized_line: str = f"{protected_prefix}{sanitized_tail}".strip()
+    return (sanitized_line, sanitized_line != raw_line.strip())
+
+
+def _strip_non_structural_emoji_from_description(description_text: str) -> tuple[str, bool]:
+    normalized_description: str = str(description_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    sanitized_lines: list[str] = []
+    changed: bool = False
+    for raw_line in normalized_description.split("\n"):
+        if not raw_line.strip():
+            sanitized_lines.append("")
+            continue
+        sanitized_line, line_changed = _strip_non_structural_emoji_from_line(raw_line)
+        sanitized_lines.append(sanitized_line)
+        changed = changed or line_changed
+    sanitized_description: str = "\n".join(sanitized_lines).strip()
+    return (sanitized_description, changed)
+
+
+def _normalize_formatting_only_description(
+    *,
+    description_text: str,
+    language: str,
+    source_texts: Sequence[str],
+    reason_codes: Sequence[str],
+) -> FormattingNormalizationResult:
+    normalized_reason_codes: tuple[str, ...] = _normalize_description_validation_reason_codes(
+        reason_codes
+    )
+    normalized_description_text: str = str(description_text or "").strip()
+    actions: list[str] = []
+    if "excessive_emoji_usage" in normalized_reason_codes:
+        stripped_description_text, emoji_changed = _strip_non_structural_emoji_from_description(
+            normalized_description_text
+        )
+        if emoji_changed:
+            normalized_description_text = stripped_description_text
+            actions.append("reduced_non_structural_emoji")
+    quality_result: MergeQualityNormalizationResult = normalize_merge_description(
+        description=normalized_description_text,
+        language=language,
+        source_texts=source_texts,
+    )
+    if quality_result.description_text != normalized_description_text:
+        normalized_description_text = quality_result.description_text
+        actions.append("reapplied_merge_quality_normalization")
+    return FormattingNormalizationResult(
+        description_text=normalized_description_text,
+        actions=tuple(actions),
+    )
+
+
+def _attempt_expanded_formatting_recovery(
+    *,
+    validation_error: Exception,
+    merged_content: MergedLanguageContent,
+    diagnostics: MergeSemanticDiagnostics,
+    videos: Sequence[PlannedVideo],
+    official_links_selection: OfficialLinksSelection,
+    official_links_fill: OfficialLinksFillResult,
+    source_texts: Sequence[str],
+    language: str,
+    model_name: str,
+    attempt_index: int,
+    branch_label: str,
+    date_key: str,
+    slot_key: str,
+) -> MergeValidationRecoveryAttempt:
+    reason_codes: tuple[str, ...] = _reason_codes_from_error(validation_error)
+    if len(videos) < 3 or not _is_formatting_only_validation_failure(reason_codes):
+        return MergeValidationRecoveryAttempt(
+            merged_content=None,
+            diagnostics=None,
+            validation_error=validation_error,
+            actions=(),
+        )
+    normalization_result: FormattingNormalizationResult = _normalize_formatting_only_description(
+        description_text=merged_content.description,
+        language=language,
+        source_texts=source_texts,
+        reason_codes=reason_codes,
+    )
+    if (
+        normalization_result.description_text == merged_content.description
+        or not normalization_result.actions
+    ):
+        return MergeValidationRecoveryAttempt(
+            merged_content=None,
+            diagnostics=None,
+            validation_error=validation_error,
+            actions=normalization_result.actions,
+        )
+    recovered_content: MergedLanguageContent = dataclasses.replace(
+        merged_content,
+        description=normalization_result.description_text,
+        description_selected=normalization_result.description_text,
+        description_audit=normalization_result.description_text,
+    )
+    recovery_quality_result: MergeQualityNormalizationResult = normalize_merge_description(
+        description=recovered_content.description,
+        language=language,
+        source_texts=source_texts,
+    )
+    if recovery_quality_result.description_text != recovered_content.description:
+        recovered_content = dataclasses.replace(
+            recovered_content,
+            description=recovery_quality_result.description_text,
+            description_selected=recovery_quality_result.description_text,
+            description_audit=recovery_quality_result.description_text,
+        )
+    recovered_diagnostics: MergeSemanticDiagnostics = _build_merge_semantic_diagnostics(
+        merged_content=recovered_content,
+        videos=videos,
+        official_links_selection=official_links_selection,
+        official_links_fill=official_links_fill,
+        merge_quality=recovery_quality_result.diagnostics,
+    )
+    try:
+        _validate_coverage_preserving_merge_or_raise(
+            merged_content=recovered_content,
+            videos=videos,
+            official_links_selection=official_links_selection,
+            official_links_fill=official_links_fill,
+            merge_quality=recovery_quality_result.diagnostics,
+            precomputed_diagnostics=recovered_diagnostics,
+        )
+    except Exception as recovered_error:
+        LOGGER.info(
+            "merge_llm_validation_salvage branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d outcome=revealed_non_formatting_issue reason_codes=%s replacement_reason_codes=%s actions=%s emoji_before=%d emoji_after=%d",
+            branch_label,
+            date_key,
+            slot_key,
+            language,
+            model_name,
+            attempt_index,
+            ",".join(reason_codes) or "none",
+            ",".join(_reason_codes_from_error(recovered_error)) or "none",
+            ",".join(normalization_result.actions) or "none",
+            diagnostics.emoji_count,
+            recovered_diagnostics.emoji_count,
+        )
+        return MergeValidationRecoveryAttempt(
+            merged_content=None,
+            diagnostics=None,
+            validation_error=recovered_error,
+            actions=normalization_result.actions,
+        )
+    LOGGER.info(
+        "merge_llm_validation_salvage branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d outcome=applied reason_codes=%s actions=%s emoji_before=%d emoji_after=%d",
+        branch_label,
+        date_key,
+        slot_key,
+        language,
+        model_name,
+        attempt_index,
+        ",".join(reason_codes) or "none",
+        ",".join(normalization_result.actions) or "none",
+        diagnostics.emoji_count,
+        recovered_diagnostics.emoji_count,
+    )
+    return MergeValidationRecoveryAttempt(
+        merged_content=recovered_content,
+        diagnostics=recovered_diagnostics,
+        validation_error=None,
+        actions=normalization_result.actions,
+    )
 
 
 def _language_name_for_merge_prompt(language: str, llm_language_names_json: str) -> str:
@@ -845,6 +1476,14 @@ def _extract_named_entities(text: str) -> set[str]:
     return {match.group(0).strip().lower() for match in entity_pattern.finditer(str(text or ""))}
 
 
+def _source_text_for_semantic_analysis(video: PlannedVideo) -> str:
+    cleaned_description: str = _clean_source_description_for_llm(
+        video.metadata.description.strip()
+    ).text
+    description_text: str = cleaned_description or video.metadata.description.strip()
+    return f"{video.metadata.title.strip()}\n{description_text}".strip()
+
+
 def _build_source_coverage_flags(
     *,
     merged_anchors: set[str],
@@ -866,6 +1505,324 @@ def _build_source_coverage_flags(
     return tuple(coverage_flags)
 
 
+def _build_distinctive_source_coverage_metrics(
+    *,
+    merged_anchors: set[str],
+    source_anchors: Sequence[set[str]],
+) -> tuple[tuple[int, ...], tuple[int, ...], int, int]:
+    coverage_hits_by_item: List[int] = []
+    coverage_targets_by_item: List[int] = []
+    covered_items: int = 0
+    covered_items_total: int = 0
+    for source_index, anchors in enumerate(source_anchors, start=1):
+        others: set[str] = set()
+        for other_index, other_anchors in enumerate(source_anchors, start=1):
+            if other_index == source_index:
+                continue
+            others.update(other_anchors)
+        distinctive_anchors: set[str] = anchors - others
+        probe_anchors: set[str] = distinctive_anchors if len(distinctive_anchors) >= 3 else set()
+        coverage_hit_count: int = len(merged_anchors & probe_anchors)
+        if len(probe_anchors) >= 6:
+            coverage_target: int = 2
+        elif len(probe_anchors) >= 3:
+            coverage_target = 1
+        else:
+            coverage_target = 0
+        coverage_hits_by_item.append(coverage_hit_count)
+        coverage_targets_by_item.append(coverage_target)
+        if coverage_target <= 0:
+            continue
+        covered_items_total += 1
+        if coverage_hit_count >= coverage_target:
+            covered_items += 1
+    return (
+        tuple(coverage_hits_by_item),
+        tuple(coverage_targets_by_item),
+        covered_items,
+        covered_items_total,
+    )
+
+
+def _normalized_char_count(text: str) -> int:
+    return len(re.sub(r"\s+", " ", str(text or "").strip()))
+
+
+def _is_detailed_bullet_line(*, line_text: str, line_anchors: set[str]) -> bool:
+    if len(line_anchors) >= 2:
+        return True
+    if any(character.isdigit() for character in line_text):
+        return True
+    return bool(_extract_named_entities(line_text))
+
+
+def _expanded_quality_has_full_source_coverage(
+    *,
+    source_coverage_by_item: tuple[bool, ...],
+    distinctive_coverage_by_item: tuple[int, ...],
+    distinctive_coverage_targets: tuple[int, ...],
+) -> bool:
+    if any(not covered for covered in source_coverage_by_item):
+        return False
+    for hit_count, target_count in zip(
+        distinctive_coverage_by_item,
+        distinctive_coverage_targets,
+    ):
+        if target_count > 0 and hit_count < target_count:
+            return False
+    return True
+
+
+def _expanded_compact_body_is_content_rich(
+    *,
+    body_non_hook_char_count: int,
+    bullet_lines_with_anchor_count: int,
+    detailed_bullet_count: int,
+    thematic_spread_count: int,
+    body_anchor_count: int,
+    source_coverage_by_item: tuple[bool, ...],
+    distinctive_coverage_by_item: tuple[int, ...],
+    distinctive_coverage_targets: tuple[int, ...],
+    min_detailed_bullets: int,
+    min_topic_spread: int,
+    min_body_anchor_count: int,
+) -> bool:
+    if body_non_hook_char_count < 320:
+        return False
+    if bullet_lines_with_anchor_count < min_detailed_bullets:
+        return False
+    if detailed_bullet_count < min_detailed_bullets:
+        return False
+    if thematic_spread_count < min_topic_spread:
+        return False
+    if body_anchor_count < min_body_anchor_count:
+        return False
+    return _expanded_quality_has_full_source_coverage(
+        source_coverage_by_item=source_coverage_by_item,
+        distinctive_coverage_by_item=distinctive_coverage_by_item,
+        distinctive_coverage_targets=distinctive_coverage_targets,
+    )
+
+
+def _expanded_quality_reason_detail(reason_code: str) -> str:
+    reason_details: dict[str, str] = {
+        "too_few_expanded_bullets": "Expanded merge did not produce enough substantive agenda bullets.",
+        "insufficient_expanded_body": "Expanded merge body is too thin or too structurally compact without enough dense content after the hook.",
+        "weak_source_coverage": "Expanded merge does not preserve distinguishable source-specific coverage.",
+        "overly_generic_body": "Expanded merge body stays too generic for a multi-source summary.",
+        "insufficient_topic_spread": "Expanded merge agenda does not spread across enough distinct topic nodes.",
+        "hook_dominates_body": "Expanded merge hook takes too much of the useful summary volume.",
+    }
+    return reason_details.get(reason_code, reason_code.replace("_", " "))
+
+
+def _is_softened_distinctive_source_coverage_eligible(
+    *,
+    source_count: int,
+    source_coverage_by_item: tuple[bool, ...],
+    distinctive_coverage_hits: int,
+    distinctive_coverage_total: int,
+    reason_codes: Sequence[str],
+) -> bool:
+    normalized_reason_codes: tuple[str, ...] = tuple(
+        code for code in dict.fromkeys(reason_codes) if str(code or "").strip()
+    )
+    return (
+        source_count == 3
+        and distinctive_coverage_hits == 2
+        and distinctive_coverage_total == 3
+        and all(source_coverage_by_item)
+        and normalized_reason_codes == ("weak_source_coverage",)
+    )
+
+
+def _inactive_expanded_merge_diagnostics() -> ExpandedMergeDiagnostics:
+    return ExpandedMergeDiagnostics(
+        enabled=False,
+        body_paragraph_count=0,
+        body_char_count=0,
+        body_non_hook_char_count=0,
+        compact_body_relaxed=False,
+        hook_char_count=0,
+        hook_share=0.0,
+        bullet_lines_with_anchor_count=0,
+        detailed_bullet_count=0,
+        thematic_spread_count=0,
+        body_anchor_count=0,
+        distinctive_coverage_hits=0,
+        distinctive_coverage_total=0,
+        distinctive_coverage_by_item=(),
+        distinctive_coverage_targets=(),
+        softened_distinctive_source_coverage_applied=False,
+        quality_gate_status="not_applicable",
+        quality_gate_reason_codes=(),
+        quality_gate_reason_details=(),
+    )
+
+
+def _build_expanded_merge_diagnostics(
+    *,
+    description_text: str,
+    source_count: int,
+    merged_anchors: set[str],
+    source_anchors: Sequence[set[str]],
+    bullet_points_count: int,
+    source_coverage_by_item: tuple[bool, ...],
+) -> ExpandedMergeDiagnostics:
+    if source_count < 3:
+        return _inactive_expanded_merge_diagnostics()
+
+    tail_separation: MergeTailSeparationResult = separate_merge_body_and_tail(
+        text=description_text
+    )
+    body_paragraphs: List[str] = _extract_description_paragraphs_raw(
+        tail_separation.body_text
+    )
+    hook_paragraph: str = body_paragraphs[0] if body_paragraphs else ""
+    non_hook_body_text: str = "\n\n".join(body_paragraphs[1:]).strip()
+    bullet_lines: List[str] = []
+    for paragraph in body_paragraphs[1:] if len(body_paragraphs) > 1 else body_paragraphs:
+        for raw_line in paragraph.split("\n"):
+            stripped_line: str = str(raw_line or "").strip()
+            if _bullet_marker_for_line(stripped_line):
+                bullet_lines.append(stripped_line)
+
+    bullet_lines_with_anchor_count: int = 0
+    detailed_bullet_count: int = 0
+    thematic_spread_count: int = 0
+    body_anchor_count: int = len(
+        _extract_semantic_anchors(non_hook_body_text or tail_separation.body_text)
+    )
+    seen_bullet_anchors: set[str] = set()
+    for bullet_line in bullet_lines:
+        line_anchors: set[str] = _extract_semantic_anchors(bullet_line)
+        if line_anchors:
+            bullet_lines_with_anchor_count += 1
+        if not _is_detailed_bullet_line(line_text=bullet_line, line_anchors=line_anchors):
+            continue
+        detailed_bullet_count += 1
+        if line_anchors - seen_bullet_anchors:
+            thematic_spread_count += 1
+        seen_bullet_anchors.update(line_anchors)
+
+    (
+        distinctive_coverage_by_item,
+        distinctive_coverage_targets,
+        distinctive_coverage_hits,
+        distinctive_coverage_total,
+    ) = _build_distinctive_source_coverage_metrics(
+        merged_anchors=merged_anchors,
+        source_anchors=source_anchors,
+    )
+
+    min_bullet_points: int = 5 if source_count == 3 else 6
+    min_detailed_bullets: int = max(4, min_bullet_points - 1)
+    min_topic_spread: int = 3 if source_count == 3 else 4
+    min_body_anchor_count: int = max(8, source_count * 3)
+    has_full_source_coverage: bool = _expanded_quality_has_full_source_coverage(
+        source_coverage_by_item=source_coverage_by_item,
+        distinctive_coverage_by_item=distinctive_coverage_by_item,
+        distinctive_coverage_targets=distinctive_coverage_targets,
+    )
+    compact_body_relaxed: bool = (
+        tail_separation.body_paragraph_count_after_recovery < 3
+        and _expanded_compact_body_is_content_rich(
+            body_non_hook_char_count=_normalized_char_count(non_hook_body_text),
+            bullet_lines_with_anchor_count=bullet_lines_with_anchor_count,
+            detailed_bullet_count=detailed_bullet_count,
+            thematic_spread_count=thematic_spread_count,
+            body_anchor_count=body_anchor_count,
+            source_coverage_by_item=source_coverage_by_item,
+            distinctive_coverage_by_item=distinctive_coverage_by_item,
+            distinctive_coverage_targets=distinctive_coverage_targets,
+            min_detailed_bullets=min_detailed_bullets,
+            min_topic_spread=min_topic_spread,
+            min_body_anchor_count=min_body_anchor_count,
+        )
+    )
+
+    reason_codes: List[str] = []
+    if (
+        bullet_points_count < min_bullet_points
+        or detailed_bullet_count < min_detailed_bullets
+    ):
+        reason_codes.append("too_few_expanded_bullets")
+    if (
+        _normalized_char_count(non_hook_body_text) < 220
+        or (
+            tail_separation.body_paragraph_count_after_recovery < 3
+            and not compact_body_relaxed
+        )
+    ):
+        reason_codes.append("insufficient_expanded_body")
+    if (
+        body_anchor_count < min_body_anchor_count
+        or bullet_lines_with_anchor_count < min_detailed_bullets
+    ):
+        reason_codes.append("overly_generic_body")
+    if thematic_spread_count < min_topic_spread:
+        reason_codes.append("insufficient_topic_spread")
+    if not has_full_source_coverage:
+        reason_codes.append("weak_source_coverage")
+
+    hook_char_count: int = _normalized_char_count(hook_paragraph)
+    body_char_count: int = _normalized_char_count(tail_separation.body_text)
+    body_non_hook_char_count: int = _normalized_char_count(non_hook_body_text)
+    hook_share: float = (
+        (hook_char_count / body_char_count)
+        if body_char_count > 0
+        else 0.0
+    )
+    if (
+        hook_char_count >= 140
+        and hook_share > 0.38
+        and body_non_hook_char_count < 320
+    ):
+        reason_codes.append("hook_dominates_body")
+
+    softened_distinctive_source_coverage_applied: bool = (
+        _is_softened_distinctive_source_coverage_eligible(
+            source_count=source_count,
+            source_coverage_by_item=source_coverage_by_item,
+            distinctive_coverage_hits=distinctive_coverage_hits,
+            distinctive_coverage_total=distinctive_coverage_total,
+            reason_codes=reason_codes,
+        )
+    )
+    if softened_distinctive_source_coverage_applied:
+        reason_codes = [
+            reason_code
+            for reason_code in reason_codes
+            if reason_code != "weak_source_coverage"
+        ]
+
+    unique_reason_codes: tuple[str, ...] = tuple(dict.fromkeys(reason_codes))
+    return ExpandedMergeDiagnostics(
+        enabled=True,
+        body_paragraph_count=tail_separation.body_paragraph_count_after_recovery,
+        body_char_count=body_char_count,
+        body_non_hook_char_count=body_non_hook_char_count,
+        compact_body_relaxed=compact_body_relaxed,
+        hook_char_count=hook_char_count,
+        hook_share=hook_share,
+        bullet_lines_with_anchor_count=bullet_lines_with_anchor_count,
+        detailed_bullet_count=detailed_bullet_count,
+        thematic_spread_count=thematic_spread_count,
+        body_anchor_count=body_anchor_count,
+        distinctive_coverage_hits=distinctive_coverage_hits,
+        distinctive_coverage_total=distinctive_coverage_total,
+        distinctive_coverage_by_item=distinctive_coverage_by_item,
+        distinctive_coverage_targets=distinctive_coverage_targets,
+        softened_distinctive_source_coverage_applied=softened_distinctive_source_coverage_applied,
+        quality_gate_status="hard_reject" if unique_reason_codes else "pass",
+        quality_gate_reason_codes=unique_reason_codes,
+        quality_gate_reason_details=tuple(
+            _expanded_quality_reason_detail(reason_code)
+            for reason_code in unique_reason_codes
+        ),
+    )
+
+
 def _build_merge_semantic_diagnostics(
     *,
     merged_content: MergedLanguageContent,
@@ -878,9 +1835,7 @@ def _build_merge_semantic_diagnostics(
     merged_text_for_anchors: str = f"{merged_content.title.strip()}\n{description_text}"
     merged_anchors: set[str] = _extract_semantic_anchors(merged_text_for_anchors)
     source_anchors: List[set[str]] = [
-        _extract_semantic_anchors(
-            f"{video.metadata.title.strip()}\n{video.metadata.description.strip()}"
-        )
+        _extract_semantic_anchors(_source_text_for_semantic_analysis(video))
         for video in videos
     ]
     source_coverage_by_item: tuple[bool, ...] = _build_source_coverage_flags(
@@ -918,6 +1873,14 @@ def _build_merge_semantic_diagnostics(
     hook_present: bool = len(first_paragraph) >= 60 and (
         "!" in first_paragraph or "?" in first_paragraph or ":" in first_paragraph
     )
+    expanded_quality: ExpandedMergeDiagnostics = _build_expanded_merge_diagnostics(
+        description_text=description_text,
+        source_count=len(videos),
+        merged_anchors=merged_anchors,
+        source_anchors=source_anchors,
+        bullet_points_count=bullet_points_count,
+        source_coverage_by_item=source_coverage_by_item,
+    )
     return MergeSemanticDiagnostics(
         hook_present=hook_present,
         agenda_block_present=(bullet_points_count >= 3) or agenda_heading_present,
@@ -937,6 +1900,7 @@ def _build_merge_semantic_diagnostics(
         official_links_in_output=official_links_fill.links_in_output,
         official_links_fill_applied=official_links_fill.fill_applied,
         merge_quality=merge_quality,
+        expanded_quality=expanded_quality,
     )
 
 
@@ -994,7 +1958,7 @@ def _log_merge_style_diagnostics(
         "yes" if diagnostics.official_links_fill_applied else "no",
     )
     LOGGER.info(
-        "merge_semantic_gate branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d block_language_expected=%s hook_language_detected=%s lead_in_language_detected=%s links_heading_language_detected=%s cta_language_detected=%s language_consistency_ok=%s wrong_language_heading_detected=%s person_role_claims_detected=%d suspicious_role_labels_detected=%s role_softening_applied=%s semantic_gate_status=%s semantic_gate_reason_codes=%s",
+        "merge_semantic_gate branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d block_language_expected=%s hook_language_detected=%s lead_in_language_detected=%s links_heading_language_detected=%s cta_language_detected=%s language_consistency_ok=%s wrong_language_heading_detected=%s person_role_claims_detected=%d suspicious_role_labels_detected=%s role_softening_applied=%s script_mix_detected=%s script_mix_suspects=%s semantic_gate_status=%s semantic_gate_reason_codes=%s",
         branch_label,
         date_key,
         slot_key,
@@ -1011,9 +1975,53 @@ def _log_merge_style_diagnostics(
         diagnostics.merge_quality.person_role_claims_detected,
         ",".join(diagnostics.merge_quality.suspicious_role_labels_detected) or "none",
         "yes" if diagnostics.merge_quality.role_softening_applied else "no",
+        "yes" if diagnostics.merge_quality.script_mix_detected else "no",
+        ",".join(diagnostics.merge_quality.script_mix_suspects) or "none",
         diagnostics.merge_quality.semantic_gate_status,
         ",".join(diagnostics.merge_quality.semantic_gate_reason_codes) or "none",
     )
+    if diagnostics.expanded_quality.enabled:
+        distinctive_coverage_text: str = ",".join(
+            f"{index}:{hit_count}/{target_count}"
+            for index, (hit_count, target_count) in enumerate(
+                zip(
+                    diagnostics.expanded_quality.distinctive_coverage_by_item,
+                    diagnostics.expanded_quality.distinctive_coverage_targets,
+                ),
+                start=1,
+            )
+        ) or "none"
+        LOGGER.info(
+            "merge_expanded_quality_gate branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d source_count=%d body_paragraph_count=%d body_char_count=%d body_non_hook_char_count=%d compact_body_relaxed=%s hook_char_count=%d hook_share=%.2f bullet_lines_with_anchor_count=%d detailed_bullet_count=%d thematic_spread_count=%d body_anchor_count=%d distinctive_source_coverage=%d/%d distinctive_source_coverage_by_item=%s softened_distinctive_source_coverage_applied=%s quality_gate_status=%s quality_gate_reason_codes=%s quality_gate_reason_details=%s",
+            branch_label,
+            date_key,
+            slot_key,
+            language,
+            model_name,
+            attempt_index,
+            diagnostics.source_coverage_total,
+            diagnostics.expanded_quality.body_paragraph_count,
+            diagnostics.expanded_quality.body_char_count,
+            diagnostics.expanded_quality.body_non_hook_char_count,
+            "yes" if diagnostics.expanded_quality.compact_body_relaxed else "no",
+            diagnostics.expanded_quality.hook_char_count,
+            diagnostics.expanded_quality.hook_share,
+            diagnostics.expanded_quality.bullet_lines_with_anchor_count,
+            diagnostics.expanded_quality.detailed_bullet_count,
+            diagnostics.expanded_quality.thematic_spread_count,
+            diagnostics.expanded_quality.body_anchor_count,
+            diagnostics.expanded_quality.distinctive_coverage_hits,
+            diagnostics.expanded_quality.distinctive_coverage_total,
+            distinctive_coverage_text,
+            (
+                "yes"
+                if diagnostics.expanded_quality.softened_distinctive_source_coverage_applied
+                else "no"
+            ),
+            diagnostics.expanded_quality.quality_gate_status,
+            ",".join(diagnostics.expanded_quality.quality_gate_reason_codes) or "none",
+            " | ".join(diagnostics.expanded_quality.quality_gate_reason_details) or "none",
+        )
 
 
 def _token_to_semantic_anchor(token: str) -> str:
@@ -1047,31 +2055,52 @@ def _validate_coverage_preserving_merge_or_raise(
     official_links_selection: OfficialLinksSelection,
     official_links_fill: OfficialLinksFillResult,
     merge_quality: MergeQualityDiagnostics,
+    precomputed_diagnostics: Optional[MergeSemanticDiagnostics] = None,
 ) -> MergeSemanticDiagnostics:
-    diagnostics: MergeSemanticDiagnostics = _build_merge_semantic_diagnostics(
-        merged_content=merged_content,
-        videos=videos,
-        official_links_selection=official_links_selection,
-        official_links_fill=official_links_fill,
-        merge_quality=merge_quality,
+    diagnostics: MergeSemanticDiagnostics = (
+        precomputed_diagnostics
+        if precomputed_diagnostics is not None
+        else _build_merge_semantic_diagnostics(
+            merged_content=merged_content,
+            videos=videos,
+            official_links_selection=official_links_selection,
+            official_links_fill=official_links_fill,
+            merge_quality=merge_quality,
+        )
     )
     merged_anchors: set[str] = _extract_semantic_anchors(
         f"{merged_content.title.strip()}\n{merged_content.description.strip()}"
     )
     if _looks_like_per_source_dump(merged_content.description):
-        raise RuntimeError("description validation failed: per_source_enumeration")
+        raise _build_description_validation_failure(
+            reason_codes=("per_source_enumeration",),
+            message="description validation failed: per_source_enumeration",
+        )
     if len(merged_anchors) < 3:
-        raise RuntimeError("description validation failed: semantic_too_generic")
+        raise _build_description_validation_failure(
+            reason_codes=("semantic_too_generic",),
+            message="description validation failed: semantic_too_generic",
+        )
     if diagnostics.emoji_count > 10:
-        raise RuntimeError("description validation failed: excessive_emoji_usage")
+        raise _build_description_validation_failure(
+            reason_codes=("excessive_emoji_usage",),
+            message="description validation failed: excessive_emoji_usage",
+        )
     if merge_quality.semantic_gate_status == "hard_reject":
         reason_codes: str = ",".join(merge_quality.semantic_gate_reason_codes) or "semantic_gate"
-        raise RuntimeError(f"description validation failed: {reason_codes}")
+        raise _build_description_validation_failure(
+            reason_codes=merge_quality.semantic_gate_reason_codes or ("semantic_gate",),
+            message=f"description validation failed: {reason_codes}",
+        )
+    if diagnostics.expanded_quality.quality_gate_status == "hard_reject":
+        reason_codes = ",".join(diagnostics.expanded_quality.quality_gate_reason_codes)
+        raise _build_description_validation_failure(
+            reason_codes=diagnostics.expanded_quality.quality_gate_reason_codes,
+            message=f"description validation failed: {reason_codes}",
+        )
 
     source_anchors: List[set[str]] = [
-        _extract_semantic_anchors(
-            f"{video.metadata.title.strip()}\n{video.metadata.description.strip()}"
-        )
+        _extract_semantic_anchors(_source_text_for_semantic_analysis(video))
         for video in videos
     ]
     all_source_anchors: set[str] = set().union(*source_anchors) if source_anchors else set()
@@ -1085,12 +2114,19 @@ def _validate_coverage_preserving_merge_or_raise(
         else:
             min_overlap = max(3, min(12, source_anchor_count // 6))
         if overlap_count < min_overlap:
-            raise RuntimeError("description validation failed: semantic_source_grounding_too_low")
+            raise _build_description_validation_failure(
+                reason_codes=("semantic_source_grounding_too_low",),
+                message="description validation failed: semantic_source_grounding_too_low",
+            )
 
     for source_index, covered in enumerate(diagnostics.source_coverage_by_item, start=1):
         if not covered:
-            raise RuntimeError(
-                f"description validation failed: semantic_source_{source_index}_coverage_missing"
+            raise _build_description_validation_failure(
+                reason_codes=("weak_source_coverage",),
+                message=(
+                    "description validation failed: "
+                    f"semantic_source_{source_index}_coverage_missing"
+                ),
             )
     return diagnostics
 
@@ -1101,6 +2137,7 @@ def build_llm_merge_prompt_text(
     videos: List[PlannedVideo],
     config: AppConfig,
     no_description_text: str,
+    expanded_retry_profile: Optional[ExpandedRetryProfile] = None,
 ) -> str:
     if len(videos) < 2:
         raise ValueError("Expected at least 2 videos for merged generation.")
@@ -1145,6 +2182,21 @@ def build_llm_merge_prompt_text(
         raw_source_chars_total,
         cleaned_source_chars_total,
     )
+    contract_mode: MergeContractMode = _select_merge_contract_mode(
+        source_count=len(videos)
+    )
+    LOGGER.info(
+        "merge_prompt_contract_selected language=%s source_count=%d contract_mode=%s expected_bullet_range=%s expanded_structure_enabled=%s",
+        language,
+        contract_mode.source_count,
+        contract_mode.mode_label,
+        contract_mode.bullet_range_label,
+        "yes" if contract_mode.expanded_structure_enabled else "no",
+    )
+    contract_block: str = _merge_contract_block_with_retry(
+        contract_mode=contract_mode,
+        expanded_retry_profile=expanded_retry_profile,
+    )
     link_policy_block: str = (
         "SYSTEM LINK POLICY\n"
         "Do not include any URLs in the output.\n"
@@ -1165,7 +2217,12 @@ def build_llm_merge_prompt_text(
             language_name=language_name,
             sources_block="\n\n".join(source_blocks),
             youtube_candidates_block="",
+            merge_contract_block=contract_block,
         ).strip()
+        if "{merge_contract_block}" not in template_prompt:
+            formatted_template = (
+                f"{formatted_template}\n\n{contract_block}"
+            ).strip()
         return f"{formatted_template}\n\n{cross_domain_sentence_policy_block}\n\n{link_policy_block}".strip()
     return (
         "You are writing a YouTube stream title and description.\n"
@@ -1177,20 +2234,11 @@ def build_llm_merge_prompt_text(
         "Mentally extract key points from each source, preserve all non-trivial source-specific points,\n"
         "combine overlaps, compress repetition, and produce one coherent final description.\n"
         "Write a strong native YouTube title no longer than 99 characters.\n"
-        "Write one cohesive stream description in 2 to 4 compact paragraphs.\n"
+        f"{contract_block}\n"
         "The description must cover all source inputs that were merged.\n"
         "Do not drop a source-specific fact, event, or angle without clear overlap-based reason.\n"
-        "Start paragraph one with a strong factual hook grounded in the main tension, risk, or key conflict.\n"
-        "Keep the hook editorial and readable, but never clickbait.\n"
-        "Include one compact 'what is in this stream' agenda block using 4 to 7 short thesis bullet lines.\n"
-        "Each thesis line must start with one allowed marker: 🔹 📌 🎤 🎥 ⚖ 🌐 ✅.\n"
-        "Most thesis bullets should start with 🔹.\n"
-        "Accent markers are rare and optional; use no more than 3 accent markers per theses block.\n"
-        "Do not present the agenda as SOURCE 1 / SOURCE 2 / SOURCE 3.\n"
-        "Keep agenda points specific and factual, not generic placeholders.\n"
         "Preserve important recognizable names from sources when relevant; never invent names.\n"
         "Avoid asserting strong person titles or role labels unless they are clearly necessary and well-supported by the sources.\n"
-        "Keep marker usage controlled and readable; do not use dash-only bullets as the sole style.\n"
         f"{cross_domain_sentence_policy_block}\n"
         f"{link_policy_block}\n"
         "An optional one-line closing sentence should be a light practical CTA with 2 to 5 hashtags.\n"
@@ -1201,6 +2249,74 @@ def build_llm_merge_prompt_text(
         'Output only one strict JSON object with exactly these keys: title, description.\n\n'
         f"{'\n\n'.join(source_blocks)}"
     ).strip()
+
+
+def _merge_contract_block_with_retry(
+    *,
+    contract_mode: MergeContractMode,
+    expanded_retry_profile: Optional[ExpandedRetryProfile],
+) -> str:
+    retry_block: str = _expanded_retry_reinforcement_block(expanded_retry_profile)
+    if not contract_mode.expanded_structure_enabled or not retry_block:
+        return contract_mode.contract_block
+    return f"{contract_mode.contract_block}\n{retry_block}".strip()
+
+
+def _select_merge_contract_mode(*, source_count: int) -> MergeContractMode:
+    if source_count >= 3:
+        return MergeContractMode(
+            mode_label="expanded",
+            source_count=source_count,
+            bullet_range_label="6-9",
+            expanded_structure_enabled=True,
+            contract_block=(
+                "Use the expanded merge contract for 3 or more source items.\n"
+                "Write one cohesive stream description in 3 to 4 compact paragraphs.\n"
+                "Paragraph 1 (hook): write 1 to 2 sentences grounded in the main tension, risk, or key conflict.\n"
+                "Keep the hook editorial and readable, but never clickbait.\n"
+                "After the hook, use a more open agenda structure instead of one overloaded thesis block.\n"
+                "Write 6 to 9 short bullet lines total.\n"
+                "You may organize the bullets into 2 to 3 thematic micro-blocks when that improves clarity.\n"
+                "Each bullet line must start with exactly one allowed marker: 🔹 📌 🎤 🎥 ⚖ 🌐 ✅.\n"
+                "Most bullets should start with 🔹.\n"
+                "Accent markers are rare and optional; use no more than 3 accent markers per description.\n"
+                "Keep marker usage controlled and readable; do not use dash-only bullets as the sole style.\n"
+                "Do not present the agenda as SOURCE 1 / SOURCE 2 / SOURCE 3.\n"
+                "Keep agenda points specific and factual, not generic placeholders.\n"
+                "Do not let the opening hook consume most of the useful summary space.\n"
+                "A polished opening is never a substitute for a concrete multi-angle summary.\n"
+                "Treat the post-hook body as the main payload and let it carry most of the concrete information.\n"
+                "Make most bullets fact-bearing: anchor them with names, places, institutions, numbers, timings, events, or operational consequences whenever the sources provide them.\n"
+                "Give the body at least two clearly substantive agenda lanes after the hook instead of one thin run of near-duplicate bullets.\n"
+                "Across the agenda, preserve distinguishable source details such as names, places, numbers, events, or clearly separate thematic nodes whenever the sources provide them.\n"
+                "Across 3 or more sources, spread the bullets across multiple source lines or topic nodes so the summary does not collapse into one generic lane.\n"
+                "If the merged sources span different domains, separate them across different bullets or short thematic blocks instead of compressing them into one universal bullet.\n"
+                "Do not combine science or medicine, climate or environment, disasters or catastrophic hazards, psychology or cognition or behavior, and broad social or moral conclusions into one bullet or one cause-and-effect chain unless the sources explicitly require that connection.\n"
+                "Thematic grouping is encouraged when useful: research, hazards, human behavior, practical risk, public meaning, or response can be separated into different bullets or micro-blocks.\n"
+                "The description must still cover all merged source items and preserve key concrete facts from each source."
+            ),
+        )
+    return MergeContractMode(
+        mode_label="compact",
+        source_count=source_count,
+        bullet_range_label="4-7",
+        expanded_structure_enabled=False,
+        contract_block=(
+            "Use the compact merge contract for 1 to 2 source items.\n"
+            "Write one cohesive stream description in 2 to 3 compact paragraphs.\n"
+            "Paragraph 1 (hook): write 1 to 2 sentences grounded in the main tension, risk, or key conflict.\n"
+            "Keep the hook editorial and readable, but never clickbait.\n"
+            "Paragraph 2 (theses block): start with one short lead-in sentence like 'In this stream you'll see:' in the target language.\n"
+            "Then write 4 to 7 short thesis bullet lines.\n"
+            "Each bullet line must start with exactly one allowed marker: 🔹 📌 🎤 🎥 ⚖ 🌐 ✅.\n"
+            "Most bullets should start with 🔹.\n"
+            "Accent markers are rare and optional; use no more than 3 accent markers per theses block.\n"
+            "Keep marker usage controlled and readable; do not use dash-only bullets as the sole style.\n"
+            "Do not present the agenda as SOURCE 1 / SOURCE 2.\n"
+            "Keep agenda points specific and factual, not generic placeholders.\n"
+            "The description must still cover all merged source items and preserve key concrete facts from each source."
+        ),
+    )
 
 
 def _structured_merge_schema() -> dict[str, object]:
@@ -1410,6 +2526,8 @@ def _apply_merge_polish_stage(
                 validation_passed=True,
             ),
         )
+    except LlmModelConfigurationError:
+        raise
     except Exception as error:
         reject_reason: str = (
             "too_aggressive_rewrite"
@@ -1486,7 +2604,7 @@ def attempt_llm_single_source_translate_with_audit(
     if len(videos) != 1:
         raise RuntimeError("single-source translate expects exactly one video")
     source_video: PlannedVideo = videos[0]
-    model_name: str = config.llm_model
+    model_name: str = resolve_effective_llm_model(config)
     provider: LlmProvider = get_llm_provider(config=config)
     main_source_label: str = _main_stage_field_source(provider_name=provider.name)
     try:
@@ -1533,6 +2651,7 @@ def attempt_llm_single_source_translate_with_audit(
                 hook_source=main_source_label,
                 hashtags_source=main_source_label,
                 body_source="main_merge",
+                block_generation_mode=BLOCK_GENERATION_MODE_REAL_MERGE,
             ),
             error_summary=None,
             salvaged_title=merged_content.title,
@@ -1544,7 +2663,10 @@ def attempt_llm_single_source_translate_with_audit(
             hook_source=main_source_label,
             hashtags_source=main_source_label,
             body_source="main_merge",
+            block_generation_mode=BLOCK_GENERATION_MODE_REAL_MERGE,
         )
+    except LlmModelConfigurationError:
+        raise
     except Exception as error:
         return LanguageMergeAttempt(
             language=language,
@@ -1557,10 +2679,11 @@ def attempt_llm_single_source_translate_with_audit(
             generator_model_name=model_name,
             used_model_names=(model_name,),
             branch_type=BRANCH_MERGE,
-            title_source=main_source_label,
-            hook_source=main_source_label,
+            title_source=_fallback_title_source_label(),
+            hook_source=_fallback_hook_source_label(),
             hashtags_source="fallback_none",
-            body_source="main_merge",
+            body_source=_fallback_body_source_label(),
+            block_generation_mode=BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
         )
 
 
@@ -1676,12 +2799,14 @@ def _attempt_merge_once(
     date_key: str,
     slot_key: str,
     no_description_text: str,
+    expanded_retry_profile: Optional[ExpandedRetryProfile] = None,
 ) -> tuple[MergedLanguageContent, str]:
     prompt_text: str = build_llm_merge_prompt_text(
         language=language,
         videos=videos,
         config=config,
         no_description_text=no_description_text,
+        expanded_retry_profile=expanded_retry_profile,
     )
     if provider.pre_delay_sec(config=config) > 0:
         time.sleep(max(0.0, float(provider.pre_delay_sec(config=config))))
@@ -1720,6 +2845,15 @@ def _attempt_merge_once(
             model_name=model_name,
             attempt_stage="validation",
             raw_response_text=raw_response_text,
+            reason_codes=_reason_codes_from_error(error),
+            rejected_attempt=_build_rejected_merge_attempt(
+                attempt_index=attempt_index,
+                model_name=model_name,
+                reason_codes=_reason_codes_from_error(error),
+                fallback_reason_code=_reason_code_from_error(error),
+                raw_response_text=raw_response_text,
+                structured_payload=response.structured_payload,
+            ),
         ) from error
     official_links_selection: OfficialLinksSelection = _extract_official_links_from_sources(
         videos
@@ -1729,16 +2863,11 @@ def _attempt_merge_once(
         links_in_output=_count_output_official_links(merged_content.description),
         fill_applied=False,
     )
+    source_texts: tuple[str, ...] = _source_texts_for_merge_quality(videos)
     quality_result: MergeQualityNormalizationResult = normalize_merge_description(
         description=merged_content.description,
         language=language,
-        source_texts=tuple(
-            (
-                f"{video.metadata.title.strip()}\n"
-                f"{_clean_source_description_for_llm(video.metadata.description.strip()).text}"
-            ).strip()
-            for video in videos
-        ),
+        source_texts=source_texts,
     )
     if quality_result.description_text != merged_content.description:
         merged_content = dataclasses.replace(
@@ -1747,30 +2876,12 @@ def _attempt_merge_once(
             description_selected=quality_result.description_text,
             description_audit=quality_result.description_text,
         )
-    try:
-        diagnostics: MergeSemanticDiagnostics = _validate_coverage_preserving_merge_or_raise(
-            merged_content=merged_content,
-            videos=videos,
-            official_links_selection=official_links_selection,
-            official_links_fill=official_links_fill,
-            merge_quality=quality_result.diagnostics,
-        )
-    except Exception as error:
-        raise MergeAttemptFailure(
-            reason_code=_reason_code_from_error(error),
-            reason=str(error),
-            model_name=model_name,
-            attempt_stage="validation",
-            raw_response_text=raw_response_text,
-        ) from error
-    LOGGER.info(
-        "merge_llm_response_valid model=%s attempt=%d title_length=%d description_length=%d paragraph_count=%d youtube_links_in_llm_output=%d",
-        model_name,
-        attempt_index,
-        len(merged_content.title),
-        len(merged_content.description),
-        paragraph_count,
-        _count_youtube_urls_in_text(merged_content.description),
+    diagnostics: MergeSemanticDiagnostics = _build_merge_semantic_diagnostics(
+        merged_content=merged_content,
+        videos=videos,
+        official_links_selection=official_links_selection,
+        official_links_fill=official_links_fill,
+        merge_quality=quality_result.diagnostics,
     )
     _log_merge_style_diagnostics(
         diagnostics=diagnostics,
@@ -1780,6 +2891,65 @@ def _attempt_merge_once(
         language=language,
         model_name=model_name,
         attempt_index=attempt_index,
+    )
+    try:
+        _validate_coverage_preserving_merge_or_raise(
+            merged_content=merged_content,
+            videos=videos,
+            official_links_selection=official_links_selection,
+            official_links_fill=official_links_fill,
+            merge_quality=quality_result.diagnostics,
+            precomputed_diagnostics=diagnostics,
+        )
+    except Exception as error:
+        recovery_attempt: MergeValidationRecoveryAttempt = _attempt_expanded_formatting_recovery(
+            validation_error=error,
+            merged_content=merged_content,
+            diagnostics=diagnostics,
+            videos=videos,
+            official_links_selection=official_links_selection,
+            official_links_fill=official_links_fill,
+            source_texts=source_texts,
+            language=language,
+            model_name=model_name,
+            attempt_index=attempt_index,
+            branch_label=branch_label,
+            date_key=date_key,
+            slot_key=slot_key,
+        )
+        if (
+            recovery_attempt.merged_content is not None
+            and recovery_attempt.diagnostics is not None
+        ):
+            merged_content = recovery_attempt.merged_content
+            diagnostics = recovery_attempt.diagnostics
+        else:
+            final_error: Exception = recovery_attempt.validation_error or error
+            raise MergeAttemptFailure(
+                reason_code=_reason_code_from_error(final_error),
+                reason=str(final_error),
+                model_name=model_name,
+                attempt_stage="validation",
+                raw_response_text=raw_response_text,
+                reason_codes=_reason_codes_from_error(final_error),
+                rejected_attempt=_build_rejected_merge_attempt(
+                    attempt_index=attempt_index,
+                    model_name=model_name,
+                    reason_codes=_reason_codes_from_error(final_error),
+                    fallback_reason_code=_reason_code_from_error(final_error),
+                    raw_response_text=raw_response_text,
+                    title_text=merged_content.title,
+                    description_text=merged_content.description,
+                ),
+            ) from final_error
+    LOGGER.info(
+        "merge_llm_response_valid model=%s attempt=%d title_length=%d description_length=%d paragraph_count=%d youtube_links_in_llm_output=%d",
+        model_name,
+        attempt_index,
+        len(merged_content.title),
+        len(merged_content.description),
+        paragraph_count,
+        _count_youtube_urls_in_text(merged_content.description),
     )
     return (merged_content, raw_response_text)
 
@@ -1828,11 +2998,15 @@ def attempt_llm_merge_with_audit(
     slot_key: str = "unknown",
 ) -> LanguageMergeAttempt:
     del normalize_youtube_url
-    primary_model: str = config.llm_model
+    primary_model: str = resolve_effective_llm_model(config)
     primary_provider: LlmProvider = get_llm_provider(config=config)
     main_source_label: str = _main_stage_field_source(provider_name=primary_provider.name)
     last_raw_response: str = ""
     last_error_summary: str = "unknown error"
+    last_reason_code: str = "unexpected_error"
+    last_reason_codes: tuple[str, ...] = ()
+    pending_retry_profile: ExpandedRetryProfile = _standard_expanded_retry_profile()
+    rejected_attempts: list[RejectedMergeAttempt] = []
 
     for attempt_index in range(1, PRIMARY_ATTEMPTS + 1):
         _log_merge_attempt_start(
@@ -1845,12 +3019,38 @@ def attempt_llm_merge_with_audit(
             slot_key=slot_key,
             language=language,
         )
+        retry_profile: Optional[ExpandedRetryProfile] = (
+            pending_retry_profile if attempt_index > 1 else None
+        )
         if attempt_index > 1:
             LOGGER.info(
-                "merge_llm_retry provider=%s attempt=%d model=%s",
+                "merge_llm_retry branch=%s date_key=%s slot_key=%s language=%s provider=%s attempt=%d model=%s retry_mode=%s retry_reason_codes=%s retry_focus=%s retry_structure=%s retry_source_count=%d",
+                branch_label,
+                date_key,
+                slot_key,
+                language,
                 primary_provider.name,
                 attempt_index,
                 primary_model,
+                (
+                    retry_profile.retry_mode
+                    if retry_profile is not None
+                    else "standard"
+                ),
+                (
+                    retry_profile.reject_signal_label
+                    if retry_profile is not None
+                    else "none"
+                ),
+                retry_profile.focus_label if retry_profile is not None else "none",
+                (
+                    "four_plus_structured"
+                    if retry_profile is not None
+                    and retry_profile.enabled
+                    and len(videos) >= 4
+                    else "standard"
+                ),
+                len(videos),
             )
             if merge_run_summary is not None:
                 merge_run_summary.record_retry_used()
@@ -1867,6 +3067,7 @@ def attempt_llm_merge_with_audit(
                 date_key=date_key,
                 slot_key=slot_key,
                 no_description_text=no_description_text,
+                expanded_retry_profile=retry_profile,
             )
             last_raw_response = raw_response_text
             if merge_run_summary is not None:
@@ -1895,6 +3096,7 @@ def attempt_llm_merge_with_audit(
                     hook_source=main_source_label,
                     hashtags_source=main_source_label,
                     body_source="main_merge",
+                    block_generation_mode=BLOCK_GENERATION_MODE_REAL_MERGE,
                 ),
                 error_summary=None,
                 salvaged_title=merged_content.title,
@@ -1906,10 +3108,36 @@ def attempt_llm_merge_with_audit(
                 hook_source=main_source_label,
                 hashtags_source=main_source_label,
                 body_source="main_merge",
+                block_generation_mode=BLOCK_GENERATION_MODE_REAL_MERGE,
             )
+        except LlmModelConfigurationError as error:
+            LOGGER.error(
+                "merge_llm_fatal_model_error branch=%s date_key=%s slot_key=%s language=%s provider=%s model=%s code=%s status_code=%s api_error_code=%s api_error_param=%s reason=%s",
+                branch_label,
+                date_key,
+                slot_key,
+                language,
+                primary_provider.name,
+                primary_model,
+                error.reason_code,
+                str(error.status_code if error.status_code is not None else "unknown"),
+                error.api_error_code or "none",
+                error.api_error_param or "none",
+                error.detail,
+            )
+            raise
         except MergeAttemptFailure as error:
             last_raw_response = error.raw_response_text
             last_error_summary = error.reason
+            last_reason_code = error.reason_code
+            last_reason_codes = _reason_codes_from_error(error) or (error.reason_code,)
+            if error.rejected_attempt is not None:
+                rejected_attempts.append(error.rejected_attempt)
+            pending_retry_profile = _build_retry_profile_from_reason_codes(
+                source_count=len(videos),
+                reject_signals=error.reason_codes,
+                fallback_reason_code=error.reason_code,
+            )
             _log_merge_attempt_invalid(
                 provider_name=primary_provider.name,
                 model_name=primary_model,
@@ -1927,6 +3155,11 @@ def attempt_llm_merge_with_audit(
                 merge_run_summary.record_validation_rejected()
         except Exception as error:
             last_error_summary = summarize_error(error)
+            last_reason_code = "unexpected_error"
+            last_reason_codes = ("unexpected_error",)
+            pending_retry_profile = _standard_expanded_retry_profile(
+                reject_signals=("unexpected_error",)
+            )
             _log_merge_attempt_invalid(
                 provider_name=primary_provider.name,
                 model_name=primary_model,
@@ -1941,17 +3174,20 @@ def attempt_llm_merge_with_audit(
                 raw_response_text="",
             )
 
-    LOGGER.error(
+    final_reason_code: str = last_reason_code
+    log_warning_operational(
+        LOGGER,
         "merge_llm_final_failure branch=%s date_key=%s slot_key=%s language=%s provider=%s stage=primary code=%s fallback_used=no raw_response_received=%s reason=%s raw_chars=%d",
         branch_label,
         date_key,
         slot_key,
         language,
         primary_provider.name,
-        _reason_code_from_error(RuntimeError(last_error_summary)),
+        final_reason_code,
         "yes" if bool(last_raw_response.strip()) else "no",
         last_error_summary,
         len(last_raw_response),
+        reason_code=final_reason_code,
     )
     LOGGER.info(
         "merge_provider_summary provider=%s model=%s structured_ok=no fallback_used=no parse_repair_used=no final_status=failed",
@@ -1968,13 +3204,16 @@ def attempt_llm_merge_with_audit(
         error_summary=last_error_summary,
         salvaged_title=None,
         publish_source_label="merge_failed",
+        validation_reasons=list(last_reason_codes),
         generator_model_name=primary_model,
         used_model_names=(primary_model,),
         branch_type=BRANCH_MERGE,
-        title_source=main_source_label,
-        hook_source=main_source_label,
+        title_source=_fallback_title_source_label(),
+        hook_source=_fallback_hook_source_label(),
         hashtags_source="fallback_none",
-        body_source="main_merge",
+        body_source=_fallback_body_source_label(),
+        rejected_attempts=tuple(rejected_attempts),
+        block_generation_mode=BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
     )
 
 

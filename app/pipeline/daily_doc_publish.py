@@ -10,8 +10,16 @@ from zoneinfo import ZoneInfo
 from app.config.settings import AppConfig, AppTemplates
 from app.core.branching import BRANCH_MERGE
 from app.core.error_summary import summarize_error
-from app.core.models import MergedLanguageContent, PlannedVideo
+from app.core.models import (
+    BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
+    FALLBACK_ONLY_ARTIFACT_MARKER,
+    PARTIAL_FALLBACK_ARTIFACT_MARKER,
+    LanguageMergeAttempt,
+    MergedLanguageContent,
+    PlannedVideo,
+)
 from app.google import GoogleDocsClient, GoogleDriveClient
+from app.llm.model_identity import resolve_effective_llm_model
 from app.observability.content_contract import (
     analyze_content_contract,
     build_contract_transition,
@@ -31,9 +39,12 @@ from app.paths.output_naming import (
 from app.planning import format_time_key_for_display
 from app.publish.google_docs_writer import GoogleDocsReportWriter
 from app.publish.doc_helpers import _build_descriptions_summary, _build_titles_summary
-from app.publish.post_llm_sanitation import sanitize_post_llm_title
+from app.publish.post_llm_sanitation import (
+    resolve_block_generation_mode,
+    sanitize_post_llm_title,
+)
 
-from .slot_processing import SlotProcessResult
+from .slot_processing import SlotProcessResult, resolve_merge_artifact_status
 
 
 @dataclass(frozen=True)
@@ -81,6 +92,91 @@ def _document_processing_mode_label(*, processing_mode: str, branch_label: str) 
     if normalized_branch_label.startswith("audit/"):
         return normalized_branch_label.replace("/", "_")
     return normalized_branch_label or str(processing_mode or "").strip()
+
+
+def _artifact_heading_label(
+    *,
+    heading: str,
+    merged_content: Optional[MergedLanguageContent],
+    merge_attempt: Optional[LanguageMergeAttempt],
+    artifact_status: str,
+) -> str:
+    block_generation_mode: str = resolve_block_generation_mode(
+        merge_attempt=merge_attempt,
+        merged_content=merged_content,
+    )
+    if block_generation_mode == BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE:
+        marker_text: str = (
+            FALLBACK_ONLY_ARTIFACT_MARKER
+            if artifact_status == "fallback_only"
+            else PARTIAL_FALLBACK_ARTIFACT_MARKER
+        )
+        return f"{heading} ({marker_text})"
+    return heading
+
+
+def _log_merge_block_publish_truth(
+    *,
+    logger: logging.Logger,
+    branch_label: str,
+    date_key: str,
+    slot_key: str,
+    language: str,
+    source_videos: List[PlannedVideo],
+    merged_content: Optional[MergedLanguageContent],
+    merge_attempt: Optional[LanguageMergeAttempt],
+) -> None:
+    if merged_content is None and merge_attempt is None:
+        return
+    logger.info(
+        "merge_block_publish_truth branch=%s date_key=%s slot_key=%s language=%s block_generation_mode=%s artifact_marker_applied=%s title_source=%s hook_source=%s hashtags_source=%s body_source=%s source_video_count=%d",
+        branch_label,
+        date_key,
+        slot_key,
+        language,
+        resolve_block_generation_mode(
+            merge_attempt=merge_attempt,
+            merged_content=merged_content,
+        ),
+        (
+            "yes"
+            if resolve_block_generation_mode(
+                merge_attempt=merge_attempt,
+                merged_content=merged_content,
+            )
+            == BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE
+            else "no"
+        ),
+        (
+            str(
+                (merge_attempt.title_source if merge_attempt is not None else None)
+                or (merged_content.title_source if merged_content is not None else None)
+                or "unknown"
+            )
+        ),
+        (
+            str(
+                (merge_attempt.hook_source if merge_attempt is not None else None)
+                or (merged_content.hook_source if merged_content is not None else None)
+                or "unknown"
+            )
+        ),
+        (
+            str(
+                (merge_attempt.hashtags_source if merge_attempt is not None else None)
+                or (merged_content.hashtags_source if merged_content is not None else None)
+                or "unknown"
+            )
+        ),
+        (
+            str(
+                (merge_attempt.body_source if merge_attempt is not None else None)
+                or (merged_content.body_source if merged_content is not None else None)
+                or "unknown"
+            )
+        ),
+        len(source_videos),
+    )
 
 
 def _export_document_to_local_docx(
@@ -134,33 +230,53 @@ def publish_daily_document(
             slot_language_items: List[PlannedVideo] = slot.language_groups[language]
             if not slot_language_items:
                 continue
+            merged_content: Optional[MergedLanguageContent] = (
+                slot.merged_content_by_language.get(language)
+            )
+            merge_attempt: Optional[LanguageMergeAttempt] = (
+                slot.merge_audit_by_language.get(language)
+            )
             merged_title: str = ""
             if processing_mode == "nomerge":
                 merged_title = _build_titles_summary(videos=slot_language_items).strip()
             else:
-                merged_content: Optional[MergedLanguageContent] = (
-                    slot.merged_content_by_language.get(language)
-                )
                 if merged_content is not None and merged_content.title.strip():
                     merged_title = sanitize_post_llm_title(merged_content.title.strip())
-                elif len(slot_language_items) == 1:
-                    merged_title = slot_language_items[0].metadata.title.strip()
                 else:
-                    merged_title = " / ".join(
-                        item.metadata.title.strip()
-                        for item in slot_language_items[:3]
-                        if item.metadata.title.strip()
+                    merged_title = _build_titles_summary(
+                        videos=slot_language_items,
+                        merged_content=merged_content,
+                        merge_attempt=merge_attempt,
                     ).strip()
             if not merged_title:
                 continue
+            heading_text: str = _artifact_heading_label(
+                heading=f"{_language_heading(language, config.templates)} - {time_display}",
+                merged_content=merged_content,
+                merge_attempt=merge_attempt,
+                artifact_status=slot.merge_artifact_status,
+            )
             header_blocks.append(
-                f"{_language_heading(language, config.templates)} - {time_display}\n{merged_title}"
+                f"{heading_text}\n{merged_title}"
             )
     language_time_titles: str = "\n\n".join(header_blocks).strip()
     used_runtime_models = collect_used_runtime_models(
         slot_results=slot_results,
-        configured_model=config.llm_model,
+        configured_model=resolve_effective_llm_model(config),
     )
+    real_merge_blocks: int = sum(slot.real_merge_blocks for slot in slot_results)
+    merge_candidate_blocks: int = sum(slot.merge_candidate_blocks for slot in slot_results)
+    fallback_merge_blocks: int = sum(slot.fallback_merge_blocks for slot in slot_results)
+    merge_artifact_status: str = resolve_merge_artifact_status(
+        merge_candidate_blocks=merge_candidate_blocks,
+        real_merge_blocks=real_merge_blocks,
+        fallback_merge_blocks=fallback_merge_blocks,
+    )
+    fallback_merge_targets: List[str] = [
+        target
+        for slot in slot_results
+        for target in slot.fallback_merge_targets
+    ]
     doc_title: str = name_builder.build_doc_title(
         date_key=date_key,
         created_at=datetime.now(kiev_tz),
@@ -181,13 +297,18 @@ def publish_daily_document(
         doc_title=doc_title,
     )
     logger.info(
-        '[%s] doc_publish_start date_key=%s slot_count=%d dry_run=%s local_export_enabled=%s local_export_path="%s"',
+        '[%s] doc_publish_start date_key=%s slot_count=%d dry_run=%s local_export_enabled=%s local_export_path="%s" merge_artifact_status=%s merge_candidate_blocks=%d fallback_merge_blocks=%d fallback_targets=%s effective_model=%s',
         branch_label,
         date_key,
         len(slot_results),
         dry_run,
         local_export_path is not None,
         str(local_export_path) if local_export_path is not None else "",
+        merge_artifact_status,
+        merge_candidate_blocks,
+        fallback_merge_blocks,
+        ",".join(fallback_merge_targets) or "none",
+        used_runtime_models.configured_model or "unknown",
     )
 
     doc_url: str = "DRY_RUN_DOC_URL"
@@ -251,25 +372,34 @@ def publish_daily_document(
                 date_key,
                 guard_index,
             )
-            first_table_insert_index: int = (
-                docs_client.get_document_end_index(document_id=document_id) - 1
-            )
             first_table: bool = True
             for slot in slot_results:
                 time_display = format_time_key_for_display(slot.slot_time_key)
                 for language in ("uk", "en", "ru", "other"):
                     if not slot.language_groups[language]:
                         continue
+                    merged_content = slot.merged_content_by_language.get(language)
+                    merge_attempt = slot.merge_audit_by_language.get(language)
+                    _log_merge_block_publish_truth(
+                        logger=logger,
+                        branch_label=branch_label,
+                        date_key=date_key,
+                        slot_key=slot.slot_key,
+                        language=language,
+                        source_videos=slot.language_groups[language],
+                        merged_content=merged_content,
+                        merge_attempt=merge_attempt,
+                    )
                     if not first_table:
                         report_writer.insert_page_break(document_id=document_id)
                     report_writer.write_language_table(
                         document_id=document_id,
                         language=language,
                         videos=slot.language_groups[language],
-                        merged_content=slot.merged_content_by_language.get(language),
-                        merge_attempt=slot.merge_audit_by_language.get(language),
+                        merged_content=merged_content,
+                        merge_attempt=merge_attempt,
                         time_display=time_display,
-                        table_insert_index=first_table_insert_index if first_table else None,
+                        artifact_status=slot.merge_artifact_status,
                     )
                     first_table = False
         except Exception as error:

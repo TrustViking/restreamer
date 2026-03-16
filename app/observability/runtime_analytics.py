@@ -439,7 +439,7 @@ def log_run_context(
     run_context: RunContext,
 ) -> None:
     logger.info(
-        "run_context run_id=%s processing_mode=%s audit_mode=%s config_processing_mode=%s audit_branches=%s debug=%s dry_run=%s google_enabled=%s telegram_enabled=%s llm_provider=%s llm_model=%s llm_usage_reporting_mode=%s sheet_id=%s sheet_range=%s sheets_link_writeback=%s local_doc_export_enabled=%s strip_chapter_timestamps=%s",
+        "run_context run_id=%s processing_mode=%s audit_mode=%s config_processing_mode=%s audit_branches=%s debug=%s dry_run=%s google_enabled=%s telegram_enabled=%s llm_provider=%s llm_model_effective=%s llm_model_configured=%s llm_provider_model=%s llm_usage_reporting_mode=%s sheet_id=%s sheet_range=%s sheets_link_writeback=%s local_doc_export_enabled=%s strip_chapter_timestamps=%s",
         run_context.run_id,
         run_context.processing_mode,
         run_context.audit_mode,
@@ -451,6 +451,8 @@ def log_run_context(
         "yes" if run_context.telegram_enabled else "no",
         run_context.llm_provider or "unknown",
         run_context.llm_model or "unknown",
+        run_context.llm_model_configured or "unknown",
+        run_context.llm_provider_model or "unknown",
         run_context.llm_usage_reporting_mode or "unknown",
         run_context.sheet_id or "unknown",
         run_context.sheet_range or "unknown",
@@ -512,15 +514,23 @@ def log_merge_summary(
     retry_used: int,
     final_failure: int,
     paragraph_recovery_used: int,
+    real_merge_blocks: int = 0,
+    merge_candidate_blocks: int = 0,
+    fallback_merge_blocks: int = 0,
+    partial_merge_artifacts: int = 0,
 ) -> None:
     logger.info(
-        "Merge summary: groups=%d merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d",
+        "Merge summary: groups=%d merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d real_merge_blocks=%d merge_candidate_blocks=%d fallback_merge_blocks=%d partial_merge_artifacts=%d",
         groups,
         merge_success,
         validation_rejected,
         retry_used,
         final_failure,
         paragraph_recovery_used,
+        real_merge_blocks,
+        merge_candidate_blocks,
+        fallback_merge_blocks,
+        partial_merge_artifacts,
     )
 
 
@@ -548,8 +558,12 @@ def log_telegram_publish_summary(
     )
 
 
+def _has_failed_branch(state: RuntimeAnalyticsState) -> bool:
+    return any(branch_state.failed for branch_state in state.branch_results.values())
+
+
 def _resolve_run_status(exit_code: int, state: RuntimeAnalyticsState) -> str:
-    if exit_code != 0 or state.errors > 0:
+    if exit_code != 0 or state.errors > 0 or _has_failed_branch(state):
         return "failed"
     if (
         state.warnings_operational > 0
@@ -567,11 +581,19 @@ def log_run_completed(
     processing_mode: str,
     audit_mode: str,
     exit_code: int,
-    merge_success: int,
-    validation_rejected: int,
-    retry_used: int,
-    final_failure: int,
-    paragraph_recovery_used: int,
+    llm_provider: str = "",
+    llm_effective_model: str = "",
+    llm_configured_model: str = "",
+    llm_provider_model: str = "",
+    merge_success: int = 0,
+    validation_rejected: int = 0,
+    retry_used: int = 0,
+    final_failure: int = 0,
+    paragraph_recovery_used: int = 0,
+    merge_candidate_blocks: int = 0,
+    fallback_merge_blocks: int = 0,
+    partial_merge_artifacts: int = 0,
+    full_merge_artifacts: int = 0,
     run_summary_ms: int = 0,
 ) -> None:
     if _ACTIVE_STATE is None:
@@ -582,10 +604,14 @@ def log_run_completed(
         state=_ACTIVE_STATE,
     )
     logger.info(
-        "run_final_summary processing_mode=%s audit_mode=%s status=%s warnings_total=%d warnings_operational=%d warnings_informational=%d errors_total=%d warning_reason_codes=%s error_reason_codes=%s degraded_recovered_count=%d degraded_unrecovered_count=%d rows_processed=%d rows_skipped=%d planned_items=%d unique_dates_processed=%d date_branch_executions=%d docs_created=%d docs_failed=%d telegram_sent=%d telegram_failed=%d telegram_skipped=%d merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d content_contract_failures=%d content_contract_recovered=%d content_contract_unrecovered=%d malformed_tail_urls_dropped=%d startup_health_ms=%d sheet_load_ms=%d shared_preparation_ms=%d planning_ms=%d slot_processing_ms=%d doc_publish_ms=%d telegram_publish_ms=%d run_summary_ms=%d total_run_ms=%d branch_summary=%s",
+        "run_final_summary processing_mode=%s audit_mode=%s status=%s llm_provider=%s llm_model_effective=%s llm_model_configured=%s llm_provider_model=%s warnings_total=%d warnings_operational=%d warnings_informational=%d errors_total=%d warning_reason_codes=%s error_reason_codes=%s degraded_recovered_count=%d degraded_unrecovered_count=%d rows_processed=%d rows_skipped=%d planned_items=%d unique_dates_processed=%d date_branch_executions=%d docs_created=%d docs_failed=%d telegram_sent=%d telegram_failed=%d telegram_skipped=%d merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d merge_candidate_blocks=%d fallback_merge_blocks=%d partial_merge_artifacts=%d full_merge_artifacts=%d content_contract_failures=%d content_contract_recovered=%d content_contract_unrecovered=%d malformed_tail_urls_dropped=%d startup_health_ms=%d sheet_load_ms=%d shared_preparation_ms=%d planning_ms=%d slot_processing_ms=%d doc_publish_ms=%d telegram_publish_ms=%d run_summary_ms=%d total_run_ms=%d branch_summary=%s",
         processing_mode,
         audit_mode,
         status,
+        llm_provider or "unknown",
+        llm_effective_model or "unknown",
+        llm_configured_model or "unknown",
+        llm_provider_model or "unknown",
         _ACTIVE_STATE.warnings_operational + _ACTIVE_STATE.warnings_informational,
         _ACTIVE_STATE.warnings_operational,
         _ACTIVE_STATE.warnings_informational,
@@ -609,6 +635,10 @@ def log_run_completed(
         retry_used,
         final_failure,
         paragraph_recovery_used,
+        merge_candidate_blocks,
+        fallback_merge_blocks,
+        partial_merge_artifacts,
+        full_merge_artifacts,
         _ACTIVE_STATE.content_contract_failures,
         _ACTIVE_STATE.content_contract_recovered,
         _ACTIVE_STATE.content_contract_unrecovered,

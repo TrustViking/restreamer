@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig
@@ -32,6 +32,9 @@ from app.observability.runtime_analytics import (
 )
 
 
+MergeArtifactStatus = Literal["none", "full", "partial", "fallback_only"]
+
+
 @dataclass(frozen=True)
 class SlotProcessResult:
     slot_key: str
@@ -42,6 +45,27 @@ class SlotProcessResult:
     merged_content_by_language: Dict[str, MergedLanguageContent]
     merge_audit_by_language: Dict[str, LanguageMergeAttempt]
     real_merge_blocks: int
+    merge_candidate_blocks: int = 0
+    fallback_merge_blocks: int = 0
+    merge_artifact_status: MergeArtifactStatus = "none"
+    fallback_merge_targets: Tuple[str, ...] = ()
+
+
+def resolve_merge_artifact_status(
+    *,
+    merge_candidate_blocks: int,
+    real_merge_blocks: int,
+    fallback_merge_blocks: int,
+) -> MergeArtifactStatus:
+    if merge_candidate_blocks <= 0:
+        return "none"
+    if real_merge_blocks > 0:
+        if fallback_merge_blocks > 0:
+            return "partial"
+        return "full"
+    if fallback_merge_blocks > 0:
+        return "fallback_only"
+    return "none"
 
 
 def _merge_summary_snapshot(
@@ -190,6 +214,9 @@ def process_slot(
     merged_content_by_language: Dict[str, MergedLanguageContent] = {}
     merge_audit_by_language: Dict[str, LanguageMergeAttempt] = {}
     real_merge_blocks: int = 0
+    merge_candidate_blocks: int = 0
+    fallback_merge_blocks: int = 0
+    fallback_merge_targets: List[str] = []
     if llm_merge_enabled:
         for language in ("uk", "en", "ru", "other"):
             language_items_for_merge: List[PlannedVideo] = sorted(
@@ -254,6 +281,7 @@ def process_slot(
                 merge_run_summary
             )
             merge_attempt: LanguageMergeAttempt
+            is_multi_source_merge_candidate: bool = len(language_items_for_merge) > 1
             if run_single_source_translate:
                 merge_attempt = attempt_llm_single_source_translate_with_audit(
                     language=language,
@@ -290,11 +318,12 @@ def process_slot(
                 "yes" if merge_attempt.merged is not None else "no",
             )
             logger.info(
-                "branch_field_sources branch_type=%s date_key=%s slot_key=%s language=%s title_source=%s hook_source=%s hashtags_source=%s body_source=%s",
+                "branch_field_sources branch_type=%s date_key=%s slot_key=%s language=%s block_generation_mode=%s title_source=%s hook_source=%s hashtags_source=%s body_source=%s",
                 branch_label,
                 date_key,
                 slot_key,
                 language,
+                getattr(merge_attempt, "block_generation_mode", "unknown"),
                 merge_attempt.title_source or "unknown",
                 merge_attempt.hook_source or "unknown",
                 merge_attempt.hashtags_source or "unknown",
@@ -307,12 +336,15 @@ def process_slot(
                     branch_label=branch_label,
                     model_name=used_model_name,
                 )
+            if is_multi_source_merge_candidate:
+                merge_candidate_blocks += 1
+                merge_run_summary.record_merge_candidate_block()
             if merge_attempt.merged is not None:
                 merged_content_value: MergedLanguageContent = merge_attempt.merged
-                if len(language_items_for_merge) > 1:
+                if is_multi_source_merge_candidate:
                     real_merge_blocks += 1
                     merge_run_summary.record_real_merge_block()
-                if len(language_items_for_merge) > 1:
+                if is_multi_source_merge_candidate:
                     merged_content_value = enforce_openai_merged_paragraphs(
                         language=language,
                         merged_content=merged_content_value,
@@ -328,6 +360,10 @@ def process_slot(
                     )
                 merged_content_by_language[language] = merged_content_value
             else:
+                if is_multi_source_merge_candidate:
+                    fallback_merge_blocks += 1
+                    fallback_merge_targets.append(f"{slot_key}:{language}")
+                    merge_run_summary.record_fallback_merge_block()
                 logger.warning(
                     "[%s] LLM merge failed for language=%s provider=%s reason=%s",
                     branch_label,
@@ -409,12 +445,21 @@ def process_slot(
         len(day_videos),
         sorted(merged_content_by_language.keys()),
     )
+    merge_artifact_status: MergeArtifactStatus = resolve_merge_artifact_status(
+        merge_candidate_blocks=merge_candidate_blocks,
+        real_merge_blocks=real_merge_blocks,
+        fallback_merge_blocks=fallback_merge_blocks,
+    )
     logger.info(
-        "[%s] slot_merge_decision slot_key=%s real_merge_blocks=%d merge_doc_eligible=%s",
+        "[%s] slot_merge_decision slot_key=%s merge_candidate_blocks=%d real_merge_blocks=%d fallback_merge_blocks=%d merge_artifact_status=%s fallback_targets=%s merge_doc_eligible=%s",
         branch_label,
         slot_key,
+        merge_candidate_blocks,
         real_merge_blocks,
-        "yes" if real_merge_blocks > 0 else "no",
+        fallback_merge_blocks,
+        merge_artifact_status,
+        ",".join(fallback_merge_targets) or "none",
+        "yes" if merge_artifact_status != "none" else "no",
     )
     slot_total_ms: int = int(round((time.perf_counter() - slot_started_at) * 1000.0))
     record_slot_total_ms(slot_key=slot_key, elapsed_ms=slot_total_ms)
@@ -436,4 +481,8 @@ def process_slot(
         merged_content_by_language=merged_content_by_language,
         merge_audit_by_language=merge_audit_by_language,
         real_merge_blocks=real_merge_blocks,
+        merge_candidate_blocks=merge_candidate_blocks,
+        fallback_merge_blocks=fallback_merge_blocks,
+        merge_artifact_status=merge_artifact_status,
+        fallback_merge_targets=tuple(fallback_merge_targets),
     )

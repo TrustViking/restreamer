@@ -244,6 +244,7 @@ def log_openai_limits_and_usage(
     logger: logging.Logger,
     *,
     summarize_error: Callable[[Exception], str],
+    effective_model: str,
 ) -> None:
     admin_api_key: str = str(os.getenv("OPENAI_ADMIN_KEY", "") or "").strip()
     if not admin_api_key:
@@ -273,21 +274,29 @@ def log_openai_limits_and_usage(
         summary_payload.get("per_model") or {},
     )
     logger.info(
-        "OPENAI ORG USAGE today input=%d output=%d req=%d models=%s",
+        "OPENAI ORG USAGE SNAPSHOT scope=organization_aggregate source_of_truth_for_run=no current_run_effective_model=%s today_input=%d today_output=%d today_req=%d models=%s",
+        str(effective_model or "").strip() or "unknown",
         total_input_tokens,
         total_output_tokens,
         total_requests,
         _format_top_models_usage(per_model),
     )
     spent_usd_month: float = float(summary_payload.get("spent_usd_month") or 0.0)
-    logger.info("OPENAI COST month spent_usd=%.6f", spent_usd_month)
+    logger.info(
+        "OPENAI ORG COST SNAPSHOT scope=organization_aggregate source_of_truth_for_run=no current_run_effective_model=%s month_spent_usd=%.6f",
+        str(effective_model or "").strip() or "unknown",
+        spent_usd_month,
+    )
 
 
-def log_run_local_openai_usage(logger: logging.Logger) -> None:
+def log_run_local_openai_usage(logger: logging.Logger, *, effective_model: str) -> None:
     usage_state = get_run_local_openai_usage()
     model_names: str = ",".join(sorted(usage_state.models_used)) if usage_state.models_used else "none"
     parts: list[str] = [
         "OPENAI RUN USAGE",
+        "scope=run_local",
+        "source_of_truth_for_run=yes",
+        f"effective_model={str(effective_model or '').strip() or 'unknown'}",
         f"requests_sent={usage_state.requests_sent}",
         f"repair_calls={usage_state.repair_calls}",
         f"structured_calls={usage_state.structured_calls}",

@@ -35,6 +35,13 @@ class PreviewInsertPlan:
     image_index: int
 
 
+@dataclass(frozen=True)
+class TableSnapshot:
+    table_number: int
+    table_start_index: int
+    cell_start_indices: List[int]
+
+
 class GoogleDocsReportWriter:
     """
     Создает таблицу в документе и заполняет ее.
@@ -208,6 +215,7 @@ class GoogleDocsReportWriter:
         merge_attempt: Optional[LanguageMergeAttempt] = None,
         time_display: Optional[str] = None,
         table_insert_index: Optional[int] = None,
+        artifact_status: str = "none",
     ) -> None:
         row_values: List[Tuple[str, bool]] = _build_language_table_rows(
             language=language,
@@ -216,6 +224,7 @@ class GoogleDocsReportWriter:
             merge_attempt=merge_attempt,
             time_display=time_display,
             templates=self._templates,
+            artifact_status=artifact_status,
         )
         rows: int = len(row_values)
         columns: int = 1
@@ -232,62 +241,19 @@ class GoogleDocsReportWriter:
                 columns=columns,
                 index=table_insert_index,
             )
-        doc: Dict[str, Any] = self._docs_client.get_document(document_id=document_id)
-        cell_start_indices: List[int] = _find_last_table_cell_paragraph_start_indices(
-            doc=doc,
+        table_snapshot: TableSnapshot = self._get_last_table_snapshot(
+            document_id=document_id,
             rows=rows,
             columns=columns,
         )
-
-        def _cell_start_index(row_index: int, use_plus_one: bool) -> int:
-            idx: int = _cell_index(row=row_index, col=0, columns=columns)
-            return cell_start_indices[idx] + (1 if use_plus_one else 0)
-
-        def _build_requests(use_plus_one: bool) -> List[Dict[str, Any]]:
-            requests_payload: List[Dict[str, Any]] = []
-            for row_index in range(rows - 1, -1, -1):
-                text, is_bold = row_values[row_index]
-                start_index: int = _cell_start_index(
-                    row_index=row_index,
-                    use_plus_one=use_plus_one,
-                )
-                text_to_insert: str = f"{text}\n"
-                requests_payload.append(
-                    {
-                        "insertText": {
-                            "location": {"index": start_index},
-                            "text": text_to_insert,
-                        }
-                    }
-                )
-                requests_payload.append(
-                    {
-                        "updateTextStyle": {
-                            "range": {
-                                "startIndex": start_index,
-                                "endIndex": start_index + len(text_to_insert),
-                            },
-                            "textStyle": {
-                                "weightedFontFamily": {"fontFamily": "Arial"},
-                                "fontSize": {"magnitude": 13, "unit": "PT"},
-                                "bold": is_bold,
-                            },
-                            "fields": "weightedFontFamily,fontSize,bold",
-                        }
-                    }
-                )
-            return requests_payload
-
-        try:
-            self._docs_client.batch_update(
-                document_id=document_id,
-                requests_payload=_build_requests(use_plus_one=False),
-            )
-        except Exception:
-            self._docs_client.batch_update(
-                document_id=document_id,
-                requests_payload=_build_requests(use_plus_one=True),
-            )
+        self._fill_language_table_rows(
+            document_id=document_id,
+            language=language,
+            rows=rows,
+            columns=columns,
+            row_values=row_values,
+            table_snapshot=table_snapshot,
+        )
 
         self._apply_language_table_visual_style(
             document_id=document_id,
@@ -452,6 +418,161 @@ class GoogleDocsReportWriter:
                     video.row_number,
                     language,
                 )
+
+    def _get_last_table_snapshot(
+        self,
+        *,
+        document_id: str,
+        rows: int,
+        columns: int,
+    ) -> TableSnapshot:
+        doc: Dict[str, Any] = self._docs_client.get_document(document_id=document_id)
+        return _build_last_table_snapshot(doc=doc, rows=rows, columns=columns)
+
+    def _fill_language_table_rows(
+        self,
+        *,
+        document_id: str,
+        language: str,
+        rows: int,
+        columns: int,
+        row_values: List[Tuple[str, bool]],
+        table_snapshot: TableSnapshot,
+    ) -> None:
+        rows_filled: int = 0
+        active_snapshot: TableSnapshot = table_snapshot
+        for row_index in range(rows - 1, -1, -1):
+            text, is_bold = row_values[row_index]
+            active_snapshot = self._insert_language_table_row_text(
+                document_id=document_id,
+                language=language,
+                row_index=row_index,
+                rows=rows,
+                columns=columns,
+                text=text,
+                is_bold=is_bold,
+                rows_filled_before=rows_filled,
+                table_snapshot=active_snapshot,
+            )
+            rows_filled += 1
+
+    def _insert_language_table_row_text(
+        self,
+        *,
+        document_id: str,
+        language: str,
+        row_index: int,
+        rows: int,
+        columns: int,
+        text: str,
+        is_bold: bool,
+        rows_filled_before: int,
+        table_snapshot: TableSnapshot,
+    ) -> TableSnapshot:
+        text_to_insert: str = f"{text}\n"
+        attempts: Tuple[Tuple[str, bool, bool, bool], ...] = (
+            ("initial", False, False, False),
+            ("retry_recomputed", False, True, True),
+            ("retry_recomputed_offset", True, True, True),
+        )
+        current_snapshot: TableSnapshot = table_snapshot
+        last_error: Optional[Exception] = None
+
+        for attempt_label, use_plus_one, refetch_doc, recompute_indices in attempts:
+            if refetch_doc:
+                current_snapshot = self._get_last_table_snapshot(
+                    document_id=document_id,
+                    rows=rows,
+                    columns=columns,
+                )
+            cell_idx: int = _cell_index(row=row_index, col=0, columns=columns)
+            start_index: int = current_snapshot.cell_start_indices[cell_idx]
+            effective_index: int = start_index + (1 if use_plus_one else 0)
+            try:
+                LOGGER.debug(
+                    "language_table_fill doc_id=%s lang=%s table_index=%d row_index=%d column_index=%d attempt=%s insert_index=%d paragraph_start_index=%d refetch_doc=%s recompute_cell_indices=%s offset_workaround=%s rows_filled_before=%d",
+                    document_id,
+                    language,
+                    current_snapshot.table_number,
+                    row_index,
+                    0,
+                    attempt_label,
+                    effective_index,
+                    start_index,
+                    "yes" if refetch_doc else "no",
+                    "yes" if recompute_indices else "no",
+                    "yes" if use_plus_one else "no",
+                    rows_filled_before,
+                )
+                self._docs_client.batch_update(
+                    document_id=document_id,
+                    requests_payload=[
+                        {
+                            "insertText": {
+                                "location": {"index": effective_index},
+                                "text": text_to_insert,
+                            }
+                        },
+                        {
+                            "updateTextStyle": {
+                                "range": {
+                                    "startIndex": effective_index,
+                                    "endIndex": effective_index + len(text_to_insert),
+                                },
+                                "textStyle": {
+                                    "weightedFontFamily": {"fontFamily": "Arial"},
+                                    "fontSize": {"magnitude": 13, "unit": "PT"},
+                                    "bold": is_bold,
+                                },
+                                "fields": "weightedFontFamily,fontSize,bold",
+                            }
+                        },
+                    ],
+                )
+                LOGGER.debug(
+                    "language_table_fill_succeeded doc_id=%s lang=%s table_index=%d row_index=%d column_index=%d attempt=%s insert_index=%d rows_filled_after=%d",
+                    document_id,
+                    language,
+                    current_snapshot.table_number,
+                    row_index,
+                    0,
+                    attempt_label,
+                    effective_index,
+                    rows_filled_before + 1,
+                )
+                return self._get_last_table_snapshot(
+                    document_id=document_id,
+                    rows=rows,
+                    columns=columns,
+                )
+            except Exception as error:
+                last_error = error
+                bounds_error: bool = _is_google_docs_bounds_error(error)
+                LOGGER.warning(
+                    "language_table_fill_failed doc_id=%s lang=%s table_index=%d row_index=%d column_index=%d attempt=%s insert_index=%d paragraph_start_index=%d refetch_doc=%s recompute_cell_indices=%s offset_workaround=%s rows_filled_before=%d bounds_error=%s error=%s",
+                    document_id,
+                    language,
+                    current_snapshot.table_number,
+                    row_index,
+                    0,
+                    attempt_label,
+                    effective_index,
+                    start_index,
+                    "yes" if refetch_doc else "no",
+                    "yes" if recompute_indices else "no",
+                    "yes" if use_plus_one else "no",
+                    rows_filled_before,
+                    "yes" if bounds_error else "no",
+                    error,
+                )
+                if not bounds_error:
+                    raise
+
+        raise RuntimeError(
+            "Google Docs language table fill failed after recompute retry. "
+            f"document_id={document_id} language={language} row_index={row_index} "
+            f"rows_filled_before={rows_filled_before} reason={last_error}"
+        ) from last_error
 
     def _apply_language_table_visual_style(
         self,
@@ -862,6 +983,10 @@ def _cell_index(row: int, col: int, columns: int) -> int:
     return row * columns + col
 
 
+def _is_google_docs_bounds_error(error: Exception) -> bool:
+    return "inside the bounds of an existing paragraph" in str(error).lower()
+
+
 
 def _find_last_table_cell_paragraph_start_indices(
     doc: Dict[str, Any], rows: int, columns: int
@@ -933,5 +1058,25 @@ def _find_last_table_start_index(doc: Dict[str, Any]) -> int:
     if start_index_raw is None:
         raise RuntimeError("Не найден startIndex последней таблицы.")
     return int(start_index_raw)
+
+
+def _count_tables(doc: Dict[str, Any]) -> int:
+    body: Dict[str, Any] = doc.get("body", {})
+    content: List[Dict[str, Any]] = body.get("content", [])
+    return sum(1 for item in content if "table" in item)
+
+
+def _build_last_table_snapshot(
+    doc: Dict[str, Any], rows: int, columns: int
+) -> TableSnapshot:
+    return TableSnapshot(
+        table_number=_count_tables(doc),
+        table_start_index=_find_last_table_start_index(doc=doc),
+        cell_start_indices=_find_last_table_cell_paragraph_start_indices(
+            doc=doc,
+            rows=rows,
+            columns=columns,
+        ),
+    )
 
 

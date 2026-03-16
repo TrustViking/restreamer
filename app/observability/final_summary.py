@@ -14,6 +14,10 @@ class FinalRunSummaryContext:
     exit_code: int
     merge_run_summary: MergeRunSummary | None
     run_summary_ms: int
+    llm_provider: str
+    llm_effective_model: str
+    llm_configured_model: str
+    llm_provider_model: str
 
 
 def emit_final_run_summary(
@@ -27,12 +31,28 @@ def emit_final_run_summary(
         processing_mode=summary_context.processing_mode,
         audit_mode=summary_context.audit_mode,
         exit_code=summary_context.exit_code,
+        llm_provider=summary_context.llm_provider,
+        llm_effective_model=summary_context.llm_effective_model,
+        llm_configured_model=summary_context.llm_configured_model,
+        llm_provider_model=summary_context.llm_provider_model,
         merge_success=merge_summary.merge_success if merge_summary is not None else 0,
         validation_rejected=merge_summary.validation_rejected if merge_summary is not None else 0,
         retry_used=merge_summary.retry_used if merge_summary is not None else 0,
         final_failure=merge_summary.final_failure if merge_summary is not None else 0,
         paragraph_recovery_used=(
             merge_summary.paragraph_recovery_used if merge_summary is not None else 0
+        ),
+        merge_candidate_blocks=(
+            merge_summary.merge_candidate_blocks if merge_summary is not None else 0
+        ),
+        fallback_merge_blocks=(
+            merge_summary.fallback_merge_blocks if merge_summary is not None else 0
+        ),
+        partial_merge_artifacts=(
+            merge_summary.partial_merge_artifacts if merge_summary is not None else 0
+        ),
+        full_merge_artifacts=(
+            merge_summary.full_merge_artifacts if merge_summary is not None else 0
         ),
         run_summary_ms=summary_context.run_summary_ms,
     )

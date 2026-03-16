@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
+from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppConfig, AppTemplates
 from app.core.env_flags import (
     strip_chapter_timestamps,
@@ -18,9 +19,11 @@ from app.planning import planned_video_block_language
 from app.publish.doc_helpers import _no_description_text as _publish_no_description_text
 from app.publish.post_llm_sanitation import (
     build_sanitized_merged_publication_payload,
-    resolve_post_llm_source_label,
-    sanitize_post_llm_text_for_merged_publish,
+    log_safe_merge_attempt_fallback,
+    should_suppress_raw_merge_attempt_publish,
 )
+
+LOGGER = _get_logger_impl(__name__)
 
 
 def _render_template(template: str, values: Dict[str, Any]) -> str:
@@ -84,6 +87,7 @@ def _build_merged_publication_payload(
     return MergedPublicationPayload(
         title_text=sanitized_payload.title_text.strip(),
         description_text=sanitized_payload.description_text.strip(),
+        block_generation_mode=sanitized_payload.block_generation_mode,
     )
 
 
@@ -131,17 +135,19 @@ def build_descriptions_summary(
         )
         return payload.description_text
     if merge_attempt is not None:
-        raw_text: str = sanitize_post_llm_text_for_merged_publish(
-            text=str(merge_attempt.raw_response_text or "").strip(),
-            language=merge_attempt.language,
-            source_label=resolve_post_llm_source_label(
-                merge_attempt,
-                default_label="merge_attempt_raw",
-            ),
-            source_videos=videos,
-        )
-        if raw_text:
-            return f"{raw_text}\n\n{source_lines}".strip()
+        if should_suppress_raw_merge_attempt_publish(
+            merge_attempt=merge_attempt,
+            merged_content_available=False,
+        ):
+            log_safe_merge_attempt_fallback(
+                target="telegram",
+                merge_attempt=merge_attempt,
+                fallback_label="source_descriptions",
+            )
+            LOGGER.debug(
+                "telegram_safe_fallback_selected language=%s fallback=source_descriptions",
+                merge_attempt.language,
+            )
         return source_lines
     if not videos:
         return "1) ..."

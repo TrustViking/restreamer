@@ -3,11 +3,17 @@ from __future__ import annotations
 import logging
 import unittest
 from contextlib import ExitStack
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import restreamer
+from app.llm.openai_client import reset_run_local_openai_usage
+from app.observability.openai_usage import (
+    log_openai_limits_and_usage,
+    log_run_local_openai_usage,
+)
 from app.bootstrap.run_context import RunContext, StartupContext
 from app.observability.runtime_analytics import log_run_context
 from app.observability.startup_health import run_startup_health_checks
@@ -23,7 +29,11 @@ class ProviderAwareUsageHooksTests(unittest.TestCase):
         ) as local_usage_mock, patch("restreamer.log_openai_limits_and_usage") as org_usage_mock, self.assertLogs(
             logger, level="INFO"
         ) as captured:
-            llm_summary = SimpleNamespace(provider="openai")
+            llm_summary = SimpleNamespace(
+                provider="openai",
+                model="gpt-5.2",
+                usage_reporting_mode="openai_run_local+openai_org_snapshot",
+            )
             _apply_llm_usage_reset(logger=logger, llm_summary=llm_summary)
             _log_llm_usage_reports(logger=logger, llm_summary=llm_summary)
         self.assertEqual(1, reset_mock.call_count)
@@ -31,25 +41,69 @@ class ProviderAwareUsageHooksTests(unittest.TestCase):
         self.assertEqual(1, org_usage_mock.call_count)
         text: str = "\n".join(captured.output)
         self.assertIn("llm_usage_reset_applied provider=openai", text)
-        self.assertIn("llm_usage_report_completed provider=openai status=completed", text)
+        self.assertIn("llm_usage_report_start provider=openai effective_model=gpt-5.2", text)
+        self.assertIn("llm_usage_report_completed provider=openai effective_model=gpt-5.2 status=completed", text)
 
     def test_non_openai_provider_skips_reset_but_keeps_usage_report_logging(self) -> None:
-        logger = logging.getLogger("provider-aware-deepseek-usage")
+        logger = logging.getLogger("provider-aware-claude-usage")
         with patch("restreamer.reset_run_local_openai_usage") as reset_mock, patch(
             "restreamer.log_run_local_openai_usage"
         ) as local_usage_mock, patch("restreamer.log_openai_limits_and_usage") as org_usage_mock, self.assertLogs(
             logger, level="INFO"
         ) as captured:
-            llm_summary = SimpleNamespace(provider="deepseek")
+            llm_summary = SimpleNamespace(
+                provider="claude",
+                model="claude-opus-4-6",
+                usage_reporting_mode="openai_run_local+openai_org_snapshot",
+            )
             _apply_llm_usage_reset(logger=logger, llm_summary=llm_summary)
             _log_llm_usage_reports(logger=logger, llm_summary=llm_summary)
         self.assertEqual(0, reset_mock.call_count)
         self.assertEqual(1, local_usage_mock.call_count)
         self.assertEqual(1, org_usage_mock.call_count)
         text: str = "\n".join(captured.output)
-        self.assertIn("llm_usage_reset_skipped provider=deepseek reason=provider_not_openai", text)
-        self.assertIn("llm_usage_report_start provider=deepseek", text)
-        self.assertIn("llm_usage_report_completed provider=deepseek status=completed", text)
+        self.assertIn("llm_usage_reset_skipped provider=claude reason=provider_not_openai", text)
+        self.assertIn("llm_usage_report_start provider=claude effective_model=claude-opus-4-6", text)
+        self.assertIn("llm_usage_report_completed provider=claude effective_model=claude-opus-4-6 status=completed", text)
+
+    def test_run_local_usage_log_marks_effective_model_as_run_source_of_truth(self) -> None:
+        logger = logging.getLogger("provider-aware-run-local-usage")
+        usage_state = reset_run_local_openai_usage()
+        usage_state.requests_sent = 2
+        usage_state.structured_calls = 2
+        usage_state.models_used.add("gpt-5.2")
+        with self.assertLogs(logger, level="INFO") as captured:
+            log_run_local_openai_usage(logger, effective_model="gpt-5.2")
+        text: str = "\n".join(captured.output)
+        self.assertIn("OPENAI RUN USAGE", text)
+        self.assertIn("scope=run_local", text)
+        self.assertIn("source_of_truth_for_run=yes", text)
+        self.assertIn("effective_model=gpt-5.2", text)
+
+    def test_org_usage_log_is_marked_non_authoritative_for_current_run_model(self) -> None:
+        logger = logging.getLogger("provider-aware-org-usage")
+        with patch(
+            "app.observability.openai_usage.fetch_usage_and_costs_summary",
+            return_value={
+                "total_input_tokens": 10,
+                "total_output_tokens": 5,
+                "total_requests": 2,
+                "per_model": {"gpt-5.1": {"input": 10, "output": 5, "requests": 2, "tokens": 15}},
+                "spent_usd_month": 1.25,
+            },
+        ), patch.dict(os.environ, {"OPENAI_ADMIN_KEY": "admin-key", "STG_TZ": "UTC"}, clear=False), self.assertLogs(
+            logger,
+            level="INFO",
+        ) as captured:
+            log_openai_limits_and_usage(
+                logger,
+                summarize_error=lambda error: str(error),
+                effective_model="gpt-5.2",
+            )
+        text: str = "\n".join(captured.output)
+        self.assertIn("OPENAI ORG USAGE SNAPSHOT", text)
+        self.assertIn("source_of_truth_for_run=no", text)
+        self.assertIn("current_run_effective_model=gpt-5.2", text)
 
 
 class ProviderAwareSummaryTests(unittest.TestCase):
@@ -108,7 +162,7 @@ class ProviderAwareSummaryTests(unittest.TestCase):
             processing_mode="audit",
             now_tz_mode="kyiv",
             llm_provider=provider,
-            llm_model="gpt-5.1" if provider == "openai" else "deepseek-chat",
+            llm_model="gpt-5.1" if provider == "openai" else "claude-opus-4-6",
             openai_timeout_sec=30.0,
             openai_max_output_tokens=1000,
             llm_source_desc_max_chars=500,
@@ -145,24 +199,25 @@ class ProviderAwareSummaryTests(unittest.TestCase):
             )
         text: str = "\n".join(captured.output)
         self.assertIn("llm_provider=openai", text)
-        self.assertIn("llm_model=gpt-5.1", text)
+        self.assertIn("llm_model_effective=gpt-5.1", text)
+        self.assertIn("llm_model_configured=gpt-5.1", text)
         self.assertIn("llm_usage_reporting_mode=openai_run_local+openai_org_snapshot", text)
 
-    def test_deepseek_summary_fields_show_current_values(self) -> None:
-        logger = logging.getLogger("provider-aware-deepseek-summary")
-        config = self._config("deepseek")
+    def test_non_openai_provider_summary_fields_show_current_values(self) -> None:
+        logger = logging.getLogger("provider-aware-claude-summary")
+        config = self._config("claude")
         with self.assertLogs(logger, level="INFO") as captured:
             log_config_summary(
                 logger,
                 config,
                 SimpleNamespace(
-                    provider="deepseek",
-                    model="deepseek-chat",
+                    provider="claude",
+                    model="claude-opus-4-6",
                     usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
                 self._run_context(
-                    provider="deepseek",
-                    model="deepseek-chat",
+                    provider="claude",
+                    model="claude-opus-4-6",
                     usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
             )
@@ -170,22 +225,23 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 logger,
                 self._startup_context(),
                 SimpleNamespace(
-                    provider="deepseek",
-                    model="deepseek-chat",
+                    provider="claude",
+                    model="claude-opus-4-6",
                     usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
             )
         text: str = "\n".join(captured.output)
-        self.assertIn("llm_provider=deepseek", text)
-        self.assertIn("llm_model=deepseek-chat", text)
+        self.assertIn("llm_provider=claude", text)
+        self.assertIn("llm_model_effective=claude-opus-4-6", text)
+        self.assertIn("llm_model_configured=claude-opus-4-6", text)
         self.assertIn("llm_usage_reporting_mode=openai_run_local+openai_org_snapshot", text)
         self.assertIn("resolved_audit_mode=audit branches=nomerge,merge", text)
 
     def test_startup_health_logs_current_merge_policy(self) -> None:
-        logger = logging.getLogger("provider-aware-health-deepseek")
+        logger = logging.getLogger("provider-aware-health-claude")
         config = SimpleNamespace(
-            llm_provider="deepseek",
-            llm_model="deepseek-chat",
+            llm_provider="claude",
+            llm_model="claude-opus-4-6",
             openai_timeout_sec=30.0,
             openai_max_output_tokens=1000,
             llm_source_desc_max_chars=500,
@@ -215,8 +271,8 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 logger=logger,
                 config=config,
                 llm_summary=SimpleNamespace(
-                    provider="deepseek",
-                    model="deepseek-chat",
+                    provider="claude",
+                    model="claude-opus-4-6",
                     usage_reporting_mode="openai_run_local+openai_org_snapshot",
                 ),
                 services=services,
@@ -227,11 +283,11 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 run_id="run",
             )
         text: str = "\n".join(captured.output)
-        self.assertIn("LLM policy: provider=deepseek model=deepseek-chat", text)
+        self.assertIn("LLM policy: provider=claude effective_model=claude-opus-4-6", text)
         self.assertIn("usage_reporting_mode=openai_run_local+openai_org_snapshot", text)
         self.assertIn("LLM selection: audit branch execution=merge", text)
         self.assertIn(
-            "LLM usage reporting note: provider=openai openai_usage_summary_expected=yes",
+            "LLM usage reporting note: scope=organization_aggregate source_of_truth_for_run=no current_run_effective_model=claude-opus-4-6",
             text,
         )
 

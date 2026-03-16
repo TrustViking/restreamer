@@ -8,6 +8,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.llm.model_compatibility import (
+    LlmModelConfigurationError,
+    LlmRequestErrorClassification,
+    OpenAIRequestCompatibility,
+    classify_openai_request_error,
+    resolve_openai_request_compatibility,
+)
 from app.llm.merge_parser import extract_json_object_candidates, parse_json_tolerant, strip_json_code_fences
 
 try:
@@ -285,9 +292,78 @@ def _is_openai_temperature_unsupported_error(error: Exception) -> bool:
     return "unsupported parameter" in message and "temperature" in message and "invalid_request_error" in message
 
 
-def _openai_should_send_temperature(model_name: str) -> bool:
-    normalized_model_name: str = str(model_name or "").strip().lower()
-    return not normalized_model_name.startswith("gpt")
+def _log_openai_request_compatibility(
+    *,
+    trace_context: Optional[LlmTraceContext],
+    compatibility: OpenAIRequestCompatibility,
+) -> None:
+    request_kind: str = (
+        trace_context.request_kind if trace_context is not None else "unknown"
+    )
+    LOGGER.info(
+        "openai_request_compatibility model=%s request_kind=%s model_family=%s reasoning_effort=%s structured_output=%s temperature=%s capability_source=%s",
+        compatibility.model_name or "unknown",
+        request_kind,
+        compatibility.model_family,
+        "enabled" if compatibility.reasoning_effort_enabled else "disabled",
+        (
+            "json_schema"
+            if compatibility.structured_output_requested and compatibility.structured_output_supported
+            else "disabled"
+        ),
+        "enabled" if compatibility.temperature_enabled else "disabled",
+        compatibility.capability_source,
+    )
+
+
+def _build_openai_responses_request_kwargs(
+    *,
+    prompt_text: str,
+    model_name: str,
+    max_tokens: int,
+    structured_schema: Optional[Dict[str, Any]],
+    temperature: float,
+    compatibility: OpenAIRequestCompatibility,
+) -> Dict[str, Any]:
+    request_kwargs: Dict[str, Any] = {
+        "model": model_name,
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt_text}]}],
+        "max_output_tokens": max_tokens,
+    }
+    if compatibility.reasoning_effort_enabled:
+        request_kwargs["reasoning"] = {"effort": "low"}
+    if structured_schema is not None:
+        request_kwargs["text"] = {
+            "format": {
+                "type": "json_schema",
+                "name": structured_schema.get("name", "streamertg_merge_v1"),
+                "strict": True,
+                "schema": structured_schema["schema"],
+            }
+        }
+    if compatibility.temperature_enabled:
+        request_kwargs["temperature"] = float(temperature)
+    return request_kwargs
+
+
+def _raise_if_fatal_model_configuration_error(
+    *,
+    provider_name: str,
+    model_name: str,
+    error: Exception,
+) -> None:
+    classification: LlmRequestErrorClassification = classify_openai_request_error(error)
+    if not classification.fatal_model_configuration:
+        return
+    raise LlmModelConfigurationError(
+        provider_name=provider_name,
+        model_name=model_name,
+        reason_code=classification.reason_code,
+        detail=classification.detail,
+        status_code=classification.status_code,
+        api_error_code=classification.api_error_code,
+        api_error_param=classification.api_error_param,
+    ) from error
 
 
 def _safe_int_or_none(raw_value: Any) -> Optional[int]:
@@ -456,6 +532,32 @@ def get_openai_client(
     return client
 
 
+def probe_openai_model_access(
+    *,
+    provider_name: str,
+    model_name: str,
+    timeout_sec: float,
+    api_key_env: str = "GPT_API_KEY",
+    base_url: Optional[str] = None,
+) -> None:
+    client: Any = get_openai_client(
+        provider_name=provider_name,
+        api_key_env=api_key_env,
+        timeout_sec=timeout_sec,
+        base_url=base_url,
+        max_retries=0,
+    ).with_options(timeout=timeout_sec, max_retries=0)
+    try:
+        client.models.retrieve(model_name)
+    except Exception as error:
+        _raise_if_fatal_model_configuration_error(
+            provider_name=provider_name,
+            model_name=model_name,
+            error=cast(Exception, error),
+        )
+        raise
+
+
 def _extract_structured_payload_or_none(response: Any) -> Optional[Dict[str, Any]]:
     raw_json_text: str = strip_json_code_fences(_extract_openai_response_text(response))
     if not raw_json_text:
@@ -499,32 +601,37 @@ def openai_compatible_request_merge(
         base_url=base_url,
         max_retries=max_retries,
     ).with_options(timeout=timeout_sec, max_retries=max_retries)
-    temperature_enabled: bool = _openai_should_send_temperature(model_name)
-    reasoning_effort: str = "low"
     request_kind: str = (
         trace_context.request_kind
         if trace_context is not None
         else ("structured" if structured_schema is not None else "plain")
     )
+    compatibility: OpenAIRequestCompatibility = resolve_openai_request_compatibility(
+        model_name=model_name,
+        structured_output_requested=(structured_schema is not None),
+        temperature_requested=True,
+    )
 
-    def _create_response(max_tokens: int) -> Any:
-        request_kwargs: Dict[str, Any] = {
-            "model": model_name,
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt_text}]}],
-            "reasoning": {"effort": reasoning_effort},
-            "max_output_tokens": max_tokens,
-        }
-        if structured_schema is not None:
-            request_kwargs["text"] = {
-                "format": {
-                    "type": "json_schema",
-                    "name": structured_schema.get("name", "streamertg_merge_v1"),
-                    "strict": True,
-                    "schema": structured_schema["schema"],
-                }
-            }
-        if temperature_enabled:
-            request_kwargs["temperature"] = float(temperature)
+    def _create_response(
+        max_tokens: int,
+        *,
+        compatibility_override: Optional[OpenAIRequestCompatibility] = None,
+    ) -> Any:
+        active_compatibility: OpenAIRequestCompatibility = (
+            compatibility_override if compatibility_override is not None else compatibility
+        )
+        request_kwargs: Dict[str, Any] = _build_openai_responses_request_kwargs(
+            prompt_text=prompt_text,
+            model_name=model_name,
+            max_tokens=max_tokens,
+            structured_schema=structured_schema,
+            temperature=temperature,
+            compatibility=active_compatibility,
+        )
+        _log_openai_request_compatibility(
+            trace_context=trace_context,
+            compatibility=active_compatibility,
+        )
         _log_llm_request_start(
             trace_context=trace_context,
             input_chars=len(prompt_text),
@@ -566,15 +673,47 @@ def openai_compatible_request_merge(
                 error=cast(Exception, error),
                 elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
             )
+            if _is_openai_temperature_unsupported_error(cast(Exception, error)):
+                raise
+            classification: LlmRequestErrorClassification = classify_openai_request_error(
+                cast(Exception, error)
+            )
+            if classification.fatal_model_configuration:
+                LOGGER.error(
+                    "openai_model_configuration_error provider=%s model=%s reason_code=%s status_code=%s api_error_code=%s api_error_param=%s detail=%s",
+                    provider_name,
+                    model_name or "unknown",
+                    classification.reason_code,
+                    str(classification.status_code if classification.status_code is not None else "unknown"),
+                    classification.api_error_code or "none",
+                    classification.api_error_param or "none",
+                    classification.detail,
+                    extra={"reason_code": classification.reason_code},
+                )
+            _raise_if_fatal_model_configuration_error(
+                provider_name=provider_name,
+                model_name=model_name,
+                error=cast(Exception, error),
+            )
             raise
 
     def _create_with_temp_fallback(max_tokens: int) -> Any:
-        nonlocal temperature_enabled
         try:
             return _create_response(max_tokens)
         except Exception as error:
-            if temperature_enabled and _is_openai_temperature_unsupported_error(cast(Exception, error)):
-                temperature_enabled = False
+            if compatibility.temperature_enabled and _is_openai_temperature_unsupported_error(cast(Exception, error)):
+                compatibility_fallback: OpenAIRequestCompatibility = OpenAIRequestCompatibility(
+                    model_name=compatibility.model_name,
+                    normalized_model_name=compatibility.normalized_model_name,
+                    model_family=compatibility.model_family,
+                    reasoning_effort_supported=compatibility.reasoning_effort_supported,
+                    reasoning_effort_enabled=compatibility.reasoning_effort_enabled,
+                    structured_output_supported=compatibility.structured_output_supported,
+                    structured_output_requested=compatibility.structured_output_requested,
+                    temperature_supported=compatibility.temperature_supported,
+                    temperature_enabled=False,
+                    capability_source=compatibility.capability_source,
+                )
                 LOGGER.warning("OpenAI model=%s does not support temperature; retrying_without_temperature.", model_name)
                 _log_llm_retry_decision(
                     trace_context=trace_context,
@@ -583,7 +722,10 @@ def openai_compatible_request_merge(
                     retry_kind="retry_without_temperature",
                     recovered=True,
                 )
-                return _create_response(max_tokens)
+                return _create_response(
+                    max_tokens,
+                    compatibility_override=compatibility_fallback,
+                )
             raise
 
     used_max_tokens: int = int(max_output_tokens)

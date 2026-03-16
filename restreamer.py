@@ -87,7 +87,7 @@ def _is_openai_usage_reporting_enabled(*, llm_summary) -> bool:
 
 
 def _apply_llm_usage_reset(*, logger, llm_summary) -> None:
-    provider_name: str = llm_summary.provider
+    provider_name: str = str(getattr(llm_summary, "provider", "") or "").strip()
     if _is_openai_usage_reporting_enabled(llm_summary=llm_summary):
         reset_run_local_openai_usage()
         logger.info("llm_usage_reset_applied provider=%s", provider_name)
@@ -99,19 +99,35 @@ def _apply_llm_usage_reset(*, logger, llm_summary) -> None:
 
 
 def _log_llm_usage_reports(*, logger, llm_summary) -> None:
-    provider_name: str = llm_summary.provider
-    logger.info("llm_usage_report_start provider=%s", provider_name)
+    provider_name: str = str(getattr(llm_summary, "provider", "") or "").strip()
+    effective_model: str = str(
+        getattr(llm_summary, "effective_model", getattr(llm_summary, "model", "")) or ""
+    ).strip() or "unknown"
+    usage_reporting_mode: str = str(
+        getattr(llm_summary, "usage_reporting_mode", "") or ""
+    ).strip() or "unknown"
+    logger.info(
+        "llm_usage_report_start provider=%s effective_model=%s usage_reporting_mode=%s",
+        provider_name,
+        effective_model,
+        usage_reporting_mode,
+    )
     try:
-        log_run_local_openai_usage(logger)
+        log_run_local_openai_usage(logger, effective_model=effective_model)
     except Exception:
         logger.exception("Run-local OpenAI usage report failed")
     try:
-        log_openai_limits_and_usage(logger, summarize_error=summarize_error)
+        log_openai_limits_and_usage(
+            logger,
+            summarize_error=summarize_error,
+            effective_model=effective_model,
+        )
     except Exception:
         logger.exception("OpenAI usage report failed")
     logger.info(
-        "llm_usage_report_completed provider=%s status=completed",
+        "llm_usage_report_completed provider=%s effective_model=%s status=completed",
         provider_name,
+        effective_model,
     )
 
 
@@ -237,6 +253,26 @@ def main(argv: Sequence[str]) -> int:
                     exit_code=exit_code,
                     merge_run_summary=merge_summary,
                     run_summary_ms=run_summary_ms,
+                    llm_provider=str(getattr(llm_summary, "provider", "") or "").strip(),
+                    llm_effective_model=str(
+                        getattr(llm_summary, "effective_model", getattr(llm_summary, "model", "")) or ""
+                    ).strip(),
+                    llm_configured_model=str(
+                        getattr(
+                            llm_summary,
+                            "configured_model",
+                            getattr(llm_summary, "effective_model", getattr(llm_summary, "model", "")),
+                        )
+                        or ""
+                    ).strip(),
+                    llm_provider_model=str(
+                        getattr(
+                            llm_summary,
+                            "provider_model",
+                            getattr(llm_summary, "effective_model", getattr(llm_summary, "model", "")),
+                        )
+                        or ""
+                    ).strip(),
                 ),
             )
         except Exception:

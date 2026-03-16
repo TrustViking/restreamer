@@ -9,19 +9,45 @@ from typing import Optional
 from app.config.settings import AppConfig
 from app.bootstrap.run_context import RunContext, StartupContext
 from app.core.branching import audit_branch_labels
+from app.llm.model_identity import build_effective_llm_model_identity
 
 
 @dataclass(frozen=True)
 class LlmSummarySnapshot:
     provider: str
-    model: str
+    configured_model: str
+    provider_model: str
+    effective_model: str
     usage_reporting_mode: str
+
+    @property
+    def model(self) -> str:
+        return self.effective_model
+
+
+def _summary_effective_model(llm_summary: LlmSummarySnapshot) -> str:
+    return str(
+        getattr(llm_summary, "effective_model", getattr(llm_summary, "model", "")) or ""
+    ).strip()
+
+
+def _summary_configured_model(llm_summary: LlmSummarySnapshot) -> str:
+    effective_model: str = _summary_effective_model(llm_summary)
+    return str(getattr(llm_summary, "configured_model", effective_model) or "").strip()
+
+
+def _summary_provider_model(llm_summary: LlmSummarySnapshot) -> str:
+    effective_model: str = _summary_effective_model(llm_summary)
+    return str(getattr(llm_summary, "provider_model", effective_model) or "").strip()
 
 
 def build_llm_summary_snapshot(config: AppConfig) -> LlmSummarySnapshot:
+    model_identity = build_effective_llm_model_identity(config)
     return LlmSummarySnapshot(
-        provider=config.llm_provider,
-        model=config.llm_model,
+        provider=model_identity.provider,
+        configured_model=model_identity.configured_model,
+        provider_model=model_identity.provider_model,
+        effective_model=model_identity.effective_model,
         usage_reporting_mode="openai_run_local+openai_org_snapshot",
     )
 
@@ -94,9 +120,11 @@ def _log_startup_banner(
     logger.info("oauth_token_path=%s", startup_context.oauth_token_path)
     if llm_summary is not None:
         logger.info(
-            "llm_provider=%s llm_model=%s llm_usage_reporting_mode=%s",
+            "llm_provider=%s llm_model_effective=%s llm_model_configured=%s llm_provider_model=%s llm_usage_reporting_mode=%s",
             llm_summary.provider or "unknown",
-            llm_summary.model or "unknown",
+            _summary_effective_model(llm_summary) or "unknown",
+            _summary_configured_model(llm_summary) or "unknown",
+            _summary_provider_model(llm_summary) or "unknown",
             llm_summary.usage_reporting_mode or "unknown",
         )
     logger.info("=== STARTUP BANNER END ===")
@@ -140,7 +168,9 @@ def _log_startup_dump(
         _log_run_startup_line(
             "Run llm: "
             f"provider={llm_summary.provider or 'unknown'} "
-            f"model={llm_summary.model or 'unknown'} "
+            f"effective_model={_summary_effective_model(llm_summary) or 'unknown'} "
+            f"configured_model={_summary_configured_model(llm_summary) or 'unknown'} "
+            f"provider_model={_summary_provider_model(llm_summary) or 'unknown'} "
             f"usage_reporting_mode={llm_summary.usage_reporting_mode or 'unknown'}"
         )
     _log_run_startup_line("Run startup dump end")
@@ -189,14 +219,16 @@ def log_config_summary(
         config.google_sheets_range,
     )
     logger.info(
-        "run_id=%s Config summary: config_processing_mode=%s resolved_processing_mode=%s resolved_audit_mode=%s now_tz_mode=%s llm_provider=%s llm_model=%s llm_usage_reporting_mode=%s openai_timeout_sec=%.1f openai_max_output_tokens=%d llm_source_desc_max_chars=%d llm_run_if_single_source=%s openai_pre_delay_sec=%.1f",
+        "run_id=%s Config summary: config_processing_mode=%s resolved_processing_mode=%s resolved_audit_mode=%s now_tz_mode=%s llm_provider=%s llm_model_effective=%s llm_model_configured=%s llm_provider_model=%s llm_usage_reporting_mode=%s openai_timeout_sec=%.1f openai_max_output_tokens=%d llm_source_desc_max_chars=%d llm_run_if_single_source=%s openai_pre_delay_sec=%.1f",
         run_context.run_id,
         config.processing_mode,
         run_context.processing_mode,
         run_context.audit_mode,
         config.now_tz_mode,
         llm_summary.provider,
-        llm_summary.model,
+        _summary_effective_model(llm_summary),
+        _summary_configured_model(llm_summary),
+        _summary_provider_model(llm_summary),
         llm_summary.usage_reporting_mode,
         config.openai_timeout_sec,
         config.openai_max_output_tokens,
@@ -205,10 +237,12 @@ def log_config_summary(
         config.openai_pre_delay_sec,
     )
     logger.info(
-        "run_id=%s LLM summary: provider=%s model=%s usage_reporting_mode=%s",
+        "run_id=%s LLM summary: provider=%s effective_model=%s configured_model=%s provider_model=%s usage_reporting_mode=%s",
         run_context.run_id,
         llm_summary.provider,
-        llm_summary.model,
+        _summary_effective_model(llm_summary),
+        _summary_configured_model(llm_summary),
+        _summary_provider_model(llm_summary),
         llm_summary.usage_reporting_mode,
     )
     logger.info(

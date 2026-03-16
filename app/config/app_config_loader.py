@@ -21,6 +21,7 @@ from app.config.validators import (
     setting_as_str,
     validate_app_settings,
 )
+from app.llm.model_identity import DEFAULT_OPENAI_MODEL
 from app.paths import get_project_paths
 
 
@@ -212,7 +213,7 @@ def load_config_from_env(
     now_tz_mode_input: str = env_now_tz_raw or config_now_tz_raw or "kyiv"
     now_tz_mode: str = normalize_now_tz_mode(now_tz_mode_input, source="now timezone mode")
 
-    openai_model: str = os.getenv("OPENAI_MODEL", "").strip() or "gpt-5.1"
+    openai_model: str = os.getenv("OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
     llm_provider: str = "openai"
     llm_model: str = openai_model
     openai_timeout_sec: float = _load_float_env("STG_OPENAI_TIMEOUT_SEC", 120.0, min_value=1.0)
@@ -220,10 +221,6 @@ def load_config_from_env(
     openai_pre_delay_sec: float = _load_float_env("STG_OPENAI_PRE_DELAY_SEC", 5.0, min_value=0.0)
     llm_source_desc_max_chars: int = 2000
     llm_run_if_single_source: bool = _load_bool_env("STG_LLM_RUN_IF_SINGLE_SOURCE", False)
-    if not os.getenv("GPT_API_KEY", "").strip():
-        raise RuntimeError(
-            "GPT_API_KEY is required when the active merge model uses OpenAI."
-        )
 
     google_auth_mode: str = load_google_auth_mode_from_env()
     google_service_account_path_raw: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "").strip()

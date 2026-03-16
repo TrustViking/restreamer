@@ -5,6 +5,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+BLOCK_GENERATION_MODE_REAL_MERGE: str = "real_merge"
+BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE: str = (
+    "fallback_after_merge_failure"
+)
+PARTIAL_FALLBACK_ARTIFACT_MARKER: str = "Partial fallback"
+FALLBACK_ONLY_ARTIFACT_MARKER: str = "Merge rejected fallback artifact"
+
 
 @dataclass(frozen=True)
 class VideoMetadata:
@@ -107,6 +114,7 @@ class MergedLanguageContent:
     title_audit: Optional[str] = None
     description_audit: Optional[str] = None
     llm_model: Optional[str] = None
+    block_generation_mode: str = BLOCK_GENERATION_MODE_REAL_MERGE
 
 
 @dataclass(frozen=True)
@@ -122,6 +130,16 @@ class PackagingAudit:
     inserted: bool = False
     fallback_used: bool = False
     fallback_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RejectedMergeAttempt:
+    attempt_index: int
+    model_name: str
+    reject_reasons: tuple[str, ...]
+    title: str = ""
+    description: str = ""
+    raw_response_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,9 +165,12 @@ class LanguageMergeAttempt:
     hashtags_source: Optional[str] = None
     body_source: Optional[str] = None
     packaging_audit: Optional[PackagingAudit] = None
+    rejected_attempts: tuple[RejectedMergeAttempt, ...] = ()
+    block_generation_mode: str = BLOCK_GENERATION_MODE_REAL_MERGE
 
 
 @dataclass(frozen=True)
 class MergedPublicationPayload:
     title_text: str
     description_text: str
+    block_generation_mode: str = BLOCK_GENERATION_MODE_REAL_MERGE

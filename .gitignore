@@ -33,6 +33,7 @@ streamertg-*.json
 # Local helper materials
 ########################################
 _HELP/
+example_docs/
 
 ########################################
 # Python / caches

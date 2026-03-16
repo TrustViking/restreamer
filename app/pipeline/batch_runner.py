@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -9,8 +10,9 @@ from zoneinfo import ZoneInfo
 from app.config.settings import AppConfig
 from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.core.env_flags import sheets_link_normalize_report_limit_from_env
-from app.core.models import PlannedVideo, PreparedVideo
+from app.core.models import LanguageMergeAttempt, PlannedVideo, PreparedVideo
 from app.ingest.youtube_metadata import YouTubeMetadataFetcher
+from app.llm.model_compatibility import LlmModelConfigurationError
 from app.llm.merge_run_summary import MergeRunSummary
 from app.net.http_client import HttpClient
 from app.observability.runtime_analytics import (
@@ -54,7 +56,7 @@ from app.telegram.bot_client import TelegramBotClient
 from .daily_doc_publish import publish_daily_document
 from .daily_telegram_publish import publish_daily_telegram
 from .runtime_services import BatchServices, build_runtime_services
-from .slot_processing import SlotProcessResult, process_slot
+from .slot_processing import SlotProcessResult, process_slot, resolve_merge_artifact_status
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,35 @@ class PreparedRunContext:
     sheet_state: BatchSheetState
     prepared_videos: List[PreparedVideo]
     llm_merge_available: bool
+
+
+_MERGE_DOC_PUBLISHABLE_STATUSES: frozenset[str] = frozenset(
+    {"full", "partial", "fallback_only"}
+)
+
+
+def _resolve_merge_doc_gate(
+    *,
+    branch_name: str,
+    merge_artifact_status: str,
+) -> tuple[bool, str]:
+    if branch_name != BRANCH_MERGE:
+        return True, "nomerge_branch_publish_mode"
+    if merge_artifact_status in _MERGE_DOC_PUBLISHABLE_STATUSES:
+        return True, f"{merge_artifact_status}_merge_artifact_present"
+    return False, "no_publishable_merge_artifact"
+
+
+def _resolve_merge_telegram_gate(
+    *,
+    branch_name: str,
+    real_merge_blocks: int,
+) -> tuple[bool, str]:
+    if branch_name != BRANCH_MERGE:
+        return True, "nomerge_branch_publish_mode"
+    if real_merge_blocks > 0:
+        return True, "real_merge_blocks_present"
+    return False, "no_real_merge_blocks"
 
 
 class BatchRunner:
@@ -239,6 +270,81 @@ class BatchRunner:
 
     def _resolve_branch_labels_for_log(self, *, audit_mode: str) -> List[str]:
         return [branch.name for branch in self._resolve_audit_branches(audit_mode=audit_mode, llm_merge_available=True)]
+
+    def _write_merge_reject_debug_artifacts(
+        self,
+        *,
+        slot_results: List[SlotProcessResult],
+        date_key: str,
+        processing_mode: str,
+        branch_label: str,
+    ) -> None:
+        if branch_label != BRANCH_MERGE:
+            return
+        for slot_result in slot_results:
+            for language, merge_attempt in slot_result.merge_audit_by_language.items():
+                if not self._should_write_merge_reject_debug_artifact(
+                    merge_attempt=merge_attempt
+                ):
+                    continue
+                source_count: int = len(slot_result.language_groups.get(language, ()))
+                json_path = self._name_builder.build_merge_reject_debug_json_path(
+                    date_key=date_key,
+                    slot_key=slot_result.slot_key,
+                    language=language,
+                    processing_mode=processing_mode,
+                    source_count=source_count,
+                )
+                if json_path is None:
+                    continue
+                artifact_payload: Dict[str, Any] = {
+                    "case_metadata": {
+                        "date_key": date_key,
+                        "slot_key": slot_result.slot_key,
+                        "language": language,
+                        "source_count": source_count,
+                        "merge_mode": "expanded" if source_count >= 3 else "compact",
+                        "processing_mode": processing_mode,
+                        "publish_source_label": str(
+                            merge_attempt.publish_source_label or ""
+                        ).strip(),
+                    },
+                    "attempts": [
+                        {
+                            "attempt_index": rejected_attempt.attempt_index,
+                            "model": rejected_attempt.model_name,
+                            "reject_reasons": list(rejected_attempt.reject_reasons),
+                            "title": rejected_attempt.title,
+                            "description": rejected_attempt.description,
+                            "raw_response_text": rejected_attempt.raw_response_text,
+                        }
+                        for rejected_attempt in merge_attempt.rejected_attempts
+                    ],
+                }
+                json_path.parent.mkdir(parents=True, exist_ok=True)
+                json_path.write_text(
+                    json.dumps(artifact_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                self._logger.info(
+                    '[%s] merge_reject_debug_json_written date_key=%s slot_key=%s language=%s attempts=%d path="%s"',
+                    branch_label,
+                    date_key,
+                    slot_result.slot_key,
+                    language,
+                    len(merge_attempt.rejected_attempts),
+                    str(json_path),
+                )
+
+    def _should_write_merge_reject_debug_artifact(
+        self,
+        *,
+        merge_attempt: LanguageMergeAttempt,
+    ) -> bool:
+        return (
+            str(merge_attempt.publish_source_label or "").strip() == "merge_failed"
+            and bool(merge_attempt.rejected_attempts)
+        )
 
     def _prepare_run_context(
         self,
@@ -421,6 +527,17 @@ class BatchRunner:
             self._logger.info("audit_branch_done branch=%s status=ok date_key=%s elapsed_ms=%d", branch.name, date_key, branch_total_ms)
             if audit_mode == "audit":
                 self._log_audit_branch_compare(date_key=date_key)
+        except LlmModelConfigurationError as error:
+            branch_failures.append(f"branch={branch.name} date={date_key} failed: {error}")
+            record_branch_failed(branch_label=branch.name)
+            self._logger.error(
+                "audit_branch_done branch=%s status=fatal_model_config date_key=%s reason_code=%s reason=%s",
+                branch.name,
+                date_key,
+                error.reason_code,
+                error.detail,
+            )
+            raise
         except Exception as error:
             branch_failures.append(f"branch={branch.name} date={date_key} failed: {error}")
             self._logger.error("audit_branch_done branch=%s status=failed date_key=%s reason=%s", branch.name, date_key, error)
@@ -443,26 +560,43 @@ class BatchRunner:
         record_date_branch_execution(date_key=date_key, branch_label=branch.name)
         log_date_started(logger=self._logger, date_key=f"{date_key}/{branch.name}", slot_count=len(slots_by_time), item_count=len(date_videos_all))
 
-        merge_snapshot_before: tuple[int, int, int, int, int] = (
+        merge_snapshot_before: tuple[int, int, int, int, int, int, int, int, int] = (
             merge_run_summary.merge_success,
             merge_run_summary.validation_rejected,
             merge_run_summary.retry_used,
             merge_run_summary.final_failure,
             merge_run_summary.paragraph_recovery_used,
+            merge_run_summary.real_merge_blocks,
+            merge_run_summary.merge_candidate_blocks,
+            merge_run_summary.fallback_merge_blocks,
+            merge_run_summary.partial_merge_artifacts,
         )
         slot_results: List[SlotProcessResult] = []
         for slot_time_key in sorted(slots_by_time.keys()):
-            processed_slot_result: SlotProcessResult = process_slot(
-                logger=self._logger,
-                config=self._config,
-                videos=slots_by_time[slot_time_key],
-                date_key=date_key,
-                slot_time_key=slot_time_key,
-                llm_merge_enabled=branch.llm_merge_enabled,
-                cet_tz=self._cet_tz,
-                merge_run_summary=merge_run_summary,
-                branch_label=branch.name,
-            )
+            try:
+                processed_slot_result = process_slot(
+                    logger=self._logger,
+                    config=self._config,
+                    videos=slots_by_time[slot_time_key],
+                    date_key=date_key,
+                    slot_time_key=slot_time_key,
+                    llm_merge_enabled=branch.llm_merge_enabled,
+                    cet_tz=self._cet_tz,
+                    merge_run_summary=merge_run_summary,
+                    branch_label=branch.name,
+                )
+            except LlmModelConfigurationError as error:
+                self._logger.error(
+                    "[%s] slot_process_fatal_model_config date_key=%s slot_key=%s reason_code=%s model=%s provider=%s reason=%s",
+                    branch.name,
+                    date_key,
+                    f"{date_key}_{slot_time_key}",
+                    error.reason_code,
+                    error.model_name or "unknown",
+                    error.provider_name or "unknown",
+                    error.detail,
+                )
+                raise
             for merge_attempt in processed_slot_result.merge_audit_by_language.values():
                 if str(merge_attempt.model_name or "").strip():
                     record_branch_model_used(date_key=date_key, branch_label=branch.name, model_name=merge_attempt.model_name)
@@ -478,12 +612,34 @@ class BatchRunner:
             date_key=date_key,
         )
 
-        merge_snapshot_after: tuple[int, int, int, int, int] = (
+        real_merge_blocks: int = sum(slot.real_merge_blocks for slot in slot_results)
+        merge_candidate_blocks: int = sum(slot.merge_candidate_blocks for slot in slot_results)
+        fallback_merge_blocks: int = sum(slot.fallback_merge_blocks for slot in slot_results)
+        merge_artifact_status: str = resolve_merge_artifact_status(
+            merge_candidate_blocks=merge_candidate_blocks,
+            real_merge_blocks=real_merge_blocks,
+            fallback_merge_blocks=fallback_merge_blocks,
+        )
+        fallback_merge_targets: List[str] = [
+            target
+            for slot in slot_results
+            for target in slot.fallback_merge_targets
+        ]
+        if branch.name == BRANCH_MERGE:
+            if merge_artifact_status == "full":
+                merge_run_summary.record_full_merge_artifact()
+            elif merge_artifact_status == "partial":
+                merge_run_summary.record_partial_merge_artifact()
+        merge_snapshot_after: tuple[int, int, int, int, int, int, int, int, int] = (
             merge_run_summary.merge_success,
             merge_run_summary.validation_rejected,
             merge_run_summary.retry_used,
             merge_run_summary.final_failure,
             merge_run_summary.paragraph_recovery_used,
+            merge_run_summary.real_merge_blocks,
+            merge_run_summary.merge_candidate_blocks,
+            merge_run_summary.fallback_merge_blocks,
+            merge_run_summary.partial_merge_artifacts,
         )
         log_merge_summary(
             logger=self._logger,
@@ -493,44 +649,58 @@ class BatchRunner:
             retry_used=merge_snapshot_after[2] - merge_snapshot_before[2],
             final_failure=merge_snapshot_after[3] - merge_snapshot_before[3],
             paragraph_recovery_used=merge_snapshot_after[4] - merge_snapshot_before[4],
-        )
-
-        real_merge_blocks: int = sum(slot.real_merge_blocks for slot in slot_results)
-        merge_doc_allowed: bool = (
-            branch.name != BRANCH_MERGE or real_merge_blocks > 0
-        )
-        merge_doc_reason: str = (
-            "real_merge_blocks_present"
-            if branch.name == BRANCH_MERGE and merge_doc_allowed
-            else (
-                "nomerge_branch_publish_mode"
-                if branch.name == BRANCH_NOMERGE and merge_doc_allowed
-                else "no_real_merge_blocks"
-            )
+            real_merge_blocks=merge_snapshot_after[5] - merge_snapshot_before[5],
+            merge_candidate_blocks=merge_snapshot_after[6] - merge_snapshot_before[6],
+            fallback_merge_blocks=merge_snapshot_after[7] - merge_snapshot_before[7],
+            partial_merge_artifacts=merge_snapshot_after[8] - merge_snapshot_before[8],
         )
         self._logger.info(
-            "[%s] merge_doc_decision date_key=%s had_real_merge_blocks=%s real_merge_blocks=%d merge_doc_allowed=%s reason=%s",
+            "[%s] merge_artifact_observability date_key=%s merge_artifact_status=%s merged_blocks=%d fallback_blocks=%d merge_candidate_blocks=%d fallback_targets=%s",
+            branch.name,
+            date_key,
+            merge_artifact_status,
+            real_merge_blocks,
+            fallback_merge_blocks,
+            merge_candidate_blocks,
+            ",".join(fallback_merge_targets) or "none",
+        )
+        self._write_merge_reject_debug_artifacts(
+            slot_results=slot_results,
+            date_key=date_key,
+            processing_mode=branch.processing_mode,
+            branch_label=branch.name,
+        )
+        merge_doc_allowed, merge_doc_reason = _resolve_merge_doc_gate(
+            branch_name=branch.name,
+            merge_artifact_status=merge_artifact_status,
+        )
+        self._logger.info(
+            "[%s] merge_doc_decision date_key=%s had_real_merge_blocks=%s real_merge_blocks=%d fallback_merge_blocks=%d merge_artifact_status=%s merge_doc_allowed=%s reason=%s",
             branch.name,
             date_key,
             "yes" if real_merge_blocks > 0 else "no",
             real_merge_blocks,
+            fallback_merge_blocks,
+            merge_artifact_status,
             "yes" if merge_doc_allowed else "no",
             merge_doc_reason,
         )
         if not merge_doc_allowed:
             self._logger.info(
-                "[%s] merge_doc_result date_key=%s merge_doc_created=no reason=no_real_merge_blocks",
+                "[%s] merge_doc_result date_key=%s merge_doc_created=no reason=%s",
                 branch.name,
                 date_key,
+                merge_doc_reason,
             )
             log_docs_publish_summary(logger=self._logger, created=0, failed=0)
             log_telegram_publish_summary(logger=self._logger, sent=0, failed=0, skipped=1)
             record_telegram_skipped(count=1, date_key=date_key, branch_label=branch.name)
             record_branch_completed(branch_label=branch.name)
             self._logger.info(
-                "[%s] merge_artifact_skipped date_key=%s reason=no_real_merge_blocks",
+                "[%s] merge_artifact_skipped date_key=%s reason=%s",
                 branch.name,
                 date_key,
+                merge_doc_reason,
             )
             return
 
@@ -569,6 +739,42 @@ class BatchRunner:
         )
         record_docs_created(count=docs_created_count, date_key=date_key, branch_label=branch.name)
         log_docs_publish_summary(logger=self._logger, created=docs_created_count, failed=0)
+
+        merge_telegram_allowed, merge_telegram_reason = _resolve_merge_telegram_gate(
+            branch_name=branch.name,
+            real_merge_blocks=real_merge_blocks,
+        )
+        self._logger.info(
+            "[%s] merge_telegram_decision date_key=%s had_real_merge_blocks=%s real_merge_blocks=%d fallback_merge_blocks=%d merge_artifact_status=%s merge_telegram_allowed=%s reason=%s",
+            branch.name,
+            date_key,
+            "yes" if real_merge_blocks > 0 else "no",
+            real_merge_blocks,
+            fallback_merge_blocks,
+            merge_artifact_status,
+            "yes" if merge_telegram_allowed else "no",
+            merge_telegram_reason,
+        )
+        if not merge_telegram_allowed:
+            self._logger.info(
+                "[%s] merge_telegram_result date_key=%s telegram_sent=no reason=%s",
+                branch.name,
+                date_key,
+                merge_telegram_reason,
+            )
+            log_telegram_publish_summary(
+                logger=self._logger,
+                sent=0,
+                failed=0,
+                skipped=1,
+            )
+            record_telegram_skipped(
+                count=1,
+                date_key=date_key,
+                branch_label=branch.name,
+            )
+            record_branch_completed(branch_label=branch.name)
+            return
 
         self._log_section(f"Publish Daily Telegram [{branch.name}]")
         telegram_publish_started_at: float = time.perf_counter()

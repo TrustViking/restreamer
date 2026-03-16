@@ -106,28 +106,10 @@ llm:
     Mentally extract key points from each source, preserve all non-trivial source-specific points,
     combine overlaps, compress repetition, and produce one coherent final description.
     Write a strong native YouTube title no longer than 99 characters.
-    Write one cohesive stream description in 2 to 3 compact paragraphs.
-    The description must cover all source inputs that were merged.
-    If one source has a unique fact, topic, event, or angle, keep it unless it is true duplication.
-    Paragraph 1 (hook): write 1 to 2 sentences, emotionally engaging but factual, grounded in the main tension.
+    {merge_contract_block}
     The hook must contain at least one of these punctuation marks: ":" or "!" or "?".
     Keep the hook short (about 220 characters maximum). Optionally start the hook with one light emoji.
-    Paragraph 2 (theses block): start with one short lead-in sentence like "In this stream you'll see:" in {language_name}.
-    Then write 4 to 7 bullet lines, each on its own line.
-    Each bullet line must start with exactly one allowed marker:
-    🔹 general point and default neutral marker
-    📌 key meaning
-    🎤 speaker/comment/interview point
-    🎥 interview/video fragment point
-    ⚖ rights/freedom/law/democracy/justice point
-    🌐 official resource/international/external initiative point
-    ✅ practical actionable takeaway
-    Most bullets should start with 🔹.
-    Accent markers are rare and optional.
-    Use no more than 3 accent markers per theses block.
-    Do not use long dash as the default marker style for bullets.
-    Do not use marker combinations like "— 🎤 ..."; marker must be first token.
-    Do not present bullets as SOURCE 1 / SOURCE 2 / SOURCE 3, and do not lose specifics from any source.
+    If one source has a unique fact, topic, event, or angle, keep it unless it is true duplication.
     Preserve important recognizable names from sources when relevant; never invent names.
     If names are present in sources, surface 1 to 3 key names in bullets or as a short participants line.
     Avoid asserting strong person titles or role labels unless they are clearly necessary and well-supported by the sources.

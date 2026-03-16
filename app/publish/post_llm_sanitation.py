@@ -7,6 +7,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.core.models import (
+    BLOCK_GENERATION_MODE_REAL_MERGE,
     LanguageMergeAttempt,
     MergedLanguageContent,
     MergedPublicationPayload,
@@ -169,6 +170,57 @@ def resolve_post_llm_source_label(
     return default_label
 
 
+def resolve_block_generation_mode(
+    *,
+    merge_attempt: Optional[LanguageMergeAttempt],
+    merged_content: Optional[MergedLanguageContent] = None,
+) -> str:
+    merge_attempt_mode: str = str(
+        getattr(merge_attempt, "block_generation_mode", "") if merge_attempt is not None else ""
+    ).strip()
+    if merge_attempt_mode:
+        return merge_attempt_mode
+    merged_content_mode: str = str(
+        getattr(merged_content, "block_generation_mode", "")
+        if merged_content is not None
+        else ""
+    ).strip()
+    if merged_content_mode:
+        return merged_content_mode
+    return BLOCK_GENERATION_MODE_REAL_MERGE
+
+
+def should_suppress_raw_merge_attempt_publish(
+    *,
+    merge_attempt: Optional[LanguageMergeAttempt],
+    merged_content_available: bool,
+) -> bool:
+    return merge_attempt is not None and not merged_content_available
+
+
+def log_safe_merge_attempt_fallback(
+    *,
+    target: str,
+    merge_attempt: LanguageMergeAttempt,
+    fallback_label: str,
+) -> None:
+    source_label: str = resolve_post_llm_source_label(
+        merge_attempt,
+        default_label="merge_attempt_raw",
+    )
+    raw_response_text: str = str(merge_attempt.raw_response_text or "").strip()
+    LOGGER.info(
+        "merge_publish_fallback target=%s language=%s block_generation_mode=%s merge_source=%s merge_failed=yes raw_output_suppressed=%s raw_chars=%d fallback=%s",
+        target,
+        merge_attempt.language,
+        resolve_block_generation_mode(merge_attempt=merge_attempt),
+        source_label,
+        "yes" if bool(raw_response_text) else "no",
+        len(raw_response_text),
+        fallback_label,
+    )
+
+
 def build_sanitized_merged_publication_payload(
     *,
     language: str,
@@ -192,6 +244,10 @@ def build_sanitized_merged_publication_payload(
     source_label: str = resolve_post_llm_source_label(
         merge_attempt,
         default_label="merged_publish",
+    )
+    block_generation_mode: str = resolve_block_generation_mode(
+        merge_attempt=merge_attempt,
+        merged_content=merged_content,
     )
     source_videos_sequence: Sequence[PlannedVideo] = tuple(source_videos or ())
     official_links_extraction: _OfficialLinksExtractionResult = _extract_official_links_blocks(
@@ -282,6 +338,7 @@ def build_sanitized_merged_publication_payload(
     return MergedPublicationPayload(
         title_text=sanitize_post_llm_title(raw_title),
         description_text=final_description,
+        block_generation_mode=block_generation_mode,
     )
 
 

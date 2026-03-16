@@ -9,6 +9,12 @@ from app.core.constants import LOGGER_NAME_ENV_VAR
 from app.core.env_flags import llm_allow_in_dry_run_from_env
 from app.core.error_summary import summarize_error
 from app.core.branching import audit_branch_labels
+from app.llm.model_compatibility import (
+    LlmModelConfigurationError,
+    OpenAIRequestCompatibility,
+    resolve_openai_request_compatibility,
+)
+from app.llm.openai_client import probe_openai_model_access
 from app.observability.runtime_analytics import (
     log_error_event,
     log_warning_informational,
@@ -37,6 +43,15 @@ def _resolve_llm_merge_enabled(
     run_id: str,
 ) -> bool:
     max_attempts: int = 2
+    effective_model: str = str(
+        getattr(llm_summary, "effective_model", getattr(llm_summary, "model", "")) or ""
+    ).strip()
+    configured_model: str = str(
+        getattr(llm_summary, "configured_model", effective_model) or ""
+    ).strip()
+    provider_model: str = str(
+        getattr(llm_summary, "provider_model", effective_model) or ""
+    ).strip()
     log_section(logger=logger, title="LLM API")
     logger.info(
         "run_id=%s Processing mode selected: audit audit_mode=%s",
@@ -53,9 +68,11 @@ def _resolve_llm_merge_enabled(
         llm_summary.provider,
     )
     logger.info(
-        "LLM policy: provider=%s model=%s usage_reporting_mode=%s",
+        "LLM policy: provider=%s effective_model=%s configured_model=%s provider_model=%s usage_reporting_mode=%s",
         llm_summary.provider,
-        llm_summary.model,
+        effective_model,
+        configured_model,
+        provider_model,
         llm_summary.usage_reporting_mode,
     )
     logger.info(
@@ -67,12 +84,15 @@ def _resolve_llm_merge_enabled(
         config.openai_pre_delay_sec,
     )
     logger.info(
-        "OpenAI merge policy model=%s timeout_sec=%.1f",
-        llm_summary.model,
+        "OpenAI merge policy effective_model=%s configured_model=%s provider_model=%s timeout_sec=%.1f",
+        effective_model,
+        configured_model,
+        provider_model,
         config.openai_timeout_sec,
     )
     logger.info(
-        "LLM usage reporting note: provider=openai openai_usage_summary_expected=yes reporting_mode=%s",
+        "LLM usage reporting note: scope=organization_aggregate source_of_truth_for_run=no current_run_effective_model=%s reporting_mode=%s",
+        effective_model or "unknown",
         llm_summary.usage_reporting_mode,
     )
     provider_api_ready: bool = bool(os.getenv("GPT_API_KEY", "").strip())
@@ -104,6 +124,47 @@ def _resolve_llm_merge_enabled(
                 "LLM selection: disabled (missing provider prerequisites). Continue without merge stage."
             )
     return llm_merge_enabled
+
+
+def _validate_openai_merge_model_or_raise(
+    *,
+    logger: logging.Logger,
+    config: AppConfig,
+    effective_model: str,
+    configured_model: str,
+    provider_model: str,
+) -> None:
+    compatibility: OpenAIRequestCompatibility = resolve_openai_request_compatibility(
+        model_name=effective_model,
+        structured_output_requested=True,
+        temperature_requested=True,
+    )
+    logger.info(
+        "OpenAI model compatibility effective_model=%s configured_model=%s provider_model=%s model_family=%s reasoning_effort=%s structured_output=%s temperature=%s capability_source=%s startup_probe=models.retrieve",
+        effective_model or "unknown",
+        configured_model or "unknown",
+        provider_model or "unknown",
+        compatibility.model_family,
+        "enabled" if compatibility.reasoning_effort_enabled else "disabled",
+        (
+            "json_schema"
+            if compatibility.structured_output_requested and compatibility.structured_output_supported
+            else "disabled"
+        ),
+        "enabled" if compatibility.temperature_enabled else "disabled",
+        compatibility.capability_source,
+    )
+    probe_openai_model_access(
+        provider_name="openai",
+        model_name=effective_model,
+        timeout_sec=float(getattr(config, "openai_timeout_sec", 30.0)),
+    )
+    logger.info(
+        "OpenAI model probe passed effective_model=%s configured_model=%s provider_model=%s",
+        effective_model or "unknown",
+        configured_model or "unknown",
+        provider_model or "unknown",
+    )
 
 
 def run_startup_health_checks(
@@ -235,6 +296,47 @@ def run_startup_health_checks(
         resolved_audit_mode=resolved_audit_mode,
         run_id=run_id,
     )
+    effective_model: str = str(
+        getattr(llm_summary, "effective_model", getattr(llm_summary, "model", "")) or ""
+    ).strip()
+    configured_model: str = str(
+        getattr(llm_summary, "configured_model", effective_model) or ""
+    ).strip()
+    provider_model: str = str(
+        getattr(llm_summary, "provider_model", effective_model) or ""
+    ).strip()
+    if llm_merge_enabled and str(llm_summary.provider or "").strip().lower() == "openai":
+        try:
+            _validate_openai_merge_model_or_raise(
+                logger=logger,
+                config=config,
+                effective_model=effective_model,
+                configured_model=configured_model,
+                provider_model=provider_model,
+            )
+        except LlmModelConfigurationError as error:
+            log_error_event(
+                logger,
+                "OpenAI model validation failed: provider=%s effective_model=%s configured_model=%s provider_model=%s reason_code=%s status_code=%s api_error_code=%s api_error_param=%s detail=%s",
+                llm_summary.provider,
+                effective_model or "unknown",
+                configured_model or "unknown",
+                provider_model or "unknown",
+                error.reason_code,
+                str(error.status_code if error.status_code is not None else "unknown"),
+                error.api_error_code or "none",
+                error.api_error_param or "none",
+                error.detail,
+                reason_code=error.reason_code,
+            )
+            raise
+        except Exception as error:
+            logger.warning(
+                "OpenAI model probe could not complete: provider=%s effective_model=%s decision=continue detail=%s",
+                llm_summary.provider,
+                effective_model or "unknown",
+                summarize_error(error),
+            )
 
     log_section(logger=logger, title="Telegram API")
     try:

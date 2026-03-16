@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from app.config.app_config_loader import load_config_from_env
 from app.llm.provider_factory import get_llm_provider
+from app.observability.startup_summary import build_llm_summary_snapshot
 from app.paths import get_project_paths
 
 
@@ -110,6 +111,18 @@ app:
     def test_provider_factory_returns_openai_provider_for_active_model(self) -> None:
         provider = get_llm_provider(config=SimpleNamespace(llm_model="gpt-5.2"))
         self.assertEqual("openai", provider.name)
+
+    def test_llm_summary_snapshot_prefers_effective_runtime_model_over_stale_provider_field(self) -> None:
+        config = SimpleNamespace(
+            llm_provider="openai",
+            llm_model="gpt-5.2",
+            openai_model="gpt-5.1",
+        )
+        summary = build_llm_summary_snapshot(config)
+        self.assertEqual("gpt-5.2", summary.effective_model)
+        self.assertEqual("gpt-5.2", summary.configured_model)
+        self.assertEqual("gpt-5.1", summary.provider_model)
+        self.assertEqual("gpt-5.2", summary.model)
 
 
 if __name__ == "__main__":

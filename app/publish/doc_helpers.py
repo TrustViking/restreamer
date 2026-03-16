@@ -11,20 +11,30 @@ from app.core.env_flags import (
     strip_chapter_timestamps_enabled_from_env,
 )
 from app.core.models import (
+    BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
+    FALLBACK_ONLY_ARTIFACT_MARKER,
+    PARTIAL_FALLBACK_ARTIFACT_MARKER,
     LanguageMergeAttempt,
     MergedLanguageContent,
     MergedPublicationPayload,
     PlannedVideo,
+    RejectedMergeAttempt,
 )
 from app.planning import planned_video_block_language
 from app.publish.post_llm_sanitation import (
     build_sanitized_merged_publication_payload,
-    resolve_post_llm_source_label,
-    sanitize_post_llm_text_for_merged_publish,
+    log_safe_merge_attempt_fallback,
+    resolve_block_generation_mode,
+    should_suppress_raw_merge_attempt_publish,
 )
 
 
 LOGGER = _get_logger_impl(__name__)
+
+_REJECTED_ATTEMPTS_NOTICE: str = (
+    "MODEL OUTPUTS REJECTED BY VALIDATION. The script received these merge attempts, "
+    "but all were rejected by the validator. Saved below for analysis."
+)
 
 
 def _language_heading(language: str, templates: Optional[AppTemplates]) -> str:
@@ -62,6 +72,7 @@ def _build_titles_summary(
     merged_content: Optional[MergedLanguageContent] = None,
     merge_attempt: Optional[LanguageMergeAttempt] = None,
     use_audit_text: bool = True,
+    prefer_rejected_attempts: bool = False,
 ) -> str:
     if merged_content:
         language: str = planned_video_block_language(videos[0]) if videos else "unknown"
@@ -74,6 +85,12 @@ def _build_titles_summary(
         )
         return payload.title_text
     if merge_attempt is not None:
+        if prefer_rejected_attempts:
+            rejected_titles_summary: str = _build_rejected_attempt_titles_summary(
+                merge_attempt=merge_attempt
+            )
+            if rejected_titles_summary:
+                return rejected_titles_summary
         salvaged_title: str = str(merge_attempt.salvaged_title or "").strip()
         if salvaged_title:
             return salvaged_title
@@ -95,12 +112,102 @@ def _fallback_source_description_text(
     return description_text
 
 
+def _has_rejected_attempt_details(merge_attempt: Optional[LanguageMergeAttempt]) -> bool:
+    return bool(
+        merge_attempt is not None
+        and str(getattr(merge_attempt, "publish_source_label", "") or "").strip()
+        == "merge_failed"
+        and getattr(merge_attempt, "rejected_attempts", ())
+    )
+
+
+def _reject_reasons_label(rejected_attempt: RejectedMergeAttempt) -> str:
+    return ",".join(rejected_attempt.reject_reasons) or "unknown"
+
+
+def _build_rejected_attempt_titles_summary(
+    *,
+    merge_attempt: LanguageMergeAttempt,
+) -> str:
+    if not _has_rejected_attempt_details(merge_attempt):
+        return ""
+    lines: List[str] = [_REJECTED_ATTEMPTS_NOTICE, ""]
+    for rejected_attempt in merge_attempt.rejected_attempts:
+        title_text: str = str(rejected_attempt.title or "").strip() or "(empty title)"
+        lines.append(
+            " | ".join(
+                (
+                    f"attempt={rejected_attempt.attempt_index}",
+                    f"model={rejected_attempt.model_name or 'unknown'}",
+                    f"reject={_reject_reasons_label(rejected_attempt)}",
+                )
+            )
+        )
+        lines.append(title_text)
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _build_rejected_attempt_descriptions_summary(
+    *,
+    merge_attempt: LanguageMergeAttempt,
+) -> str:
+    if not _has_rejected_attempt_details(merge_attempt):
+        return ""
+    lines: List[str] = [_REJECTED_ATTEMPTS_NOTICE, ""]
+    for rejected_attempt in merge_attempt.rejected_attempts:
+        description_text: str = (
+            str(rejected_attempt.description or "").strip()
+            or "(empty description)"
+        )
+        lines.append(
+            " | ".join(
+                (
+                    f"attempt={rejected_attempt.attempt_index}",
+                    f"model={rejected_attempt.model_name or 'unknown'}",
+                    f"reject={_reject_reasons_label(rejected_attempt)}",
+                )
+            )
+        )
+        lines.append(description_text)
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _build_rejected_attempt_rows(
+    *,
+    merge_attempt: Optional[LanguageMergeAttempt],
+) -> List[Tuple[str, bool]]:
+    if not _has_rejected_attempt_details(merge_attempt):
+        return []
+    assert merge_attempt is not None
+    rows: List[Tuple[str, bool]] = [(_REJECTED_ATTEMPTS_NOTICE, True)]
+    for rejected_attempt in merge_attempt.rejected_attempts:
+        context_label: str = (
+            f"ATTEMPT {rejected_attempt.attempt_index} | "
+            f"MODEL: {rejected_attempt.model_name or 'unknown'} | "
+            f"REJECT: {_reject_reasons_label(rejected_attempt)}"
+        )
+        rows.append((f"REJECTED TITLE | {context_label}", True))
+        rows.append((str(rejected_attempt.title or "").strip() or "(empty title)", False))
+        rows.append((f"REJECTED DESCRIPTION | {context_label}", True))
+        rows.append(
+            (
+                str(rejected_attempt.description or "").strip()
+                or "(empty description)",
+                False,
+            )
+        )
+    return rows
+
+
 def _build_descriptions_summary(
     videos: List[PlannedVideo],
     templates: Optional[AppTemplates],
     merged_content: Optional[MergedLanguageContent] = None,
     merge_attempt: Optional[LanguageMergeAttempt] = None,
     use_audit_text: bool = True,
+    prefer_rejected_attempts: bool = False,
 ) -> str:
     source_descriptions: List[str] = []
     for video in videos:
@@ -117,17 +224,21 @@ def _build_descriptions_summary(
         )
         return payload.description_text
     if merge_attempt is not None:
-        raw_text: str = sanitize_post_llm_text_for_merged_publish(
-            text=str(merge_attempt.raw_response_text or "").strip(),
-            language=merge_attempt.language,
-            source_label=resolve_post_llm_source_label(
-                merge_attempt,
-                default_label="merge_attempt_raw",
-            ),
-            source_videos=videos,
-        )
-        if raw_text:
-            return f"{raw_text}\n\n{source_lines}".strip()
+        if prefer_rejected_attempts:
+            rejected_descriptions_summary: str = _build_rejected_attempt_descriptions_summary(
+                merge_attempt=merge_attempt
+            )
+            if rejected_descriptions_summary:
+                return rejected_descriptions_summary
+        if should_suppress_raw_merge_attempt_publish(
+            merge_attempt=merge_attempt,
+            merged_content_available=False,
+        ):
+            log_safe_merge_attempt_fallback(
+                target="doc",
+                merge_attempt=merge_attempt,
+                fallback_label="source_descriptions",
+            )
         return source_lines
     if not videos:
         return "1) ..."
@@ -146,6 +257,32 @@ def _build_preview_placeholder_rows(
     if not videos:
         return [(" ", False)]
     return [(" ", False) for _ in videos]
+
+
+def _artifact_heading_for_block(
+    *,
+    base_heading: str,
+    merged_payload: Optional[MergedPublicationPayload],
+    merge_attempt: Optional[LanguageMergeAttempt],
+    merged_content: Optional[MergedLanguageContent],
+    artifact_status: str = "none",
+) -> str:
+    block_generation_mode: str = (
+        merged_payload.block_generation_mode
+        if merged_payload is not None
+        else resolve_block_generation_mode(
+            merge_attempt=merge_attempt,
+            merged_content=merged_content,
+        )
+    )
+    if block_generation_mode == BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE:
+        marker_text: str = (
+            FALLBACK_ONLY_ARTIFACT_MARKER
+            if artifact_status == "fallback_only"
+            else PARTIAL_FALLBACK_ARTIFACT_MARKER
+        )
+        return f"{base_heading} ({marker_text})"
+    return base_heading
 
 
 def _extract_youtube_video_id(raw_value: str) -> Optional[str]:
@@ -233,6 +370,7 @@ def _build_language_table_rows(
     merge_attempt: Optional[LanguageMergeAttempt] = None,
     time_display: Optional[str] = None,
     templates: Optional[AppTemplates] = None,
+    artifact_status: str = "none",
 ) -> List[Tuple[str, bool]]:
     if templates is None:
         raise RuntimeError("Templates are required for language table labels.")
@@ -264,6 +402,13 @@ def _build_language_table_rows(
             use_audit_text=True,
             source_videos=videos,
         )
+    heading = _artifact_heading_for_block(
+        base_heading=heading,
+        merged_payload=merged_payload,
+        merge_attempt=merge_attempt,
+        merged_content=merged_content,
+        artifact_status=artifact_status,
+    )
     description_text: str = (
         merged_payload.description_text
         if merged_payload is not None
@@ -295,4 +440,5 @@ def _build_language_table_rows(
         (preview_label, True),
     ]
     rows.extend(_build_preview_placeholder_rows(videos))
+    rows.extend(_build_rejected_attempt_rows(merge_attempt=merge_attempt))
     return rows

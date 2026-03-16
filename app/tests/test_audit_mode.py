@@ -12,7 +12,8 @@ from app.config.validators import normalize_audit_mode, normalize_processing_mod
 from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.core.models import PlannedVideo, VideoMetadata
 from app.llm.merge_run_summary import MergeRunSummary
-from app.pipeline.batch_runner import BatchRunner
+from app.llm.model_compatibility import LlmModelConfigurationError
+from app.pipeline.batch_runner import AuditBranch, BatchRunner
 from app.pipeline.slot_processing import process_slot
 
 
@@ -106,6 +107,41 @@ class AuditModeRunnerTests(unittest.TestCase):
         self.assertEqual(1, build_prepared_mock.call_count)
         self.assertEqual(1, materialize_mock.call_count)
         self.assertEqual(2, derive_mock.call_count)
+
+    def test_fatal_model_config_error_stops_remaining_slot_processing(self) -> None:
+        runner = self._build_runner()
+        date_videos_all = [SimpleNamespace()]
+        fatal_error = LlmModelConfigurationError(
+            provider_name="openai",
+            model_name="gpt-5.4",
+            reason_code="openai_model_access_denied",
+            detail="Project does not have access to model `gpt-5.4`",
+            status_code=403,
+            api_error_code="access_denied",
+            api_error_param="model",
+        )
+        with patch.object(
+            runner,
+            "_group_date_videos_by_slot_time",
+            return_value={"0900": [SimpleNamespace()], "1000": [SimpleNamespace()]},
+        ), patch(
+            "app.pipeline.batch_runner.process_slot",
+            side_effect=[fatal_error, MagicMock()],
+        ) as process_slot_mock:
+            with self.assertRaises(LlmModelConfigurationError):
+                runner._run_branch_for_date(
+                    services=SimpleNamespace(),
+                    branch=AuditBranch(
+                        name=BRANCH_MERGE,
+                        processing_mode="merge",
+                        llm_merge_enabled=True,
+                    ),
+                    date_key="010130",
+                    date_videos_all=date_videos_all,
+                    dry_run=True,
+                    merge_run_summary=MergeRunSummary(),
+                )
+        self.assertEqual(1, process_slot_mock.call_count)
 
 
 class SlotMergePolicyTests(unittest.TestCase):

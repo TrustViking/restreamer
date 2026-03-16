@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from app.config.settings import AppConfig
+from app.llm.model_identity import resolve_effective_llm_model
 from app.llm.openai_client import LlmTraceContext, OpenAITransportResult
 from app.llm.providers.base import LlmProvider, ProviderModels
 
@@ -11,9 +12,10 @@ class OpenAIProvider(LlmProvider):
     name: str = "openai"
 
     def models(self, *, config: AppConfig) -> ProviderModels:
+        effective_model: str = resolve_effective_llm_model(config)
         return ProviderModels(
-            primary=str(getattr(config, "openai_model", "") or "").strip() or "gpt-5.1",
-            fallback=str(getattr(config, "openai_model", "") or "").strip() or "gpt-5.1",
+            primary=effective_model,
+            fallback=effective_model,
         )
 
     def timeout_sec(self, *, config: AppConfig) -> float:

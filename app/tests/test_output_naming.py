@@ -87,7 +87,7 @@ class OutputNamingTests(unittest.TestCase):
                         merged=None,
                         error_summary=None,
                         generator_model_name="",
-                        used_model_names=(" ", "gpt-5.1-mini", "deepseek-chat"),
+                        used_model_names=(" ", "gpt-5.1-mini", "gpt-4o"),
                     ),
                 }
             )
@@ -98,11 +98,11 @@ class OutputNamingTests(unittest.TestCase):
         )
         self.assertEqual(("gpt-5.1", "gpt-5.1-mini"), used_models.used_generation_models)
         self.assertEqual(
-            ("gpt-5.1", "gpt-5.1-mini", "deepseek-chat"),
+            ("gpt-5.1", "gpt-5.1-mini", "gpt-4o"),
             used_models.all_used_models,
         )
         self.assertEqual(
-            "_[gpt-5.1,gpt-5.1-mini,deepseek-chat]",
+            "_[gpt-5.1,gpt-5.1-mini,gpt-4o]",
             render_doc_title_models_segment(used_runtime_models=used_models),
         )
 

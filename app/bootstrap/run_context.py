@@ -48,6 +48,8 @@ class RunContext:
     sheets_link_writeback: bool
     local_doc_export_enabled: bool
     strip_chapter_timestamps: bool
+    llm_model_configured: str = ""
+    llm_provider_model: str = ""
 
 
 def build_startup_context(
@@ -98,6 +100,15 @@ def build_run_context(
     strip_chapter_timestamps: bool,
 ) -> RunContext:
     audit_branches: list[str] = audit_branch_labels(audit_mode=audit_mode)
+    effective_model: str = str(
+        getattr(llm_summary, "effective_model", getattr(llm_summary, "model", "")) or ""
+    ).strip()
+    configured_model: str = str(
+        getattr(llm_summary, "configured_model", effective_model) or ""
+    ).strip()
+    provider_model: str = str(
+        getattr(llm_summary, "provider_model", effective_model) or ""
+    ).strip()
     return RunContext(
         run_id=run_id,
         processing_mode=processing_mode,
@@ -109,7 +120,9 @@ def build_run_context(
         google_enabled=config.google_enabled,
         telegram_enabled=config.telegram_enabled,
         llm_provider=config.llm_provider,
-        llm_model=llm_summary.model,
+        llm_model=effective_model,
+        llm_model_configured=configured_model,
+        llm_provider_model=provider_model,
         llm_usage_reporting_mode=llm_summary.usage_reporting_mode,
         sheet_id=config.google_sheets_id,
         sheet_range=config.google_sheets_range,

@@ -171,6 +171,24 @@ class NamePathBuilder:
         safe_stem = safe_stem[: self._max_filename_stem].rstrip("._-") or "document"
         return Path(base_dir) / f"{safe_stem}.docx"
 
+    def build_merge_reject_debug_json_path(
+        self,
+        *,
+        date_key: str,
+        slot_key: str,
+        language: str,
+        processing_mode: str,
+        source_count: int,
+    ) -> Optional[Path]:
+        if self._local_doc_dir_template is None:
+            return None
+        base_dir: Path = Path(self._local_doc_dir_template.format(date=date_key))
+        safe_stem: str = _normalize_local_filename_stem(
+            f"{date_key}_{processing_mode}_{slot_key}_{language}_sources{source_count}_merge_rejected"
+        )
+        safe_stem = safe_stem[: self._max_filename_stem].rstrip("._-") or "merge_rejected"
+        return base_dir / "merge_reject_debug_json" / f"{safe_stem}.json"
+
     def build_image_path(
         self,
         language: str,

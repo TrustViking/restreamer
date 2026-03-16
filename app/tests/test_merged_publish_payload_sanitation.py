@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.core.models import MergedLanguageContent
+from app.core.models import BLOCK_GENERATION_MODE_REAL_MERGE, MergedLanguageContent
 from app.publish.post_llm_sanitation import build_sanitized_merged_publication_payload
 
 
@@ -50,6 +50,7 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
         self.assertIn("merged_publish_sanitation_applied=yes", logs)
         self.assertIn("hashtags_split_from_cta=yes", logs)
         self.assertIn("tail_layout=body_blank_cta_blank_hashtags", logs)
+        self.assertEqual(BLOCK_GENERATION_MODE_REAL_MERGE, payload.block_generation_mode)
 
     def test_already_separate_hashtags_stay_stable(self) -> None:
         merged_content: MergedLanguageContent = self._payload(
