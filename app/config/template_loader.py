@@ -6,7 +6,10 @@ from typing import Any, Dict
 
 import yaml
 
+from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppTemplates
+
+LOGGER = _get_logger_impl(__name__)
 
 
 def must_get_template_value(payload: Dict[str, Any], dotted_key: str) -> str:
@@ -26,6 +29,49 @@ def must_get_template_object(payload: Dict[str, Any], dotted_key: str) -> Any:
     for key in dotted_key.split("."):
         if not isinstance(current, dict) or key not in current:
             raise RuntimeError(f"Template key is missing: {dotted_key}")
+        current = current[key]
+    return current
+
+
+def _get_optional_template_value(
+    payload: Dict[str, Any],
+    dotted_key: str,
+    *,
+    default_value: str = "",
+) -> str:
+    current: Any = payload
+    for key in dotted_key.split("."):
+        if not isinstance(current, dict) or key not in current:
+            LOGGER.warning(
+                "Optional template key is missing: %s. Using default value.",
+                dotted_key,
+            )
+            return default_value
+        current = current[key]
+    value: str = str(current or "").strip()
+    if not value:
+        LOGGER.warning(
+            "Optional template key is empty: %s. Using default value.",
+            dotted_key,
+        )
+        return default_value
+    return value
+
+
+def _get_optional_template_object(
+    payload: Dict[str, Any],
+    dotted_key: str,
+    *,
+    default_value: Any,
+) -> Any:
+    current: Any = payload
+    for key in dotted_key.split("."):
+        if not isinstance(current, dict) or key not in current:
+            LOGGER.warning(
+                "Optional template key is missing: %s. Using default value.",
+                dotted_key,
+            )
+            return default_value
         current = current[key]
     return current
 
@@ -51,9 +97,32 @@ def load_templates_from_path(path: Path) -> AppTemplates:
         payload, "google_doc.language_headings"
     )
     llm_language_names_raw: Any = must_get_template_object(payload, "llm.language_names")
+    llm_merge_contracts_raw: Any = _get_optional_template_object(
+        payload,
+        "llm.merge_contracts",
+        default_value={},
+    )
+    llm_merge_retry_reinforcements_raw: Any = _get_optional_template_object(
+        payload,
+        "llm.merge_retry_reinforcements",
+        default_value={},
+    )
     files_language_codes_raw: Any = must_get_template_object(
         payload, "files.language_codes"
     )
+
+    if not isinstance(llm_merge_contracts_raw, dict):
+        LOGGER.warning(
+            "Optional template key llm.merge_contracts has invalid type %s. Using empty mapping.",
+            type(llm_merge_contracts_raw).__name__,
+        )
+        llm_merge_contracts_raw = {}
+    if not isinstance(llm_merge_retry_reinforcements_raw, dict):
+        LOGGER.warning(
+            "Optional template key llm.merge_retry_reinforcements has invalid type %s. Using empty mapping.",
+            type(llm_merge_retry_reinforcements_raw).__name__,
+        )
+        llm_merge_retry_reinforcements_raw = {}
 
     try:
         google_doc_table_labels_json: str = json.dumps(
@@ -66,6 +135,14 @@ def load_templates_from_path(path: Path) -> AppTemplates:
             google_doc_language_headings_raw, ensure_ascii=False
         )
         llm_language_names_json: str = json.dumps(llm_language_names_raw, ensure_ascii=False)
+        llm_merge_contracts_json: str = json.dumps(
+            llm_merge_contracts_raw,
+            ensure_ascii=False,
+        )
+        llm_merge_retry_reinforcements_json: str = json.dumps(
+            llm_merge_retry_reinforcements_raw,
+            ensure_ascii=False,
+        )
         files_language_codes_json: str = json.dumps(
             files_language_codes_raw, ensure_ascii=False
         )
@@ -97,6 +174,15 @@ def load_templates_from_path(path: Path) -> AppTemplates:
         ),
         llm_startup_ping_prompt=must_get_template_value(payload, "llm.startup_ping_prompt"),
         llm_language_names_json=llm_language_names_json,
+        llm_merge_structural_rules=_get_optional_template_value(
+            payload,
+            "llm.merge_structural_rules",
+            default_value="",
+        ),
+        llm_merge_contracts_json=llm_merge_contracts_json,
+        llm_merge_retry_reinforcements_json=llm_merge_retry_reinforcements_json,
+        llm_merge_contracts=llm_merge_contracts_raw,
+        llm_merge_retry_reinforcements=llm_merge_retry_reinforcements_raw,
         files_preview_name_template=must_get_template_value(
             payload, "files.preview_name_template"
         ),

@@ -8,14 +8,14 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
-from app.llm.model_compatibility import (
+from app.llm.models.model_compatibility import (
     LlmModelConfigurationError,
     LlmRequestErrorClassification,
     OpenAIRequestCompatibility,
     classify_openai_request_error,
     resolve_openai_request_compatibility,
 )
-from app.llm.merge_parser import extract_json_object_candidates, parse_json_tolerant, strip_json_code_fences
+from app.llm.merges.merge_parser import extract_json_object_candidates, parse_json_tolerant, strip_json_code_fences
 
 try:
     from openai import OpenAI

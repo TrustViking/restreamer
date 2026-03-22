@@ -136,6 +136,28 @@ def classify_openai_request_error(error: Exception) -> LlmRequestErrorClassifica
             api_error_param=api_error_param,
             detail=detail,
         )
+    error_text_lower: str = str(error).lower()
+    quota_signals: tuple[str, ...] = (
+        "exceeded your current quota",
+        "insufficient_quota",
+        "billing",
+        "quota",
+        "balance",
+        "credits",
+    )
+    if status_code == 429 and any(
+        signal in detail_lower or signal in error_text_lower
+        for signal in quota_signals
+    ):
+        return LlmRequestErrorClassification(
+            reason_code="openai_quota_exhausted",
+            retryable=False,
+            fatal_model_configuration=False,
+            status_code=status_code,
+            api_error_code=api_error_code,
+            api_error_param=api_error_param,
+            detail=detail,
+        )
     if error_type_name == "RateLimitError" or status_code == 429:
         return LlmRequestErrorClassification(
             reason_code="openai_rate_limit",

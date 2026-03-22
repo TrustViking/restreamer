@@ -16,6 +16,7 @@ class MergeRunSummary:
     fallback_merge_blocks: int = 0
     full_merge_artifacts: int = 0
     partial_merge_artifacts: int = 0
+    provider_quota_exhausted: bool = False
 
     @property
     def structured_ok(self) -> int:
@@ -58,6 +59,9 @@ class MergeRunSummary:
 
     def record_partial_merge_artifact(self) -> None:
         self.partial_merge_artifacts += 1
+
+    def record_quota_exhausted(self) -> None:
+        self.provider_quota_exhausted = True
 
     @property
     def had_real_merge_blocks(self) -> bool:

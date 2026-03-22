@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from app.llm.merge_run_summary import MergeRunSummary
+from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.observability.runtime_analytics import log_run_completed
 
 

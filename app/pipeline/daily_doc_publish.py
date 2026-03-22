@@ -12,14 +12,12 @@ from app.core.branching import BRANCH_MERGE
 from app.core.error_summary import summarize_error
 from app.core.models import (
     BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
-    FALLBACK_ONLY_ARTIFACT_MARKER,
-    PARTIAL_FALLBACK_ARTIFACT_MARKER,
     LanguageMergeAttempt,
     MergedLanguageContent,
     PlannedVideo,
 )
 from app.google import GoogleDocsClient, GoogleDriveClient
-from app.llm.model_identity import resolve_effective_llm_model
+from app.llm.models.model_identity import resolve_effective_llm_model
 from app.observability.content_contract import (
     analyze_content_contract,
     build_contract_transition,
@@ -106,12 +104,7 @@ def _artifact_heading_label(
         merged_content=merged_content,
     )
     if block_generation_mode == BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE:
-        marker_text: str = (
-            FALLBACK_ONLY_ARTIFACT_MARKER
-            if artifact_status == "fallback_only"
-            else PARTIAL_FALLBACK_ARTIFACT_MARKER
-        )
-        return f"{heading} ({marker_text})"
+        return f"{heading} ⚠ [merge failed — source list]"
     return heading
 
 

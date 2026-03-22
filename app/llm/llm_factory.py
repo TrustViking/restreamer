@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppConfig
-from app.llm.model_identity import build_effective_llm_model_identity
+from app.llm.models.model_identity import build_effective_llm_model_identity
 from app.llm.providers import LlmProvider, OpenAIProvider
 
 LOGGER = _get_logger_impl(__name__)

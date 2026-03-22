@@ -67,13 +67,23 @@ def _numbered_original_titles(videos: List[PlannedVideo]) -> str:
     return _numbered_lines(source_titles)
 
 
+def _is_merge_payload_blocked(payload: MergedPublicationPayload) -> bool:
+    has_publish_stage_duplicate: bool = bool(
+        getattr(payload, "has_publish_stage_duplicate", False)
+    )
+    has_publish_stage_opener_cta: bool = bool(
+        getattr(payload, "has_publish_stage_opener_cta", False)
+    )
+    return has_publish_stage_duplicate or has_publish_stage_opener_cta
+
+
 def _build_merged_publication_payload(
     *,
     videos: List[PlannedVideo],
     merged_content: MergedLanguageContent,
     merge_attempt: Optional[LanguageMergeAttempt],
     use_audit_text: bool,
-) -> MergedPublicationPayload:
+) -> Optional[MergedPublicationPayload]:
     language: str = planned_video_block_language(videos[0]) if videos else "unknown"
     sanitized_payload: MergedPublicationPayload = (
         build_sanitized_merged_publication_payload(
@@ -84,6 +94,18 @@ def _build_merged_publication_payload(
             source_videos=videos,
         )
     )
+    if _is_merge_payload_blocked(sanitized_payload):
+        LOGGER.warning(
+            "merge_publish_gate_blocked target=telegram language=%s has_publish_stage_duplicate=%s has_publish_stage_opener_cta=%s fallback=nomerge",
+            language,
+            "yes"
+            if bool(getattr(sanitized_payload, "has_publish_stage_duplicate", False))
+            else "no",
+            "yes"
+            if bool(getattr(sanitized_payload, "has_publish_stage_opener_cta", False))
+            else "no",
+        )
+        return None
     return MergedPublicationPayload(
         title_text=sanitized_payload.title_text.strip(),
         description_text=sanitized_payload.description_text.strip(),
@@ -98,13 +120,15 @@ def build_titles_summary(
     use_audit_text: bool = True,
 ) -> str:
     if merged_content:
-        payload: MergedPublicationPayload = _build_merged_publication_payload(
+        payload: Optional[MergedPublicationPayload] = _build_merged_publication_payload(
             videos=videos,
             merged_content=merged_content,
             merge_attempt=merge_attempt,
             use_audit_text=use_audit_text,
         )
-        return payload.title_text
+        if payload is not None:
+            return payload.title_text
+        return _numbered_original_titles(videos) if videos else "1) ..."
     if merge_attempt is not None:
         salvaged_title: str = str(merge_attempt.salvaged_title or "").strip()
         if salvaged_title:
@@ -127,13 +151,15 @@ def build_descriptions_summary(
         source_descriptions.append(_fallback_source_description_text(video, templates))
     source_lines: str = _numbered_lines(source_descriptions)
     if merged_content:
-        payload: MergedPublicationPayload = _build_merged_publication_payload(
+        payload: Optional[MergedPublicationPayload] = _build_merged_publication_payload(
             videos=videos,
             merged_content=merged_content,
             merge_attempt=merge_attempt,
             use_audit_text=use_audit_text,
         )
-        return payload.description_text
+        if payload is not None:
+            return payload.description_text
+        return source_lines
     if merge_attempt is not None:
         if should_suppress_raw_merge_attempt_publish(
             merge_attempt=merge_attempt,
@@ -244,12 +270,19 @@ def build_telegram_language_merged_block(
     times_text: str = ", ".join(
         sorted({video.scheduled_at_kiev.strftime("%H:%M") for video in videos})
     )
-    merged_payload: MergedPublicationPayload = _build_merged_publication_payload(
+    merged_payload: Optional[MergedPublicationPayload] = _build_merged_publication_payload(
         videos=videos,
         merged_content=merged_content,
         merge_attempt=merge_attempt,
         use_audit_text=config.telegram_use_audit,
     )
+    if merged_payload is None:
+        return build_telegram_language_nomerge_block(
+            language=language,
+            videos=videos,
+            config=config,
+            templates=templates,
+        )
     return _render_template(
         config.templates.telegram_language_merged_block,
         {

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.config.app_config_loader import load_config_from_env
-from app.llm.provider_factory import get_llm_provider
+from app.llm.llm_factory import get_llm_provider
 from app.observability.startup_summary import build_llm_summary_snapshot
 from app.paths import get_project_paths
 

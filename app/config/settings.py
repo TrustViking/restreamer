@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,11 @@ class AppTemplates:
     llm_merge_title_description_prompt: str
     llm_startup_ping_prompt: str
     llm_language_names_json: str
+    llm_merge_structural_rules: str
+    llm_merge_contracts_json: str
+    llm_merge_retry_reinforcements_json: str
+    llm_merge_contracts: dict[str, Any]
+    llm_merge_retry_reinforcements: dict[str, Any]
     files_preview_name_template: str
     files_doc_title_template: str
     files_language_codes_json: str

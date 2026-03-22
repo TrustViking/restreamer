@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Protocol
 
 from app.config.settings import AppConfig
-from app.llm.openai_client import LlmTraceContext, OpenAITransportResult
+from app.llm.llm_client import LlmTraceContext, OpenAITransportResult
 
 
 @dataclass(frozen=True)

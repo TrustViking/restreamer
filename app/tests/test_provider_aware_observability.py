@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import restreamer
-from app.llm.openai_client import reset_run_local_openai_usage
+from app.llm.llm_client import reset_run_local_openai_usage
 from app.observability.openai_usage import (
     log_openai_limits_and_usage,
     log_run_local_openai_usage,

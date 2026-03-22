@@ -93,8 +93,9 @@ class MergeFailedPublishFallbackTests(unittest.TestCase):
                 google_doc_table_labels_json='{"en":["TITLE","DESCRIPTION","PREVIEW"]}',
                 google_doc_language_headings_json='{"en":"EN"}',
             ),
+            artifact_status="partial",
         )
-        self.assertEqual("EN - 18:00 (Partial fallback)", rows[0][0])
+        self.assertEqual("EN - 18:00 ⚠ [merge failed — source list]", rows[0][0])
 
     def test_doc_table_heading_marks_fallback_only_block_as_rejected_artifact(self) -> None:
         rows = doc_helpers._build_language_table_rows(
@@ -113,7 +114,7 @@ class MergeFailedPublishFallbackTests(unittest.TestCase):
             artifact_status="fallback_only",
         )
         self.assertEqual(
-            "EN - 18:00 (Merge rejected fallback artifact)",
+            "EN - 18:00 ⚠ [merge failed — source list]",
             rows[0][0],
         )
 
@@ -150,12 +151,19 @@ class MergeFailedPublishFallbackTests(unittest.TestCase):
             ),
         )
         flattened_rows = [value for value, _ in rows]
+        flattened_text: str = "\n".join(flattened_rows)
         self.assertIn("Source 1", flattened_rows[2])
         self.assertIn("Source description one.", flattened_rows[4])
         self.assertTrue(
             any("MODEL OUTPUTS REJECTED BY VALIDATION." in row for row in flattened_rows)
         )
-        self.assertIn("REJECTED TITLE | ATTEMPT 1 | MODEL: gpt-5.1 | REJECT: too_few_expanded_bullets,weak_source_coverage", flattened_rows)
-        self.assertIn("Rejected title one", flattened_rows)
-        self.assertIn("REJECTED DESCRIPTION | ATTEMPT 2 | MODEL: gpt-5.1 | REJECT: overly_generic_body", flattened_rows)
-        self.assertIn("Rejected description two.", flattened_rows)
+        self.assertIn(
+            "REJECTED TITLE | ATTEMPT 1 | MODEL: gpt-5.1 | REJECT: too_few_expanded_bullets,weak_source_coverage",
+            flattened_text,
+        )
+        self.assertIn("Rejected title one", flattened_text)
+        self.assertIn(
+            "REJECTED DESCRIPTION | ATTEMPT 2 | MODEL: gpt-5.1 | REJECT: overly_generic_body",
+            flattened_text,
+        )
+        self.assertIn("Rejected description two.", flattened_text)

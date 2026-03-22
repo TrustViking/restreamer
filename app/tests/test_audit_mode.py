@@ -11,8 +11,8 @@ from app.bootstrap.cli import build_cli_parser
 from app.config.validators import normalize_audit_mode, normalize_processing_mode
 from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.core.models import PlannedVideo, VideoMetadata
-from app.llm.merge_run_summary import MergeRunSummary
-from app.llm.model_compatibility import LlmModelConfigurationError
+from app.llm.merges.merge_run_summary import MergeRunSummary
+from app.llm.models.model_compatibility import LlmModelConfigurationError
 from app.pipeline.batch_runner import AuditBranch, BatchRunner
 from app.pipeline.slot_processing import process_slot
 

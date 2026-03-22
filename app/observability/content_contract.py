@@ -5,7 +5,7 @@ import logging
 from typing import Iterable, List, Optional, Sequence
 
 from app.core.models import LanguageMergeAttempt, MergedLanguageContent, PlannedVideo
-from app.llm.merge_quality import inspect_merge_description
+from app.llm.merges.merge_quality import inspect_merge_description
 from app.publish.post_llm_sanitation import (
     PostLlmSanitizationResult,
     resolve_post_llm_source_label,

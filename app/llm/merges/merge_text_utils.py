@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import re
+from typing import List
+
+from app.llm.merges.merge_constants import ALLOWED_BULLET_MARKERS, SEMANTIC_TOKEN_PATTERN
+
+_BULLET_PLAIN_PATTERN: re.Pattern[str] = re.compile(
+    r"^\s*(?:[-*•▪◦‣–—]|(?:\d+[.)]))\s+\S+",
+    flags=re.UNICODE,
+)
+
+def _extract_description_paragraphs_raw(text: str) -> List[str]:
+    normalized_text: str = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized_text:
+        return []
+    return [part.strip() for part in re.split(r"\n\s*\n", normalized_text) if part.strip()]
+
+def _is_official_links_heading_line(text: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?im)(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:",
+            str(text or "").strip(),
+        )
+    )
+
+def _looks_like_service_tail_paragraph(text: str) -> bool:
+    normalized_text: str = re.sub(r"\s+", " ", str(text or "").strip()).lower()
+    if not normalized_text:
+        return True
+    if _is_official_links_heading_line(normalized_text):
+        return True
+    service_hints: tuple[str, ...] = (
+        "watch",
+        "join",
+        "share",
+        "follow",
+        "subscribe",
+        "learn more",
+        "links below",
+        "details below",
+        "диві",
+        "долуч",
+        "підпис",
+        "смотрите",
+        "подпис",
+        "подробности",
+    )
+    semantic_tokens: List[str] = SEMANTIC_TOKEN_PATTERN.findall(normalized_text)
+    return (
+        len(normalized_text) <= 220
+        and len(semantic_tokens) <= 12
+        and any(hint in normalized_text for hint in service_hints)
+    )
+
+def _contains_agenda_heading(text: str) -> bool:
+    agenda_headings: tuple[str, ...] = (
+        "что в этом стриме",
+        "в этом выпуске",
+        "о чем поговорим",
+        "що в цьому стрімі",
+        "про що поговоримо",
+        "what's in this stream",
+        "what’s in this stream",
+        "in this stream",
+    )
+    lines: List[str] = [
+        re.sub(r"\s+", " ", line.strip().lower())
+        for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if line.strip()
+    ]
+    for line in lines:
+        normalized_line: str = line.strip(" -–—:;.!?")
+        for heading in agenda_headings:
+            if (
+                normalized_line == heading
+                or normalized_line.startswith(f"{heading}:")
+                or normalized_line.startswith(f"{heading} -")
+                or normalized_line.startswith(f"{heading} –")
+                or normalized_line.startswith(f"{heading} —")
+            ):
+                return True
+    return False
+
+def _looks_like_per_source_dump(text: str) -> bool:
+    source_line_pattern: re.Pattern[str] = re.compile(
+        r"^\s*(?:source|video)\s*\d+[:.)-]?",
+        flags=re.IGNORECASE,
+    )
+    lines: List[str] = [line.strip() for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n") if line.strip()]
+    source_line_hits: int = sum(1 for line in lines if source_line_pattern.match(line))
+    if source_line_hits >= 2:
+        return True
+    lowered_text: str = str(text or "").lower()
+    return ("source 1" in lowered_text and "source 2" in lowered_text) or (
+        "video 1" in lowered_text and "video 2" in lowered_text
+    )
+
+def _extract_named_entities(text: str) -> set[str]:
+    entity_pattern: re.Pattern[str] = re.compile(
+        r"\b(?:[A-ZА-ЯЁІЇЄҐ][a-zа-яёіїєґ'-]{2,})(?:\s+[A-ZА-ЯЁІЇЄҐ][a-zа-яёіїєґ'-]{2,})+\b",
+        flags=re.UNICODE,
+    )
+    return {match.group(0).strip().lower() for match in entity_pattern.finditer(str(text or ""))}
+
+def _bullet_marker_for_line(line: str) -> str:
+    stripped: str = str(line or "").strip()
+    if not stripped:
+        return ""
+    for marker in ALLOWED_BULLET_MARKERS:
+        if stripped.startswith(f"{marker} "):
+            return marker
+    if _BULLET_PLAIN_PATTERN.match(stripped):
+        first_token: str = stripped.split(maxsplit=1)[0]
+        return first_token
+    return ""

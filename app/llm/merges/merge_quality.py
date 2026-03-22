@@ -5,11 +5,17 @@ import re
 from typing import List, Optional, Sequence
 
 from app.core.language import detect_language_from_text
-
-NEUTRAL_BULLET_MARKER: str = "🔹"
-ACCENT_BULLET_MARKERS: tuple[str, ...] = ("📌", "🎤", "🎥", "⚖", "🌐", "✅")
-ALLOWED_BULLET_MARKERS: tuple[str, ...] = (NEUTRAL_BULLET_MARKER, *ACCENT_BULLET_MARKERS)
-ACCENT_MARKER_CAP: int = 3
+from app.llm.merges.merge_constants import (
+    ACCENT_BULLET_MARKERS,
+    ACCENT_MARKER_CAP,
+    ALLOWED_BULLET_MARKERS,
+    BULLET_ABSOLUTE_MAX_CHAR_LIMIT,
+    BULLET_OVERLOAD_CHAR_LIMIT,
+    BULLET_OVERLOAD_NAME_LIMIT,
+    NEUTRAL_BULLET_MARKER,
+    URL_LINE_PATTERN,
+    URL_PATTERN,
+)
 _PLAIN_BULLET_PATTERN: re.Pattern[str] = re.compile(
     r"^\s*(?:[-*•▪◦‣–—]|(?:\d+[.)]))\s+\S+",
     flags=re.UNICODE,
@@ -59,8 +65,6 @@ _ROLE_PATTERN: re.Pattern[str] = re.compile(
     flags=re.IGNORECASE | re.UNICODE,
 )
 _HASHTAG_PATTERN: re.Pattern[str] = re.compile(r"(?:^|\s)(#[^\s#]+)")
-_URL_PATTERN: re.Pattern[str] = re.compile(r"^https?://\S+$", re.IGNORECASE)
-_INLINE_URL_PATTERN: re.Pattern[str] = re.compile(r"https?://\S+", re.IGNORECASE)
 _EMAIL_PATTERN: re.Pattern[str] = re.compile(r"\b\S+@\S+\.\S+\b", re.IGNORECASE)
 _SCRIPT_TOKEN_PATTERN: re.Pattern[str] = re.compile(
     r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ][A-Za-zА-Яа-яЁёІіЇїЄєҐґ0-9'_-]*",
@@ -337,7 +341,7 @@ def _extract_merge_blocks(text: str, *, language: str) -> _MergeBlocks:
             links_heading = lines[0]
             trailing_after_urls: List[str] = []
             for line in lines[1:]:
-                if _URL_PATTERN.match(line):
+                if URL_LINE_PATTERN.match(line):
                     links_urls.append(line)
                 else:
                     trailing_after_urls.append(line)
@@ -352,12 +356,23 @@ def _extract_merge_blocks(text: str, *, language: str) -> _MergeBlocks:
             while bullet_end_index < len(lines) and _is_bullet_line(lines[bullet_end_index]):
                 bullet_end_index += 1
             if first_bullet_index > 0:
-                lead_in = lines[first_bullet_index - 1]
-                theses_lines = [lead_in, *lines[first_bullet_index:bullet_end_index]]
+                if not theses_lines:
+                    _candidate_lead_in: str = lines[first_bullet_index - 1]
+                    if _is_bullet_line(_candidate_lead_in):
+                        lead_in: str = ""
+                        theses_lines = list(lines[first_bullet_index:bullet_end_index])
+                    else:
+                        lead_in = _candidate_lead_in
+                        theses_lines = [lead_in, *lines[first_bullet_index:bullet_end_index]]
+                else:
+                    theses_lines.extend(lines[first_bullet_index:bullet_end_index])
                 if not hook:
                     hook = " ".join(lines[: first_bullet_index - 1]).strip()
             else:
-                theses_lines = list(lines[first_bullet_index:bullet_end_index])
+                if not theses_lines:
+                    theses_lines = list(lines[first_bullet_index:bullet_end_index])
+                else:
+                    theses_lines.extend(lines[first_bullet_index:bullet_end_index])
                 if not hook:
                     hook = ""
             trailing_lines: List[str] = lines[bullet_end_index:]
@@ -366,7 +381,7 @@ def _extract_merge_blocks(text: str, *, language: str) -> _MergeBlocks:
                     links_heading = trailing_lines[0]
                     trailing_after_urls = []
                     for line in trailing_lines[1:]:
-                        if _URL_PATTERN.match(line):
+                        if URL_LINE_PATTERN.match(line):
                             links_urls.append(line)
                         else:
                             trailing_after_urls.append(line)
@@ -659,7 +674,13 @@ def _render_blocks(
     if theses_lines:
         paragraphs.append("\n".join(line.strip() for line in theses_lines if line.strip()).strip())
     if links_heading:
-        links_lines: List[str] = [links_heading.strip(), *[item.strip() for item in links_urls if item.strip()]]
+        links_lines: List[str] = [links_heading.strip()]
+        for item in links_urls:
+            url: str = item.strip()
+            if url:
+                if url.endswith("/") and url.count("/") == 3:
+                    url = url.rstrip("/")
+                links_lines.append(url)
         paragraphs.append("\n".join(links_lines).strip())
     if cta:
         paragraphs.append(re.sub(r"\s+", " ", cta).strip())
@@ -762,7 +783,7 @@ def _core_language_mismatch(detected_language: str, expected_language: str) -> b
 
 
 def _normalize_script_mix_probe_text(text: str) -> str:
-    normalized_text: str = _INLINE_URL_PATTERN.sub(" ", str(text or ""))
+    normalized_text: str = URL_PATTERN.sub(" ", str(text or ""))
     normalized_text = _EMAIL_PATTERN.sub(" ", normalized_text)
     normalized_text = _HASHTAG_PATTERN.sub(" ", normalized_text)
     return normalized_text
@@ -828,3 +849,33 @@ def _detect_script_mix_suspects(
             if len(suspect_tokens) >= 5:
                 return tuple(suspect_tokens)
     return tuple(suspect_tokens)
+
+
+_PROPER_NAME_PATTERN: re.Pattern[str] = re.compile(
+    r"\b[A-ZА-ЯЁІЇЄҐ][a-zа-яёіїєґ'`-]{1,25}"
+    r"(?:\s+[A-ZА-ЯЁІЇЄҐ][a-zа-яёіїєґ'`-]{1,25}){1,3}\b",
+    re.UNICODE,
+)
+
+
+def count_overloaded_bullets(description: str) -> int:
+    overloaded_count: int = 0
+    for line in str(description or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped: str = line.strip()
+        if not stripped:
+            continue
+        is_bullet: bool = any(
+            stripped.startswith(f"{marker} ")
+            for marker in (NEUTRAL_BULLET_MARKER, *ACCENT_BULLET_MARKERS)
+        )
+        if not is_bullet:
+            continue
+        if len(stripped) > BULLET_ABSOLUTE_MAX_CHAR_LIMIT:
+            overloaded_count += 1
+            continue
+        if len(stripped) <= BULLET_OVERLOAD_CHAR_LIMIT:
+            continue
+        names_found: int = len(_PROPER_NAME_PATTERN.findall(stripped))
+        if names_found >= BULLET_OVERLOAD_NAME_LIMIT:
+            overloaded_count += 1
+    return overloaded_count

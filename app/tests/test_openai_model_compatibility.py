@@ -3,12 +3,16 @@ from __future__ import annotations
 import unittest
 
 import httpx
+import pytest
 
-from app.llm.model_compatibility import (
+from app.llm.models.model_compatibility import (
     classify_openai_request_error,
     resolve_openai_request_compatibility,
 )
-from app.llm.openai_client import _build_openai_responses_request_kwargs
+from app.llm.llm_client import _build_openai_responses_request_kwargs
+
+pytest.importorskip("openai")
+
 from openai._exceptions import (
     APITimeoutError,
     BadRequestError,

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 from app.core.models import LanguageMergeAttempt, RejectedMergeAttempt
-from app.llm.merge_run_summary import MergeRunSummary
+from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.pipeline.batch_runner import AuditBranch, BatchRunner
 from app.pipeline.daily_doc_publish import DailyDocumentPublishResult
 from app.pipeline.daily_telegram_publish import DailyTelegramPublishResult

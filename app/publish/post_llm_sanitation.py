@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from typing import List, Optional, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -10,19 +10,32 @@ from app.core.models import (
     BLOCK_GENERATION_MODE_REAL_MERGE,
     LanguageMergeAttempt,
     MergedLanguageContent,
-    MergedPublicationPayload,
+    MergedPublicationPayload as _CoreMergedPublicationPayload,
     PlannedVideo,
 )
+from app.core.url_utils import TRACKING_QUERY_KEYS, _canonical_domain_key
 from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher, normalize_youtube_video_url
-from app.llm.merge_quality import normalize_merge_description
+from app.llm.merges.merge_constants import (
+    ALLOWED_BULLET_MARKERS,
+    CTA_FIRST_PARAGRAPH_PREFIXES,
+    SEMANTIC_STOPWORDS,
+    SEMANTIC_TOKEN_PATTERN,
+    URL_LINE_PATTERN,
+    URL_PATTERN,
+)
+from app.llm.merges.merge_quality import normalize_merge_description
+from app.llm.merges.merge_validation_helpers import looks_like_bad_hook_paragraph
 from app.observability.runtime_analytics import record_malformed_tail_url_cleanup
 
 
 LOGGER = _get_logger_impl(__name__)
 
 _HASHTAG_TOKEN_RE: re.Pattern[str] = re.compile(r"^#[^\s#]+$")
-_URL_LINE_RE: re.Pattern[str] = re.compile(r"^https?://\S+$", re.IGNORECASE)
-_URL_RE: re.Pattern[str] = re.compile(r"https?://\S+", re.IGNORECASE)
+_DOUBLE_BULLET_MARKER_ALT: str = "|".join(re.escape(marker) for marker in ALLOWED_BULLET_MARKERS)
+_DOUBLE_BULLET_RE: re.Pattern[str] = re.compile(
+    rf"^(\s*)({_DOUBLE_BULLET_MARKER_ALT})((?:\s+(?:{_DOUBLE_BULLET_MARKER_ALT}))+)\s*",
+    re.MULTILINE,
+)
 _OFFICIAL_LINKS_HEADING_RE: re.Pattern[str] = re.compile(
     r"(?im)^\s*(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:\s*$"
 )
@@ -43,61 +56,6 @@ _CTA_HINTS: tuple[str, ...] = (
     "подпис",
     "подробности",
 )
-_TRACKING_QUERY_KEYS: tuple[str, ...] = (
-    "si",
-    "feature",
-    "pp",
-    "fbclid",
-    "gclid",
-    "igsh",
-    "igshid",
-    "mc_cid",
-    "mc_eid",
-    "ref_src",
-    "ref_url",
-    "spm",
-)
-_SEMANTIC_TOKEN_RE: re.Pattern[str] = re.compile(
-    r"[0-9A-Za-zА-Яа-яЁёІіЇїЄєҐґ]{3,}",
-    flags=re.UNICODE,
-)
-_SEMANTIC_STOPWORDS: set[str] = {
-    "about",
-    "after",
-    "again",
-    "also",
-    "and",
-    "details",
-    "follow",
-    "from",
-    "join",
-    "links",
-    "materials",
-    "more",
-    "stream",
-    "this",
-    "update",
-    "updates",
-    "watch",
-    "with",
-    "для",
-    "материал",
-    "материалы",
-    "подробности",
-    "сегодня",
-    "смотрите",
-    "стрим",
-    "эфир",
-    "для",
-    "долуч",
-    "ефір",
-    "матеріали",
-    "оновлення",
-    "підпис",
-    "подія",
-    "сьогодні",
-    "стрімі",
-}
 
 
 @dataclass(frozen=True)
@@ -115,6 +73,12 @@ class PostLlmSanitizationResult:
     tail_layout: str
     source_urls_found: int
     malformed_source_urls_dropped: int
+
+
+@dataclass(frozen=True)
+class MergedPublicationPayload(_CoreMergedPublicationPayload):
+    has_publish_stage_duplicate: bool = field(default=False)
+    has_publish_stage_opener_cta: bool = field(default=False)
 
 
 @dataclass(frozen=True)
@@ -149,6 +113,11 @@ class _OfficialLinksExtractionResult:
     heading_found: bool
     source_urls: List[str]
     empty_blocks_suppressed: int
+
+
+def _clean_double_bullet_markers(text: str) -> str:
+    """Collapse doubled or mixed bullet markers at the start of a line to the first marker only."""
+    return _DOUBLE_BULLET_RE.sub(r"\1\2 ", text)
 
 
 def sanitize_post_llm_title(text: str) -> str:
@@ -219,6 +188,64 @@ def log_safe_merge_attempt_fallback(
         len(raw_response_text),
         fallback_label,
     )
+
+
+def _final_description_has_duplicate_paragraphs(description_text: str) -> bool:
+    raw_paragraphs: List[str] = [
+        part
+        for part in re.split(r"\n\s*\n", str(description_text or "").strip())
+        if part.strip()
+    ]
+    seen_normalized_paragraphs: set[str] = set()
+    token_sets: List[set[str]] = []
+    for paragraph in raw_paragraphs:
+        normalized_paragraph: str = re.sub(r"\s+", " ", paragraph.strip().lower())
+        token_list: List[str] = [token for token in normalized_paragraph.split(" ") if token]
+        if len(token_list) < 6:
+            continue
+        if normalized_paragraph in seen_normalized_paragraphs:
+            return True
+        seen_normalized_paragraphs.add(normalized_paragraph)
+        current_token_set: set[str] = set(token_list)
+        for previous_token_set in token_sets:
+            union_size: int = len(current_token_set | previous_token_set)
+            if union_size == 0:
+                continue
+            intersection_size: int = len(current_token_set & previous_token_set)
+            jaccard_similarity: float = intersection_size / union_size
+            if jaccard_similarity >= 0.72:
+                return True
+        token_sets.append(current_token_set)
+    return False
+
+
+def _final_description_has_opener_cta(description_text: str) -> bool:
+    paragraphs: List[str] = [
+        part.strip()
+        for part in re.split(r"\n\s*\n", str(description_text or "").strip())
+        if part.strip()
+    ]
+    if not paragraphs:
+        return False
+    first_paragraph: str = paragraphs[0]
+    first_non_empty_line: str = ""
+    for raw_line in first_paragraph.split("\n"):
+        normalized_line: str = str(raw_line or "").strip()
+        if normalized_line:
+            first_non_empty_line = normalized_line
+            break
+    if not first_non_empty_line:
+        return False
+    if looks_like_bad_hook_paragraph(first_non_empty_line) or looks_like_bad_hook_paragraph(
+        first_paragraph
+    ):
+        return True
+    normalized_first_line: str = first_non_empty_line.lower()
+    for raw_prefix in CTA_FIRST_PARAGRAPH_PREFIXES:
+        normalized_prefix: str = str(raw_prefix or "").strip().lower()
+        if normalized_prefix and normalized_first_line.startswith(normalized_prefix):
+            return True
+    return False
 
 
 def build_sanitized_merged_publication_payload(
@@ -294,6 +321,26 @@ def build_sanitized_merged_publication_payload(
         recommended_youtube_urls=final_selected_youtube_urls,
         source_urls=final_official_links_urls,
     )
+    has_publish_stage_duplicate: bool = _final_description_has_duplicate_paragraphs(
+        final_description
+    )
+    has_publish_stage_opener_cta: bool = _final_description_has_opener_cta(
+        final_description
+    )
+    if has_publish_stage_duplicate:
+        LOGGER.error(
+            "merged_publish_duplicate_paragraph_detected lang=%s source=%s description_chars=%d",
+            language,
+            source_label,
+            len(final_description),
+        )
+    if has_publish_stage_opener_cta:
+        LOGGER.error(
+            "merged_publish_opener_cta_detected lang=%s source=%s description_chars=%d",
+            language,
+            source_label,
+            len(final_description),
+        )
     official_links_count: int = len(final_official_links_urls)
     official_links_block_status: str = (
         "emitted"
@@ -339,6 +386,8 @@ def build_sanitized_merged_publication_payload(
         title_text=sanitize_post_llm_title(raw_title),
         description_text=final_description,
         block_generation_mode=block_generation_mode,
+        has_publish_stage_duplicate=has_publish_stage_duplicate,
+        has_publish_stage_opener_cta=has_publish_stage_opener_cta,
     )
 
 
@@ -378,6 +427,7 @@ def sanitize_post_llm_text_for_merged_publish(
         language=language,
         source_texts=(),
     ).description_text
+    normalized_body_text = _clean_double_bullet_markers(normalized_body_text)
     return _compose_full_text(
         language=language,
         body_text=normalized_body_text,
@@ -427,6 +477,7 @@ def sanitize_post_llm_text(
         initial_body_text
     )
     body_text, body_url_changes = _sanitize_urls_in_text(embedded_tail.body_text)
+    body_text = _clean_double_bullet_markers(body_text)
     cta_lines: List[str] = _dedupe_cta_lines(
         embedded_tail.cta_lines + extracted_tail.cta_lines
     )
@@ -531,16 +582,16 @@ class _EmbeddedTailParts:
 
 def _extract_semantic_tokens(text: str) -> set[str]:
     tokens: set[str] = set()
-    for token in _SEMANTIC_TOKEN_RE.findall(str(text or "").lower()):
+    for token in SEMANTIC_TOKEN_PATTERN.findall(str(text or "").lower()):
         normalized_token: str = token.strip().lower()
-        if not normalized_token or normalized_token in _SEMANTIC_STOPWORDS:
+        if not normalized_token or normalized_token in SEMANTIC_STOPWORDS:
             continue
         tokens.add(normalized_token)
     return tokens
 
 
 def _strip_urls_and_hashtags_for_context(text: str) -> str:
-    cleaned_text: str = _URL_RE.sub(" ", str(text or ""))
+    cleaned_text: str = URL_PATTERN.sub(" ", str(text or ""))
     cleaned_text = re.sub(r"(?<!\w)#[^\s#]+", " ", cleaned_text, flags=re.UNICODE)
     cleaned_text = re.sub(r"\s+", " ", cleaned_text)
     return cleaned_text.strip(" ,;:-")
@@ -560,7 +611,7 @@ def _extract_raw_description_urls(
             line: str = str(raw_line or "").strip()
             if not line:
                 continue
-            urls: List[str] = [str(match.group(0) or "").strip() for match in _URL_RE.finditer(line)]
+            urls: List[str] = [str(match.group(0) or "").strip() for match in URL_PATTERN.finditer(line)]
             if not urls:
                 continue
             fallback_context: str = (
@@ -583,6 +634,7 @@ def _select_recommended_youtube_urls(
     *,
     source_videos: Sequence[PlannedVideo],
     summary_text: str,
+    source_count: int,
 ) -> tuple[List[str], int, int, int]:
     all_occurrences, _, raw_youtube_urls_found = _extract_raw_description_urls(source_videos)
     summary_tokens: set[str] = _extract_semantic_tokens(summary_text)
@@ -611,6 +663,13 @@ def _select_recommended_youtube_urls(
         for context_text in contexts:
             context_tokens.update(_extract_semantic_tokens(context_text))
         semantic_overlap_count: int = len(summary_tokens & context_tokens)
+        LOGGER.debug(
+            "recommended_candidate_evaluated url=%s source_hits=%d semantic_overlap_count=%d total_occurrences=%d",
+            url,
+            source_hits,
+            semantic_overlap_count,
+            candidate_occurrence_counts.get(url, 0),
+        )
         candidates.append(
             _RecommendedYouTubeCandidate(
                 url=url,
@@ -633,10 +692,17 @@ def _select_recommended_youtube_urls(
     )
 
     selected_urls: List[str] = []
+    _low_source_mode: bool = source_count <= 2
     for candidate in candidates:
-        if not (
-            candidate.source_hits >= 2 or candidate.semantic_overlap_count >= 2
-        ):
+        if _low_source_mode:
+            passes_threshold: bool = (
+                candidate.source_hits >= 1 and candidate.semantic_overlap_count >= 1
+            )
+        else:
+            passes_threshold = (
+                candidate.source_hits >= 2 or candidate.semantic_overlap_count >= 2
+            )
+        if not passes_threshold:
             continue
         selected_urls.append(candidate.url)
         if len(selected_urls) >= 2:
@@ -696,7 +762,7 @@ def _select_authoritative_non_youtube_urls(
 
     scored_candidates.sort(reverse=True)
     for _, _, url in scored_candidates:
-        canonical_key: str = url.rstrip("/")
+        canonical_key: str = _canonical_domain_key(url)
         if canonical_key in seen_canonical_urls:
             duplicate_urls_removed += 1
             continue
@@ -715,7 +781,7 @@ def _select_authoritative_non_youtube_urls(
             or _is_youtube_url(cleaned_tail_url)
         ):
             continue
-        canonical_key = cleaned_tail_url.rstrip("/")
+        canonical_key = _canonical_domain_key(cleaned_tail_url)
         if canonical_key in seen_canonical_urls:
             duplicate_urls_removed += 1
             continue
@@ -739,6 +805,7 @@ def build_authoritative_merged_source_urls(
         _select_recommended_youtube_urls(
             source_videos=source_videos,
             summary_text=summary_text,
+            source_count=len(source_videos),
         )
     )
     authoritative_urls, emitted_source_video_urls, duplicate_urls_removed = (
@@ -987,7 +1054,7 @@ def _extract_cta_tail_from_paragraph(paragraph: str) -> tuple[str, str]:
 
 def _is_source_url_line(line: str) -> bool:
     candidate: str = str(line or "").strip().strip("<>()[]{}").rstrip(".,;")
-    return bool(candidate and _URL_LINE_RE.fullmatch(candidate))
+    return bool(candidate and URL_LINE_PATTERN.fullmatch(candidate))
 
 
 def _is_hashtags_line(line: str) -> bool:
@@ -1021,7 +1088,7 @@ def _sanitize_urls_in_text(text: str) -> tuple[str, int]:
             change_count += 1
         return sanitized_url
 
-    return (_URL_RE.sub(_replace, str(text or "")), change_count)
+    return (URL_PATTERN.sub(_replace, str(text or "")), change_count)
 
 
 def _sanitize_url(url: str) -> str:
@@ -1044,7 +1111,7 @@ def _sanitize_url(url: str) -> str:
     filtered_query_items: List[tuple[str, str]] = []
     for key, value in parse_qsl(parts.query, keep_blank_values=True):
         normalized_key: str = key.lower().strip()
-        if normalized_key.startswith("utm_") or normalized_key in _TRACKING_QUERY_KEYS:
+        if normalized_key.startswith("utm_") or normalized_key in TRACKING_QUERY_KEYS:
             continue
         filtered_query_items.append((key, value))
     sanitized_query: str = urlencode(filtered_query_items, doseq=True)
@@ -1104,7 +1171,7 @@ def _is_youtube_url(url: str) -> bool:
 
 def _is_complete_source_url(url: str) -> bool:
     cleaned_url: str = str(url or "").strip().strip("<>()[]{}").rstrip(".,;")
-    if not cleaned_url or not _URL_LINE_RE.fullmatch(cleaned_url):
+    if not cleaned_url or not URL_LINE_PATTERN.fullmatch(cleaned_url):
         return False
     parts = urlsplit(cleaned_url)
     if parts.scheme not in {"http", "https"} or not parts.netloc:

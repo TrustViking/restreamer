@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from app.llm.openai_client import get_run_local_openai_usage
+from app.llm.llm_client import get_run_local_openai_usage
 from app.observability.runtime_analytics import log_warning_informational
 
 

@@ -9,10 +9,6 @@ BLOCK_GENERATION_MODE_REAL_MERGE: str = "real_merge"
 BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE: str = (
     "fallback_after_merge_failure"
 )
-PARTIAL_FALLBACK_ARTIFACT_MARKER: str = "Partial fallback"
-FALLBACK_ONLY_ARTIFACT_MARKER: str = "Merge rejected fallback artifact"
-
-
 @dataclass(frozen=True)
 class VideoMetadata:
     url: str
@@ -115,6 +111,7 @@ class MergedLanguageContent:
     description_audit: Optional[str] = None
     llm_model: Optional[str] = None
     block_generation_mode: str = BLOCK_GENERATION_MODE_REAL_MERGE
+    tail_recovery_applied: bool = False
 
 
 @dataclass(frozen=True)

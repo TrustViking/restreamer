@@ -7,21 +7,23 @@ from typing import Dict, List, Literal, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig
-from app.core.branching import BRANCH_NOMERGE
+from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.core.error_summary import summarize_error
 from app.core.models import (
+    BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
     LanguageMergeAttempt,
     MergedLanguageContent,
     PlannedVideo,
     RowVideoCharacteristics,
 )
 from app.ingest.youtube_metadata import normalize_youtube_video_url
-from app.llm.merge_run_summary import MergeRunSummary
-from app.llm.merge_service import (
+from app.llm.merges.merge_run_summary import MergeRunSummary
+from app.llm.merges.merge_service import (
     attempt_llm_merge_with_audit,
     attempt_llm_single_source_translate_with_audit,
     enforce_openai_merged_paragraphs,
 )
+from app.llm.models.model_identity import resolve_effective_llm_model
 from app.planning import language_index, planned_video_block_language
 from app.publish.doc_helpers import _no_description_text as _publish_no_description_text
 from app.publish.header_context import build_header_context
@@ -282,32 +284,69 @@ def process_slot(
             )
             merge_attempt: LanguageMergeAttempt
             is_multi_source_merge_candidate: bool = len(language_items_for_merge) > 1
-            if run_single_source_translate:
-                merge_attempt = attempt_llm_single_source_translate_with_audit(
+            quota_stop_preexisting: bool = merge_run_summary.provider_quota_exhausted
+            if quota_stop_preexisting:
+                model_name: str = resolve_effective_llm_model(config)
+                logger.error(
+                    "merge_branch_aborted_quota_exhausted branch=%s date_key=%s slot_key=%s language=%s",
+                    branch_label,
+                    date_key,
+                    slot_key,
+                    language,
+                )
+                merge_attempt = LanguageMergeAttempt(
                     language=language,
-                    videos=language_items_for_merge,
-                    config=config,
-                    attempt_label=f"OPENAI_TRANSLATE_{language.upper()}",
-                    summarize_error=summarize_error,
-                    no_description_text=_publish_no_description_text(config.templates),
-                    merge_run_summary=merge_run_summary,
-                    branch_label=branch_label,
-                    date_key=date_key,
-                    slot_key=slot_key,
+                    model_name=model_name,
+                    raw_response_text="",
+                    merged=None,
+                    error_summary="openai_quota_exhausted",
+                    salvaged_title=None,
+                    publish_source_label="merge_failed_openai_quota_exhausted",
+                    validation_reasons=["openai_quota_exhausted"],
+                    generator_model_name=model_name,
+                    used_model_names=(model_name,) if model_name else (),
+                    branch_type=BRANCH_MERGE,
+                    title_source="fallback_titles",
+                    hook_source="fallback_none",
+                    hashtags_source="fallback_none",
+                    body_source="fallback_source_descriptions",
+                    block_generation_mode=BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
                 )
             else:
-                merge_attempt = attempt_llm_merge_with_audit(
-                    language=language,
-                    videos=language_items_for_merge,
-                    config=config,
-                    attempt_label=f"OPENAI_MERGE_{language.upper()}",
-                    summarize_error=summarize_error,
-                    normalize_youtube_url=normalize_youtube_video_url,
-                    no_description_text=_publish_no_description_text(config.templates),
-                    merge_run_summary=merge_run_summary,
-                    branch_label=branch_label,
-                    date_key=date_key,
-                    slot_key=slot_key,
+                if run_single_source_translate:
+                    merge_attempt = attempt_llm_single_source_translate_with_audit(
+                        language=language,
+                        videos=language_items_for_merge,
+                        config=config,
+                        attempt_label=f"OPENAI_TRANSLATE_{language.upper()}",
+                        summarize_error=summarize_error,
+                        no_description_text=_publish_no_description_text(config.templates),
+                        merge_run_summary=merge_run_summary,
+                        branch_label=branch_label,
+                        date_key=date_key,
+                        slot_key=slot_key,
+                    )
+                else:
+                    merge_attempt = attempt_llm_merge_with_audit(
+                        language=language,
+                        videos=language_items_for_merge,
+                        config=config,
+                        attempt_label=f"OPENAI_MERGE_{language.upper()}",
+                        summarize_error=summarize_error,
+                        normalize_youtube_url=normalize_youtube_video_url,
+                        no_description_text=_publish_no_description_text(config.templates),
+                        merge_run_summary=merge_run_summary,
+                        branch_label=branch_label,
+                        date_key=date_key,
+                        slot_key=slot_key,
+                    )
+            if (not quota_stop_preexisting) and merge_run_summary.provider_quota_exhausted:
+                logger.error(
+                    "merge_branch_aborted_quota_exhausted branch=%s date_key=%s slot_key=%s language=%s",
+                    branch_label,
+                    date_key,
+                    slot_key,
+                    language,
                 )
             logger.info(
                 "[%s] LLM merge result language=%s provider=%s model=%s success=%s",

@@ -21,7 +21,7 @@ from app.config.validators import (
     setting_as_str,
     validate_app_settings,
 )
-from app.llm.model_identity import DEFAULT_OPENAI_MODEL
+from app.llm.models.model_identity import DEFAULT_OPENAI_MODEL
 from app.paths import get_project_paths
 
 

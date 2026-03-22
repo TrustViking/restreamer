@@ -11,31 +11,22 @@ from app.core.env_flags import (
     strip_chapter_timestamps_enabled_from_env,
 )
 from app.core.models import (
-    BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
-    FALLBACK_ONLY_ARTIFACT_MARKER,
-    PARTIAL_FALLBACK_ARTIFACT_MARKER,
     LanguageMergeAttempt,
     MergedLanguageContent,
     MergedPublicationPayload,
     PlannedVideo,
-    RejectedMergeAttempt,
 )
+from app.llm.merges.merge_constants import CTA_FIRST_PARAGRAPH_PREFIXES
+from app.llm.merges.merge_text_utils import _looks_like_service_tail_paragraph
 from app.planning import planned_video_block_language
 from app.publish.post_llm_sanitation import (
     build_sanitized_merged_publication_payload,
     log_safe_merge_attempt_fallback,
-    resolve_block_generation_mode,
     should_suppress_raw_merge_attempt_publish,
 )
 
 
 LOGGER = _get_logger_impl(__name__)
-
-_REJECTED_ATTEMPTS_NOTICE: str = (
-    "MODEL OUTPUTS REJECTED BY VALIDATION. The script received these merge attempts, "
-    "but all were rejected by the validator. Saved below for analysis."
-)
-
 
 def _language_heading(language: str, templates: Optional[AppTemplates]) -> str:
     if templates is None:
@@ -67,30 +58,62 @@ def _numbered_original_titles(videos: List[PlannedVideo]) -> str:
     return _numbered_lines(source_titles)
 
 
+def _is_merge_payload_blocked(payload: MergedPublicationPayload) -> bool:
+    has_publish_stage_duplicate: bool = bool(
+        getattr(payload, "has_publish_stage_duplicate", False)
+    )
+    has_publish_stage_opener_cta: bool = bool(
+        getattr(payload, "has_publish_stage_opener_cta", False)
+    )
+    return has_publish_stage_duplicate or has_publish_stage_opener_cta
+
+
+def _build_guarded_merged_payload(
+    *,
+    target: str,
+    videos: List[PlannedVideo],
+    merged_content: MergedLanguageContent,
+    merge_attempt: Optional[LanguageMergeAttempt],
+    use_audit_text: bool,
+) -> Optional[MergedPublicationPayload]:
+    language: str = planned_video_block_language(videos[0]) if videos else "unknown"
+    payload: MergedPublicationPayload = build_sanitized_merged_publication_payload(
+        language=language,
+        merged_content=merged_content,
+        merge_attempt=merge_attempt,
+        use_audit_text=use_audit_text,
+        source_videos=videos,
+    )
+    if _is_merge_payload_blocked(payload):
+        LOGGER.warning(
+            "merge_publish_gate_blocked target=%s language=%s has_publish_stage_duplicate=%s has_publish_stage_opener_cta=%s fallback=source_descriptions",
+            target,
+            language,
+            "yes" if bool(getattr(payload, "has_publish_stage_duplicate", False)) else "no",
+            "yes" if bool(getattr(payload, "has_publish_stage_opener_cta", False)) else "no",
+        )
+        return None
+    return payload
+
+
 def _build_titles_summary(
     videos: List[PlannedVideo],
     merged_content: Optional[MergedLanguageContent] = None,
     merge_attempt: Optional[LanguageMergeAttempt] = None,
     use_audit_text: bool = True,
-    prefer_rejected_attempts: bool = False,
 ) -> str:
     if merged_content:
-        language: str = planned_video_block_language(videos[0]) if videos else "unknown"
-        payload: MergedPublicationPayload = build_sanitized_merged_publication_payload(
-            language=language,
+        payload: Optional[MergedPublicationPayload] = _build_guarded_merged_payload(
+            target="doc",
+            videos=videos,
             merged_content=merged_content,
             merge_attempt=merge_attempt,
             use_audit_text=use_audit_text,
-            source_videos=videos,
         )
-        return payload.title_text
+        if payload is not None:
+            return payload.title_text
+        return _numbered_original_titles(videos) if videos else "1) ..."
     if merge_attempt is not None:
-        if prefer_rejected_attempts:
-            rejected_titles_summary: str = _build_rejected_attempt_titles_summary(
-                merge_attempt=merge_attempt
-            )
-            if rejected_titles_summary:
-                return rejected_titles_summary
         salvaged_title: str = str(merge_attempt.salvaged_title or "").strip()
         if salvaged_title:
             return salvaged_title
@@ -109,96 +132,108 @@ def _fallback_source_description_text(
     )
     if strip_chapter_timestamps_enabled_from_env():
         description_text = strip_chapter_timestamps(description_text)
+    description_text = _light_polish_single_source_description(description_text)
     return description_text
 
 
-def _has_rejected_attempt_details(merge_attempt: Optional[LanguageMergeAttempt]) -> bool:
-    return bool(
-        merge_attempt is not None
-        and str(getattr(merge_attempt, "publish_source_label", "") or "").strip()
-        == "merge_failed"
-        and getattr(merge_attempt, "rejected_attempts", ())
-    )
+def _starts_with_cta_prefix(text: str) -> bool:
+    normalized_text: str = re.sub(r"\s+", " ", str(text or "").strip())
+    if not normalized_text:
+        return False
+    normalized_casefold: str = normalized_text.casefold()
+    for raw_prefix in CTA_FIRST_PARAGRAPH_PREFIXES:
+        prefix: str = str(raw_prefix or "").strip()
+        if prefix and normalized_casefold.startswith(prefix.casefold()):
+            return True
+    return False
 
 
-def _reject_reasons_label(rejected_attempt: RejectedMergeAttempt) -> str:
-    return ",".join(rejected_attempt.reject_reasons) or "unknown"
+_PROMOTIONAL_OPENER_PHRASES: tuple[str, ...] = (
+    "you will find the answers",
+    "you will find answers",
+    "you'll find the answers",
+    "watch till the end",
+    "watch until the end",
+    "in this video you will",
+    "in this video you'll",
+    "in this stream you will",
+    "in this stream you'll",
+    "дивіться до кінця",
+    "у цьому відео ви",
+    "у цьому стрімі ви",
+    "ви знайдете відповіді",
+    "ви дізнаєтесь",
+    "в этом видео вы",
+    "в этом стриме вы",
+    "вы найдёте ответы",
+    "вы найдете ответы",
+    "вы узнаете",
+    "все ответы вы найдёте",
+    "все ответы вы найдете",
+    "смотрите до конца",
+)
 
 
-def _build_rejected_attempt_titles_summary(
-    *,
-    merge_attempt: LanguageMergeAttempt,
-) -> str:
-    if not _has_rejected_attempt_details(merge_attempt):
-        return ""
-    lines: List[str] = [_REJECTED_ATTEMPTS_NOTICE, ""]
-    for rejected_attempt in merge_attempt.rejected_attempts:
-        title_text: str = str(rejected_attempt.title or "").strip() or "(empty title)"
-        lines.append(
-            " | ".join(
-                (
-                    f"attempt={rejected_attempt.attempt_index}",
-                    f"model={rejected_attempt.model_name or 'unknown'}",
-                    f"reject={_reject_reasons_label(rejected_attempt)}",
-                )
-            )
-        )
-        lines.append(title_text)
-        lines.append("")
-    return "\n".join(lines).rstrip()
+def _looks_like_promotional_opener(text: str) -> bool:
+    normalized: str = re.sub(r"\s+", " ", str(text or "").strip()).casefold()
+    if not normalized:
+        return False
+    return any(phrase in normalized for phrase in _PROMOTIONAL_OPENER_PHRASES)
 
 
-def _build_rejected_attempt_descriptions_summary(
-    *,
-    merge_attempt: LanguageMergeAttempt,
-) -> str:
-    if not _has_rejected_attempt_details(merge_attempt):
-        return ""
-    lines: List[str] = [_REJECTED_ATTEMPTS_NOTICE, ""]
-    for rejected_attempt in merge_attempt.rejected_attempts:
-        description_text: str = (
-            str(rejected_attempt.description or "").strip()
-            or "(empty description)"
-        )
-        lines.append(
-            " | ".join(
-                (
-                    f"attempt={rejected_attempt.attempt_index}",
-                    f"model={rejected_attempt.model_name or 'unknown'}",
-                    f"reject={_reject_reasons_label(rejected_attempt)}",
-                )
-            )
-        )
-        lines.append(description_text)
-        lines.append("")
-    return "\n".join(lines).rstrip()
-
-
-def _build_rejected_attempt_rows(
-    *,
-    merge_attempt: Optional[LanguageMergeAttempt],
-) -> List[Tuple[str, bool]]:
-    if not _has_rejected_attempt_details(merge_attempt):
+def _extract_description_paragraphs_raw(text: str) -> List[str]:
+    normalized_text: str = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized_text:
         return []
-    assert merge_attempt is not None
-    rows: List[Tuple[str, bool]] = [(_REJECTED_ATTEMPTS_NOTICE, True)]
-    for rejected_attempt in merge_attempt.rejected_attempts:
-        context_label: str = (
-            f"ATTEMPT {rejected_attempt.attempt_index} | "
-            f"MODEL: {rejected_attempt.model_name or 'unknown'} | "
-            f"REJECT: {_reject_reasons_label(rejected_attempt)}"
+    return [part.strip() for part in re.split(r"\n\s*\n", normalized_text) if part.strip()]
+
+
+def _light_polish_single_source_description(text: str) -> str:
+    original_text: str = str(text or "")
+    paragraphs: List[str] = _extract_description_paragraphs_raw(original_text)
+    if not paragraphs:
+        return original_text
+
+    cleaned_paragraphs: List[str] = list(paragraphs)
+    if cleaned_paragraphs and (
+        _starts_with_cta_prefix(cleaned_paragraphs[0])
+        or _looks_like_promotional_opener(cleaned_paragraphs[0])
+    ):
+        cleaned_paragraphs = cleaned_paragraphs[1:]
+    if cleaned_paragraphs and _looks_like_service_tail_paragraph(cleaned_paragraphs[-1]):
+        cleaned_paragraphs = cleaned_paragraphs[:-1]
+
+    polished_text: str = "\n\n".join(cleaned_paragraphs).strip()
+    if not polished_text:
+        return original_text
+    return polished_text
+
+
+def _build_rejected_attempts_block(
+    rejected_attempts: tuple["RejectedMergeAttempt", ...],
+) -> str:
+    if not rejected_attempts:
+        return ""
+    lines: List[str] = ["MODEL OUTPUTS REJECTED BY VALIDATION."]
+    for attempt in rejected_attempts:
+        reject_codes_label: str = ",".join(attempt.reject_reasons) if attempt.reject_reasons else "unknown"
+        title_header: str = (
+            f"REJECTED TITLE | ATTEMPT {attempt.attempt_index}"
+            f" | MODEL: {attempt.model_name}"
+            f" | REJECT: {reject_codes_label}"
         )
-        rows.append((f"REJECTED TITLE | {context_label}", True))
-        rows.append((str(rejected_attempt.title or "").strip() or "(empty title)", False))
-        rows.append((f"REJECTED DESCRIPTION | {context_label}", True))
-        rows.append(
-            (
-                str(rejected_attempt.description or "").strip()
-                or "(empty description)",
-                False,
-            )
+        description_header: str = (
+            f"REJECTED DESCRIPTION | ATTEMPT {attempt.attempt_index}"
+            f" | MODEL: {attempt.model_name}"
+            f" | REJECT: {reject_codes_label}"
         )
-    return rows
+        lines.append(title_header)
+        if attempt.title:
+            lines.append(attempt.title)
+        lines.append(description_header)
+        if attempt.description:
+            lines.append(attempt.description)
+    return "\n".join(lines)
 
 
 def _build_descriptions_summary(
@@ -207,29 +242,22 @@ def _build_descriptions_summary(
     merged_content: Optional[MergedLanguageContent] = None,
     merge_attempt: Optional[LanguageMergeAttempt] = None,
     use_audit_text: bool = True,
-    prefer_rejected_attempts: bool = False,
 ) -> str:
     source_descriptions: List[str] = []
     for video in videos:
         source_descriptions.append(_fallback_source_description_text(video, templates))
     source_lines: str = _numbered_lines(source_descriptions)
     if merged_content:
-        language: str = planned_video_block_language(videos[0]) if videos else "unknown"
-        payload: MergedPublicationPayload = build_sanitized_merged_publication_payload(
-            language=language,
+        payload: Optional[MergedPublicationPayload] = _build_guarded_merged_payload(
+            target="doc",
+            videos=videos,
             merged_content=merged_content,
             merge_attempt=merge_attempt,
             use_audit_text=use_audit_text,
-            source_videos=videos,
         )
-        return payload.description_text
+        if payload is not None:
+            return payload.description_text
     if merge_attempt is not None:
-        if prefer_rejected_attempts:
-            rejected_descriptions_summary: str = _build_rejected_attempt_descriptions_summary(
-                merge_attempt=merge_attempt
-            )
-            if rejected_descriptions_summary:
-                return rejected_descriptions_summary
         if should_suppress_raw_merge_attempt_publish(
             merge_attempt=merge_attempt,
             merged_content_available=False,
@@ -239,6 +267,9 @@ def _build_descriptions_summary(
                 merge_attempt=merge_attempt,
                 fallback_label="source_descriptions",
             )
+        rejected_block: str = _build_rejected_attempts_block(merge_attempt.rejected_attempts)
+        if rejected_block:
+            return f"{source_lines}\n\n{rejected_block}"
         return source_lines
     if not videos:
         return "1) ..."
@@ -267,21 +298,12 @@ def _artifact_heading_for_block(
     merged_content: Optional[MergedLanguageContent],
     artifact_status: str = "none",
 ) -> str:
-    block_generation_mode: str = (
-        merged_payload.block_generation_mode
-        if merged_payload is not None
-        else resolve_block_generation_mode(
-            merge_attempt=merge_attempt,
-            merged_content=merged_content,
-        )
-    )
-    if block_generation_mode == BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE:
-        marker_text: str = (
-            FALLBACK_ONLY_ARTIFACT_MARKER
-            if artifact_status == "fallback_only"
-            else PARTIAL_FALLBACK_ARTIFACT_MARKER
-        )
-        return f"{base_heading} ({marker_text})"
+    if merged_content is not None:
+        return base_heading
+    if merge_attempt is None:
+        return base_heading
+    if artifact_status in ("fallback_only", "partial"):
+        return f"{base_heading} ⚠ [merge failed — source list]"
     return base_heading
 
 
@@ -395,18 +417,21 @@ def _build_language_table_rows(
         heading = f"{heading} - {time_display}"
     merged_payload: Optional[MergedPublicationPayload] = None
     if merged_content is not None:
-        merged_payload = build_sanitized_merged_publication_payload(
-            language=language,
+        merged_payload = _build_guarded_merged_payload(
+            target="doc",
+            videos=videos,
             merged_content=merged_content,
             merge_attempt=merge_attempt,
             use_audit_text=True,
-            source_videos=videos,
         )
+    heading_merged_content: Optional[MergedLanguageContent] = (
+        merged_content if merged_payload is not None else None
+    )
     heading = _artifact_heading_for_block(
         base_heading=heading,
         merged_payload=merged_payload,
         merge_attempt=merge_attempt,
-        merged_content=merged_content,
+        merged_content=heading_merged_content,
         artifact_status=artifact_status,
     )
     description_text: str = (
@@ -415,7 +440,7 @@ def _build_language_table_rows(
         else _build_descriptions_summary(
             videos=videos,
             templates=templates,
-            merged_content=merged_content,
+            merged_content=None,
             merge_attempt=merge_attempt,
         )
     )
@@ -429,7 +454,7 @@ def _build_language_table_rows(
                 if merged_payload is not None
                 else _build_titles_summary(
                     videos=videos,
-                    merged_content=merged_content,
+                    merged_content=None,
                     merge_attempt=merge_attempt,
                 )
             ),
@@ -440,5 +465,4 @@ def _build_language_table_rows(
         (preview_label, True),
     ]
     rows.extend(_build_preview_placeholder_rows(videos))
-    rows.extend(_build_rejected_attempt_rows(merge_attempt=merge_attempt))
     return rows

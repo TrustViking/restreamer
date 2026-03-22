@@ -107,7 +107,8 @@ llm:
     combine overlaps, compress repetition, and produce one coherent final description.
     Write a strong native YouTube title no longer than 99 characters.
     {merge_contract_block}
-    The hook must contain at least one of these punctuation marks: ":" or "!" or "?".
+    The hook must open with a concrete conflict, paradox, unanswered question, or surprising fact drawn directly from the sources. Avoid editorial generalizations like "an important discussion about X" or "experts gathered to talk about Y". Prefer something the viewer could not predict before watching — a confrontation, an injustice, a twist, a direct challenge. The hook must contain at least one of these punctuation marks: ":" or "!" or "?".
+    Identify the single sharpest fact, confrontation, or consequence from the sources — the one that would make a viewer stop scrolling — and place it first in the hook. Do not open with the general topic, the participants' names, or a summary of what the video is about. Open with the most specific, most charged detail.
     Keep the hook short (about 220 characters maximum). Optionally start the hook with one light emoji.
     If one source has a unique fact, topic, event, or angle, keep it unless it is true duplication.
     Preserve important recognizable names from sources when relevant; never invent names.
@@ -135,6 +136,43 @@ llm:
     Do not write a dry digest, protocol, or generic filler text.
     Do not output generic slogans, abstract editorial text, or propagandistic phrasing.
     Do not replace concrete facts with broad statements like "an important talk about unity and change".
+    Always open with a standalone hook paragraph (1–3 sentences). This hook paragraph must appear BEFORE any bullet points. Do not start the description directly with a bullet.
+    Separate every structural block with one blank line: one blank line after the hook, one blank line between each bullet, and one blank line before the closing call-to-action. Never run two structural elements together without a blank line between them.
+    If there is only ONE source in the slot and it covers a single unified event, case, or interview, write the full description body as 2–3 connected prose paragraphs without bullet points. For two or more sources always use the expanded structure with bullets regardless of topic similarity.
+    If the total cleaned source text across all sources is below 1500 characters, write a compact description of maximum 3 bullets. Do not pad with generic CTA phrases or filler sentences to fill space.
+    Always include full names of at least 2 key speakers or participants found in the sources. Never replace a person's name with a generic role label ("a State Department official", "an international expert") unless the person explicitly chose to remain anonymous in the source.
+    Structure examples:
+    WRONG structure: description starts directly with a bullet — no hook paragraph before it.
+    CORRECT structure: hook paragraph first (1–3 sentences with concrete conflict or fact), then bullets or prose body.
+    WRONG structure for a single-source stream: bullet list of 6–9 items.
+    CORRECT structure for a single-source stream: 2–3 connected prose paragraphs, no bullets.
+    Negative examples — avoid outputs like these:
+    BAD hook: "У Вашингтоні обговорюються важливі питання підтримки України."
+    GOOD hook: "Чи можна повернути викрадених дітей без притягнення до відповідальності? Крістофер Андерсон з Держдепартаменту дає пряму відповідь."
+    BAD bullet: "🔹 Представник Держдепартаменту про двопартійну допомогу"
+    GOOD bullet: "🔹 Крістофер Андерсон (Держдепартамент): двопартійна підтримка + повернення депортованих дітей — два пов'язані треки тиску на Росію"
+    BAD hook: "In Washington, important questions about Ukraine support were discussed."
+    GOOD hook: "Can deported children be returned without criminal accountability? Christopher Anderson from the State Department answers directly."
+    BAD bullet: "🔹 State Department official on bipartisan aid"
+    GOOD bullet: "🔹 Christopher Anderson (State Dept.): bipartisan support + return of deported children — two linked pressure tracks on Russia"
+    HOOK SHARPNESS — write a STRONG hook, not a MEDIUM or WEAK one:
+    STRONG (uk): "«Він робив нам уколи і торкався нас» — 32 жертви Якуба Яхла вперше дають свідчення на камеру."
+    STRONG (en): "Can deported children be returned without criminal accountability? Christopher Anderson answers directly."
+    STRONG (ru): "32 жертвы Якуба Яхла впервые дали показания на камеру — и их слова меняют ход расследования."
+    MEDIUM (uk) — avoid: "Справа Якуба Яхла виходить на новий рівень: свідчення дітей і тиск на владу Танзанії."
+    MEDIUM (en) — avoid: "The Jakub Jahl case enters a new phase with children's testimonies and international pressure on Tanzania."
+    MEDIUM (ru) — avoid: "Дело Якуба Яхла выходит на новый уровень: свидетельства детей и давление на власти Танзании."
+    WEAK (uk) — never: "У цьому ефірі — обговорення справи Якуба Яхла та міжнародна реакція."
+    WEAK (en) — never: "In this stream we discuss the Jakub Jahl case and the international response."
+    WEAK (ru) — never: "В этом эфире — обсуждение дела Якуба Яхла и международная реакция."
+    A STRONG hook opens with the sharpest concrete detail: a quote, a number, a paradox, a direct challenge.
+    A MEDIUM hook names the topic correctly but doesn't stop the scroll.
+    A WEAK hook is a generic summary of the video topic.
+
+    BODY TONE — YouTube description, not policy brief:
+    WRONG: "The stream examines multiple dimensions of the humanitarian crisis in the region."
+    RIGHT: "🔹 Суд відкинув «експертні висновки» як неналежні докази — прецедент для всієї Європи."
+    Each bullet must read like something a viewer would want to click on, not like a sentence from a UN report.
     Output only one strict JSON object with exactly these keys:
     title, description.
     Do not output markdown fences, notes, variants, or explanations.
@@ -142,6 +180,148 @@ llm:
     {youtube_candidates_block}
 
     {sources_block}
+  merge_structural_rules: |
+    STRUCTURAL RULES — APPLY TO EVERY MERGE OUTPUT
+
+    RULE 1 — NO CTA AS OPENER:
+    The first paragraph MUST be the editorial hook.
+    It must NEVER be a call to action, engagement request, or subscription prompt.
+    FORBIDDEN first-paragraph starts:
+    "Підпишіться" / "Підписуйтесь" / "Подпишитесь" / "Подписывайтесь" /
+    "Subscribe" / "Follow" / "Join" / "Watch" / "Поширюйте" / "Поділіться" /
+    "Приєднуйтесь" / "Смотрите" / "Следите"
+    CTA belongs ONLY at the very end, after all bullets and before hashtags.
+    If you place a CTA as the first paragraph, the output WILL be rejected.
+
+    RULE 2 — HOOK UNIQUENESS:
+    The hook paragraph appears exactly ONCE — as the first paragraph.
+    Paragraph 2 and all subsequent content must move FORWARD with new facts.
+    FORBIDDEN patterns:
+    - Restating the hook question in paragraph 2 (even rephrased)
+    - Opening the bullet block with a sentence that echoes the hook
+    - Writing the same thesis twice with different wording
+    If the hook is "Як так вийшло, що X?", paragraph 2 must NOT begin
+    with "Як так вийшло..." or any paraphrase. It must start with a bullet
+    marker (🔹, ⚖, 📌, etc.) and a NEW fact.
+
+    RULE 3 — BULLET COUNT DISCIPLINE:
+    The number of bullets must stay within the range specified by the contract.
+    If the contract says 4-7 bullets, writing 8 or more WILL be rejected.
+    If the contract says 5-7, writing 8 or more WILL be rejected.
+    Do not pad with generic bullets. Each bullet = one distinct fact or angle.
+
+    RULE 4 — PARAGRAPH 2 STARTS WITH A BULLET:
+    Immediately after the hook, the next content must be the bullet block.
+    Paragraph 2 must begin with a bullet marker, not with another prose sentence,
+    not with a rephrased hook, not with a CTA.
+
+    EXAMPLE — CORRECT structure (uk):
+    ⚖ Суд відкинув «експертні висновки» як неналежні докази у справі руху «АЛЛАТРА» — і це змінює правила гри.
+    🔹 Резонансна судова справа та її значення як прецеденту.
+    🔹 Аналіз: чому «експертні висновки» не відповідають вимогам належних доказів.
+    ⚖ Факти про діяльність Кременовської та Святогора.
+    🔹 Зв'язок із риторикою РАЦИРС та наслідки для Європи.
+
+    EXAMPLE — WRONG structure (3 violations):
+    Підпишіться та напишіть у коментарях...     ← RULE 1 violation: CTA as opener
+    ⚖ Суд відкинув «експертні висновки»...       ← hook appears late
+    ⚖ Суд відкинув «експертні висновки»...       ← RULE 2 violation: hook repeated
+    🔹 ...
+    🔹 ...
+    🔹 ...
+    🔹 ...
+    🔹 ...
+    🔹 ...                                        ← RULE 3 violation: 8 bullets when max is 7
+  merge_contracts:
+    compact: |
+      Use the compact merge contract for 1 to 2 source items.
+      Write one cohesive stream description in 2 to 3 compact paragraphs.
+      Paragraph 1 (hook): write 1 to 2 sentences grounded in the main tension, risk, or key conflict.
+      Keep the hook editorial and readable, but never clickbait.
+      Paragraph 2 (theses block): open with one short editorial statement that names the central tension, key question, or main conflict - not a lead-in phrase like "In this stream you will see".
+      Then write {compact_bullet_min} to {compact_bullet_max} short thesis bullet lines (target range {compact_bullet_range}).
+      Each bullet line must start with exactly one allowed marker: 🔹 📌 🎤 🎥 ⚖ 🌐 ✅.
+      Most bullets should start with 🔹.
+      Accent markers are rare and optional; use no more than 3 accent markers per theses block.
+      Keep marker usage controlled and readable; do not use dash-only bullets as the sole style.
+      Do not present the agenda as SOURCE 1 / SOURCE 2.
+      Keep agenda points specific and factual, not generic placeholders.
+      The description must still cover all merged source items and preserve key concrete facts from each source.
+      Write as a YouTube editor creating a description that makes people click — not as an analyst writing a briefing note.
+    expanded: |
+      Use the expanded merge contract for 3 or more source items.
+      Write one cohesive stream description in 3 to 4 compact paragraphs.
+      Paragraph 1 (hook): write 1 to 2 sentences grounded in the main tension, risk, or key conflict.
+      Keep the hook editorial and readable, but never clickbait.
+      After the hook, use a more open agenda structure instead of one overloaded thesis block.
+      Write {expanded_bullet_min} to {expanded_bullet_max} short bullet lines total.
+      You may organize the bullets into 2 to 3 thematic micro-blocks when that improves clarity. Separate each thematic micro-block from the next with a blank line.
+      IMPORTANT: Bullet lines within the same thematic micro-block must be separated by single newlines (\n), NOT by blank lines (\n\n). A blank line starts a new paragraph. The entire bullet section should be at most 2 visual paragraphs.
+      Each bullet line must start with exactly one allowed marker: 🔹 📌 🎤 🎥 ⚖ 🌐 ✅.
+      Most bullets should start with 🔹.
+      Accent markers are rare and optional; use no more than 3 accent markers per description.
+      Keep marker usage controlled and readable; do not use dash-only bullets as the sole style.
+      Do not present the agenda as SOURCE 1 / SOURCE 2 / SOURCE 3.
+      Keep agenda points specific and factual, not generic placeholders.
+      Do not let the opening hook consume most of the useful summary space.
+      A polished opening is never a substitute for a concrete multi-angle summary.
+      Treat the post-hook body as the main payload and let it carry most of the concrete information.
+      Make most bullets fact-bearing: anchor them with names, places, institutions, numbers, timings, events, or operational consequences whenever the sources provide them.
+      Give the body at least two clearly substantive agenda lanes after the hook instead of one thin run of near-duplicate bullets.
+      Across the agenda, preserve distinguishable source details such as names, places, numbers, events, or clearly separate thematic nodes whenever the sources provide them.
+      Across 3 or more sources, spread the bullets across multiple source lines or topic nodes so the summary does not collapse into one generic lane.
+      If the merged sources span different domains, separate them across different bullets or short thematic blocks instead of compressing them into one universal bullet.
+      Do not combine science or medicine, climate or environment, disasters or catastrophic hazards, psychology or cognition or behavior, and broad social or moral conclusions into one bullet or one cause-and-effect chain unless the sources explicitly require that connection.
+      Thematic grouping is encouraged when useful: research, hazards, human behavior, practical risk, public meaning, or response can be separated into different bullets or micro-blocks.
+      The description must still cover all merged source items and preserve key concrete facts from each source.
+      Write as a YouTube editor creating a description that makes people click — not as an analyst writing a briefing note. If a bullet sounds like it belongs in a policy report, rewrite it with a sharper angle.
+      {speaker_anchor_line}
+    narrative: |
+      This stream covers a single unified event or case.
+      Write the description as connected prose, not a bullet list.
+      Hook paragraph first, then 2-3 prose paragraphs. No bullets.
+  merge_retry_reinforcements:
+    insufficient_bullet_coverage:
+      - "Previous attempt produced only {actual_bullets} bullet lines. Rewrite with at least {required_bullets} bullets."
+      - "Spread bullets across all {source_count} sources. Do not collapse multiple sources into one generic lane."
+    duplicate_paragraph:
+      - "CRITICAL: Previous attempt had a structural error - the opening paragraph was repeated or a CTA appeared where the hook should be."
+      - "RULE 1 - HOOK STRUCTURE: The very first paragraph must be the hook: a question, tension, or key thesis. It appears exactly ONCE."
+      - "RULE 2 - NO DUPLICATION: Paragraph 2 and later must NOT restate, paraphrase, or echo any sentence from paragraph 1. If paragraph 1 ends with a question, paragraph 2 must answer it with new facts - never repeat the question."
+      - "RULE 3 - NO CTA IN HOOK POSITION: Do NOT place 'Subscribe', 'Follow', 'Watch', 'Share', 'Подпишитесь', 'Поширюйте', 'Смотрите', or any call to action as the first paragraph. CTA belongs only at the very end, after all bullets."
+      - "RULE 4 - PARAGRAPH 2 MUST BE BULLETS: Immediately after the hook, start the bullet block. The second paragraph must begin with a bullet marker (🔹, ⚖, 📌, etc.), not with another prose sentence."
+    overloaded_bullet:
+      - "Previous attempt had {overloaded_count} overloaded bullet(s) - single bullets listing {bullet_name_limit}+ multi-word names or spanning {bullet_char_limit}+ characters."
+      - "RULE - SPLIT OVERLOADED BULLETS: If a bullet contains {bullet_name_limit} or more full names (first + last name) or is longer than {bullet_char_limit} characters, split it into 2 separate bullets."
+      - "Each bullet must carry ONE clear idea or ONE person's contribution - not a container for everything that didn't fit elsewhere."
+      - "It is better to have 7 focused bullets than 5 bullets where one is a dump of everything."
+    paragraph_overflow:
+      - "Previous attempt produced {actual_paragraphs} body paragraphs but the maximum is {max_paragraphs}."
+      - "STRUCTURE RULE: The output must have at most {max_paragraphs} visual paragraphs (blocks separated by blank lines)."
+      - "Paragraph 1 = hook (1-2 sentences). Paragraph 2 = bullet block. All bullet lines within one thematic group must be separated by single newlines, NOT double newlines."
+      - "If you use thematic micro-blocks, keep them inside the same paragraph - separate sub-groups with a single blank line only if absolutely needed, but the total paragraph count must stay within the limit."
+      - "Do NOT put each bullet on its own paragraph. Group related bullets together."
+    paragraph_underflow:
+      - "Previous attempt produced only 1 body paragraph. The minimum is 2."
+      - "STRUCTURE RULE: The output must have at least 2 visual paragraphs (blocks separated by blank lines)."
+      - "Paragraph 1 = hook (1-2 editorial sentences setting the tension or key question)."
+      - "Paragraph 2 = bullet block starting with the allowed markers (🔹, 📌, 🎤, 🎥, ⚖, 🌐, ✅). Separate the hook from the bullets with one blank line."
+      - "Do NOT merge the hook and bullets into a single block of text."
+    cta_as_first_paragraph:
+      - "CRITICAL: Previous attempt placed a CTA (subscribe/follow/watch) as the first paragraph."
+      - "RULE: The first paragraph must be the editorial hook — a question, tension, or key thesis."
+      - "CTA belongs ONLY at the very end, after all bullets and before hashtags."
+      - "Rewrite so paragraph 1 is the hook, and any CTA is the last line before hashtags."
+    compact_bullet_overflow:
+      - "Previous attempt had {actual_bullets} bullets but the compact contract allows maximum {max_bullets}."
+      - "RULE: For 2-source merge, the bullet block must have exactly {min_bullets} to {max_bullets} bullets."
+      - "Merge related points into fewer, denser bullets. Each bullet = one distinct fact or angle. Do not pad."
+    hook_echo_in_body:
+      - "CRITICAL: Previous attempt repeated the hook thesis in the bullet block opening."
+      - "RULE 5 — NO HOOK ECHO: The first line of the bullet block must NOT restate the hook. If the hook asks a question, the first bullet must answer with a new fact, not repeat the question."
+      - "Paragraph 2 must start with a bullet marker and a NEW fact that was not in paragraph 1."
+      - "Do NOT reuse any phrase, quote, or sentence from paragraph 1 in paragraph 2 — not even rephrased. If the hook contains a direct quote, paragraph 2 must NOT open with the same quote. The opening of paragraph 2 must be a completely different statement."
+      - "STRUCTURAL REMINDER: Paragraph 1 = hook (1-2 sentences, ends with sentence-ending punctuation: period, exclamation mark, or question mark). Then one blank line. Paragraph 2 = bullet block starting with a bullet marker. Do NOT merge the first bullet into the hook line."
 
 files:
   doc_title_template: "{date}_{processing_mode}_Ежедневные стримы - Everyday streams{llm_models_segment}_{creation_stamp}"

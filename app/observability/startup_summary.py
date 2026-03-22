@@ -9,7 +9,7 @@ from typing import Optional
 from app.config.settings import AppConfig
 from app.bootstrap.run_context import RunContext, StartupContext
 from app.core.branching import audit_branch_labels
-from app.llm.model_identity import build_effective_llm_model_identity
+from app.llm.models.model_identity import build_effective_llm_model_identity
 
 
 @dataclass(frozen=True)

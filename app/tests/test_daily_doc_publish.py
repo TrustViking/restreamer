@@ -161,7 +161,7 @@ class DailyDocPublishTests(unittest.TestCase):
             )
 
         header_text = report_writer.write_header_only.call_args.kwargs["header_text"]
-        self.assertIn("UK - 09:00 (Partial fallback)", header_text)
+        self.assertIn("UK - 09:00 ⚠ [merge failed — source list]", header_text)
         logs: str = "\n".join(captured.output)
         self.assertIn("merge_block_publish_truth", logs)
         self.assertIn("block_generation_mode=fallback_after_merge_failure", logs)
@@ -236,7 +236,7 @@ class DailyDocPublishTests(unittest.TestCase):
 
         header_text = report_writer.write_header_only.call_args.kwargs["header_text"]
         self.assertIn(
-            "UK - 09:00 (Merge rejected fallback artifact)",
+            "UK - 09:00 ⚠ [merge failed — source list]",
             header_text,
         )
         logs: str = "\n".join(captured.output)

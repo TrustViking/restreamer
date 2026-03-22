@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from app.config.settings import AppConfig
-from app.llm.model_identity import resolve_effective_llm_model
-from app.llm.openai_client import LlmTraceContext, OpenAITransportResult
-from app.llm.providers.base import LlmProvider, ProviderModels
+from app.llm.models.model_identity import resolve_effective_llm_model
+from app.llm.llm_client import LlmTraceContext, OpenAITransportResult
+from app.llm.providers.provider_base import LlmProvider, ProviderModels
 
 
 class OpenAIProvider(LlmProvider):

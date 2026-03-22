@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from app.bootstrap.run_context import StartupContext
 from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
-from app.llm.merge_run_summary import MergeRunSummary
-from app.llm.model_compatibility import LlmModelConfigurationError
+from app.llm.merges.merge_run_summary import MergeRunSummary
+from app.llm.models.model_compatibility import LlmModelConfigurationError
 from app.observability import runtime_analytics
 from app.observability.content_contract import analyze_content_contract
 from app.observability.runtime_analytics import log_warning_informational, log_warning_operational

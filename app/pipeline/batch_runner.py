@@ -12,8 +12,8 @@ from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.core.env_flags import sheets_link_normalize_report_limit_from_env
 from app.core.models import LanguageMergeAttempt, PlannedVideo, PreparedVideo
 from app.ingest.youtube_metadata import YouTubeMetadataFetcher
-from app.llm.model_compatibility import LlmModelConfigurationError
-from app.llm.merge_run_summary import MergeRunSummary
+from app.llm.models.model_compatibility import LlmModelConfigurationError
+from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.net.http_client import HttpClient
 from app.observability.runtime_analytics import (
     get_branch_date_summary,

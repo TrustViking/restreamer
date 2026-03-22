@@ -9,12 +9,12 @@ from app.core.constants import LOGGER_NAME_ENV_VAR
 from app.core.env_flags import llm_allow_in_dry_run_from_env
 from app.core.error_summary import summarize_error
 from app.core.branching import audit_branch_labels
-from app.llm.model_compatibility import (
+from app.llm.models.model_compatibility import (
     LlmModelConfigurationError,
     OpenAIRequestCompatibility,
     resolve_openai_request_compatibility,
 )
-from app.llm.openai_client import probe_openai_model_access
+from app.llm.llm_client import probe_openai_model_access
 from app.observability.runtime_analytics import (
     log_error_event,
     log_warning_informational,

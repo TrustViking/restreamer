@@ -32,7 +32,7 @@ from app.core.env_flags import (
     strip_chapter_timestamps_enabled_from_env,
 )
 from app.core.error_summary import summarize_error
-from app.llm.openai_client import reset_run_local_openai_usage
+from app.llm.llm_client import reset_run_local_openai_usage
 from app.observability.final_summary import (
     FinalRunSummaryContext,
     emit_final_run_summary,
