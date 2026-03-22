@@ -5,6 +5,7 @@ import logging
 from typing import Iterable, List, Optional, Sequence
 
 from app.core.models import LanguageMergeAttempt, MergedLanguageContent, PlannedVideo
+from app.core.text_utils import split_paragraphs
 from app.llm.merges.merge_quality import inspect_merge_description
 from app.publish.post_llm_sanitation import (
     PostLlmSanitizationResult,
@@ -324,7 +325,7 @@ def _resolve_contract_status(
 
 
 def _split_paragraphs(body_text: str) -> List[str]:
-    return [part.strip() for part in str(body_text or "").split("\n\n") if part.strip()]
+    return split_paragraphs(body_text)
 
 
 def _tail_origin_from_source(tail_source: str, *, found: bool) -> str:

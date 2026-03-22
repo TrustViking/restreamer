@@ -1,0 +1,51 @@
+STRUCTURAL RULES — APPLY TO EVERY MERGE OUTPUT
+
+RULE 1 — NO CTA AS OPENER:
+The first paragraph MUST be the editorial hook.
+It must NEVER be a call to action, engagement request, or subscription prompt.
+FORBIDDEN first-paragraph starts:
+"Підпишіться" / "Підписуйтесь" / "Подпишитесь" / "Подписывайтесь" /
+"Subscribe" / "Follow" / "Join" / "Watch" / "Поширюйте" / "Поділіться" /
+"Приєднуйтесь" / "Смотрите" / "Следите"
+CTA belongs ONLY at the very end, after all bullets and before hashtags.
+If you place a CTA as the first paragraph, the output WILL be rejected.
+
+RULE 2 — HOOK UNIQUENESS:
+The hook paragraph appears exactly ONCE — as the first paragraph.
+Paragraph 2 and all subsequent content must move FORWARD with new facts.
+FORBIDDEN patterns:
+- Restating the hook question in paragraph 2 (even rephrased)
+- Opening the bullet block with a sentence that echoes the hook
+- Writing the same thesis twice with different wording
+If the hook is "Як так вийшло, що X?", paragraph 2 must NOT begin
+with "Як так вийшло..." or any paraphrase. It must start with a bullet
+marker (🔹, ⚖, 📌, etc.) and a NEW fact.
+
+RULE 3 — BULLET COUNT DISCIPLINE:
+The number of bullets must stay within the range specified by the contract.
+If the contract says 4-7 bullets, writing 8 or more WILL be rejected.
+If the contract says 5-7, writing 8 or more WILL be rejected.
+Do not pad with generic bullets. Each bullet = one distinct fact or angle.
+
+RULE 4 — PARAGRAPH 2 STARTS WITH A BULLET:
+Immediately after the hook, the next content must be the bullet block.
+Paragraph 2 must begin with a bullet marker, not with another prose sentence,
+not with a rephrased hook, not with a CTA.
+
+EXAMPLE — CORRECT structure (uk):
+⚖ Суд відкинув «експертні висновки» як неналежні докази у справі руху «АЛЛАТРА» — і це змінює правила гри.
+🔹 Резонансна судова справа та її значення як прецеденту.
+🔹 Аналіз: чому «експертні висновки» не відповідають вимогам належних доказів.
+⚖ Факти про діяльність Кременовської та Святогора.
+🔹 Зв'язок із риторикою РАЦИРС та наслідки для Європи.
+
+EXAMPLE — WRONG structure (3 violations):
+Підпишіться та напишіть у коментарях...     ← RULE 1 violation: CTA as opener
+⚖ Суд відкинув «експертні висновки»...       ← hook appears late
+⚖ Суд відкинув «експертні висновки»...       ← RULE 2 violation: hook repeated
+🔹 ...
+🔹 ...
+🔹 ...
+🔹 ...
+🔹 ...
+🔹 ...                                        ← RULE 3 violation: 8 bullets when max is 7

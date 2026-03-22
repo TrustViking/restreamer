@@ -6,28 +6,15 @@ from typing import List, Optional, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.core.models import PlannedVideo
-from app.core.url_utils import TRACKING_QUERY_KEYS
+from app.core.url_normalizer import normalize_display_url
+from app.core.url_utils import TRACKING_QUERY_KEYS, _canonical_domain_key
+from app.resources.resource_loader import load_lines_resource
 from app.llm.merges.merge_constants import URL_PATTERN
 from app.llm.merges.merge_text_utils import _extract_description_paragraphs_raw, _is_official_links_heading_line
 from app.llm.merges.merge_youtube import _is_youtube_host
+from app.resources import resolve_official_links_heading
 
-_OFFICIAL_LINK_CONTEXT_HINTS: tuple[str, ...] = (
-    "official",
-    "website",
-    "initiative",
-    "resource",
-    "resources",
-    "conference",
-    "more information",
-    "details",
-    "site",
-    "official links",
-    "офіцій",
-    "ініціатив",
-    "ресурс",
-    "сайт",
-    "официал",
-)
+_OFFICIAL_LINK_CONTEXT_HINTS: tuple[str, ...] = load_lines_resource("lexicon_official_link_hints.txt")
 
 @dataclass(frozen=True)
 class OfficialLinksSelection:
@@ -55,22 +42,13 @@ def _normalize_link_candidate(url: str) -> Optional[str]:
         filtered_query_items.append((key, value))
     sanitized_query: str = urlencode(filtered_query_items, doseq=True)
     result_url: str = urlunsplit((parts.scheme, parts.netloc, parts.path, sanitized_query, ""))
-    if result_url.endswith("/") and parts.path in ("", "/"):
-        result_url = result_url.rstrip("/")
-    return result_url
+    return normalize_display_url(result_url)
 
 def _official_links_heading(language: str) -> str:
-    if language == "uk":
-        return "🌐 Офіційні ресурси:"
-    if language == "ru":
-        return "🌐 Официальные ссылки:"
-    return "🌐 Official links:"
+    return resolve_official_links_heading(language)
 
 def _canonical_link_key(url: str) -> str:
-    parts = urlsplit(url)
-    host: str = parts.netloc.lower().strip()
-    path: str = (parts.path or "/").rstrip("/")
-    return f"{host}{path}"
+    return _canonical_domain_key(url)
 
 def _line_has_official_context(line_text: str) -> bool:
     normalized_line: str = str(line_text or "").strip().lower()

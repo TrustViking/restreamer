@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.core.models import PlannedVideo, VideoMetadata
 from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher, normalize_youtube_link
+from app.core.text_utils import is_youtube_host
 from app.llm.merges.merge_constants import URL_PATTERN
 
 LOGGER = _get_logger_impl(__name__)
@@ -28,14 +29,7 @@ class MergeYouTubeCandidatesResult:
     metadata_resolved_count: int
 
 def _is_youtube_host(host: str) -> bool:
-    normalized_host: str = str(host or "").strip().lower()
-    if not normalized_host:
-        return False
-    return (
-        normalized_host.endswith("youtube.com")
-        or normalized_host.endswith("youtu.be")
-        or normalized_host.endswith("youtube-nocookie.com")
-    )
+    return is_youtube_host(host)
 
 def _format_duration_label(duration_seconds: Optional[int]) -> str:
     if duration_seconds is None or duration_seconds <= 0:

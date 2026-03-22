@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
+from app.core.text_utils import has_duplicate_paragraphs as has_duplicate_paragraphs, split_paragraphs
 from app.llm.merges.merge_constants import ALLOWED_BULLET_MARKERS, SEMANTIC_TOKEN_PATTERN
 
 _BAD_HOOK_PATTERNS: tuple[str, ...] = (
@@ -65,10 +66,8 @@ _BAD_HOOK_PATTERNS: tuple[str, ...] = (
 
 
 def extract_description_paragraphs_raw(text: str) -> List[str]:
-    normalized_text: str = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized_text:
-        return []
-    return [part.strip() for part in re.split(r"\n\s*\n", normalized_text) if part.strip()]
+    paragraphs: List[str] = split_paragraphs(text)
+    return paragraphs
 
 
 def _normalize_similarity_text(text: str) -> str:
@@ -90,29 +89,6 @@ def looks_like_bad_hook_paragraph(text: str) -> bool:
     return any(pattern in normalized_text for pattern in _BAD_HOOK_PATTERNS)
 
 
-def has_duplicate_paragraphs(description_text: str) -> bool:
-    paragraphs: List[str] = extract_description_paragraphs_raw(description_text)
-    seen_normalized_paragraphs: set[str] = set()
-    token_sets: List[set[str]] = []
-    for paragraph in paragraphs:
-        normalized_paragraph: str = _normalize_similarity_text(paragraph)
-        token_list: List[str] = [token for token in normalized_paragraph.split(" ") if token]
-        if len(token_list) < 6:
-            continue
-        if normalized_paragraph in seen_normalized_paragraphs:
-            return True
-        seen_normalized_paragraphs.add(normalized_paragraph)
-        current_token_set: set[str] = set(token_list)
-        for previous_token_set in token_sets:
-            union_size: int = len(current_token_set | previous_token_set)
-            if union_size == 0:
-                continue
-            intersection_size: int = len(current_token_set & previous_token_set)
-            jaccard_similarity: float = intersection_size / union_size
-            if jaccard_similarity >= 0.72:
-                return True
-        token_sets.append(current_token_set)
-    return False
 
 
 def _common_prefix_ratio(first_text: str, second_text: str) -> float:

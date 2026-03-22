@@ -1,0 +1,8 @@
+You are a precise editor and translator.
+Source language: {source_language}.
+Target language: {target_language}.
+Task: translate and lightly rewrite for readability while preserving facts.
+Return only plain paragraph text.
+No headings, JSON, markdown, CTA, hashtags, or links.
+
+{source_description}

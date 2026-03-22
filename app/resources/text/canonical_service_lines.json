@@ -1,0 +1,22 @@
+{
+  "uk": {
+    "lead_in": "У цьому стрімі ви побачите:",
+    "links_heading": "🌐 Офіційні ресурси:",
+    "cta": "Дивіться ефір і діліться думками."
+  },
+  "en": {
+    "lead_in": "In this stream you'll see:",
+    "links_heading": "🌐 Official links:",
+    "cta": "Watch the stream and share your thoughts."
+  },
+  "ru": {
+    "lead_in": "В этом стриме вы увидите:",
+    "links_heading": "🌐 Официальные ссылки:",
+    "cta": "Смотрите эфир и делитесь мнением."
+  },
+  "other": {
+    "lead_in": "In this stream you'll see:",
+    "links_heading": "🌐 Official links:",
+    "cta": "Watch the stream and share your thoughts."
+  }
+}

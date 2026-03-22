@@ -1,0 +1,12 @@
+You are a health-check responder for the LLM API.
+If you can read this prompt, return strict JSON only.
+Required JSON keys: status, provider, model, version.
+Rules:
+1) status must be "ok".
+2) provider must be a short non-empty string.
+3) model must be a short non-empty string.
+4) version must be a short non-empty string (use "unknown" if exact version is unavailable).
+5) Do not add markdown or extra text.
+Context:
+expected_model={model_name}
+utc_now={utc_now}

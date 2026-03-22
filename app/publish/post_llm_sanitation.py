@@ -13,7 +13,10 @@ from app.core.models import (
     MergedPublicationPayload as _CoreMergedPublicationPayload,
     PlannedVideo,
 )
+from app.core.text_utils import normalize_multiline_text, split_paragraphs, is_youtube_url, has_duplicate_paragraphs
+from app.core.url_normalizer import normalize_display_url
 from app.core.url_utils import TRACKING_QUERY_KEYS, _canonical_domain_key
+from app.resources.resource_loader import load_lines_resource
 from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher, normalize_youtube_video_url
 from app.llm.merges.merge_constants import (
     ALLOWED_BULLET_MARKERS,
@@ -26,6 +29,10 @@ from app.llm.merges.merge_constants import (
 from app.llm.merges.merge_quality import normalize_merge_description
 from app.llm.merges.merge_validation_helpers import looks_like_bad_hook_paragraph
 from app.observability.runtime_analytics import record_malformed_tail_url_cleanup
+from app.resources import (
+    resolve_official_links_heading,
+    resolve_recommended_materials_heading,
+)
 
 
 LOGGER = _get_logger_impl(__name__)
@@ -39,23 +46,7 @@ _DOUBLE_BULLET_RE: re.Pattern[str] = re.compile(
 _OFFICIAL_LINKS_HEADING_RE: re.Pattern[str] = re.compile(
     r"(?im)^\s*(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:\s*$"
 )
-_CTA_HINTS: tuple[str, ...] = (
-    "watch",
-    "learn more",
-    "join",
-    "subscribe",
-    "follow",
-    "read more",
-    "links below",
-    "details below",
-    "дивіться",
-    "долуч",
-    "підпис",
-    "узнать больше",
-    "смотрите",
-    "подпис",
-    "подробности",
-)
+_CTA_HINTS: tuple[str, ...] = load_lines_resource("lexicon_cta_hints.txt")
 
 
 @dataclass(frozen=True)
@@ -191,32 +182,7 @@ def log_safe_merge_attempt_fallback(
 
 
 def _final_description_has_duplicate_paragraphs(description_text: str) -> bool:
-    raw_paragraphs: List[str] = [
-        part
-        for part in re.split(r"\n\s*\n", str(description_text or "").strip())
-        if part.strip()
-    ]
-    seen_normalized_paragraphs: set[str] = set()
-    token_sets: List[set[str]] = []
-    for paragraph in raw_paragraphs:
-        normalized_paragraph: str = re.sub(r"\s+", " ", paragraph.strip().lower())
-        token_list: List[str] = [token for token in normalized_paragraph.split(" ") if token]
-        if len(token_list) < 6:
-            continue
-        if normalized_paragraph in seen_normalized_paragraphs:
-            return True
-        seen_normalized_paragraphs.add(normalized_paragraph)
-        current_token_set: set[str] = set(token_list)
-        for previous_token_set in token_sets:
-            union_size: int = len(current_token_set | previous_token_set)
-            if union_size == 0:
-                continue
-            intersection_size: int = len(current_token_set & previous_token_set)
-            jaccard_similarity: float = intersection_size / union_size
-            if jaccard_similarity >= 0.72:
-                return True
-        token_sets.append(current_token_set)
-    return False
+    return has_duplicate_paragraphs(description_text)
 
 
 def _final_description_has_opener_cta(description_text: str) -> bool:
@@ -869,7 +835,7 @@ def build_authoritative_merged_source_urls(
 
 
 def _normalize_text(text: str) -> str:
-    return str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return normalize_multiline_text(text)
 
 
 def _split_tail_parts(lines: Sequence[str]) -> _TailParts:
@@ -1118,6 +1084,7 @@ def _sanitize_url(url: str) -> str:
     sanitized_url: str = urlunsplit(
         (parts.scheme, parts.netloc, parts.path, sanitized_query, parts.fragment)
     )
+    sanitized_url = normalize_display_url(sanitized_url)
     return prefix + sanitized_url + suffix
 
 
@@ -1158,15 +1125,7 @@ def _normalize_authoritative_video_url(video: PlannedVideo) -> Optional[str]:
 
 
 def _is_youtube_url(url: str) -> bool:
-    cleaned_url: str = str(url or "").strip().strip("<>()[]{}").rstrip(".,;")
-    if not cleaned_url:
-        return False
-    try:
-        parts = urlsplit(cleaned_url)
-    except Exception:
-        return False
-    host: str = str(parts.netloc or "").strip().lower()
-    return host in {"youtu.be", "www.youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com"}
+    return is_youtube_url(url)
 
 
 def _is_complete_source_url(url: str) -> bool:
@@ -1279,21 +1238,11 @@ def _extract_official_links_url_lines(lines: Sequence[str]) -> List[str]:
 
 
 def _resolve_official_links_heading(language: str) -> str:
-    normalized_language: str = str(language or "").strip().lower()
-    if normalized_language == "ru":
-        return "🌐 Официальные ссылки:"
-    if normalized_language == "uk":
-        return "🌐 Офіційні ресурси:"
-    return "🌐 Official links:"
+    return resolve_official_links_heading(language)
 
 
 def _resolve_recommended_materials_heading(language: str) -> str:
-    normalized_language: str = str(language or "").strip().lower()
-    if normalized_language == "uk":
-        return "Рекомендовані матеріали:"
-    if normalized_language == "en":
-        return "Recommended materials:"
-    return "Рекомендуемые материалы:"
+    return resolve_recommended_materials_heading(language)
 
 
 def _fetch_recommended_youtube_title(url: str) -> Optional[str]:
@@ -1419,10 +1368,7 @@ def _resolve_tail_layout(
 
 
 def _split_paragraphs(text: str) -> List[str]:
-    normalized_text: str = _normalize_text(text)
-    if not normalized_text:
-        return []
-    return [part.strip() for part in re.split(r"\n\s*\n", normalized_text) if part.strip()]
+    return split_paragraphs(text)
 
 
 def _join_lines(lines: Sequence[str]) -> str:

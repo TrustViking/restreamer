@@ -1,0 +1,5 @@
+Previous attempt produced {actual_paragraphs} body paragraphs but the maximum is {max_paragraphs}.
+STRUCTURE RULE: The output must have at most {max_paragraphs} visual paragraphs (blocks separated by blank lines).
+Paragraph 1 = hook (1-2 sentences). Paragraph 2 = bullet block. All bullet lines within one thematic group must be separated by single newlines, NOT double newlines.
+If you use thematic micro-blocks, keep them inside the same paragraph - separate sub-groups with a single blank line only if absolutely needed, but the total paragraph count must stay within the limit.
+Do NOT put each bullet on its own paragraph. Group related bullets together.

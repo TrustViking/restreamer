@@ -5,6 +5,7 @@ import re
 from typing import List, Optional, Sequence
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.core.text_utils import normalize_newlines, starts_with_any_prefix
 from app.core.models import (
     MergedLanguageContent,
     PlannedVideo,
@@ -292,14 +293,7 @@ def _attempt_hook_echo_repair(description_text: str) -> Optional[str]:
 
 
 def _starts_with_cta_prefix(line_text: str) -> bool:
-    normalized_line_text: str = str(line_text or "").strip().lower()
-    if not normalized_line_text:
-        return False
-    for raw_prefix in CTA_FIRST_PARAGRAPH_PREFIXES:
-        normalized_prefix: str = str(raw_prefix or "").strip().lower()
-        if normalized_prefix and normalized_line_text.startswith(normalized_prefix):
-            return True
-    return False
+    return starts_with_any_prefix(line_text, CTA_FIRST_PARAGRAPH_PREFIXES)
 
 
 def _has_cta_in_opening_lines_before_hook_or_bullet(
@@ -341,7 +335,7 @@ def _has_cta_in_opening_lines_before_hook_or_bullet(
 
 
 def _has_adjacent_duplicate_lines(description_text: str) -> bool:
-    normalized_description_text: str = str(description_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    normalized_description_text: str = normalize_newlines(description_text)
     lines: list[str] = [str(line_text or "").strip() for line_text in normalized_description_text.split("\n")]
     for line_index in range(len(lines) - 1):
         current_line: str = lines[line_index]

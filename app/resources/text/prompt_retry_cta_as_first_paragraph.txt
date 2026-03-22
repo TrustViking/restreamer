@@ -1,0 +1,4 @@
+CRITICAL: Previous attempt placed a CTA (subscribe/follow/watch) as the first paragraph.
+RULE: The first paragraph must be the editorial hook — a question, tension, or key thesis.
+CTA belongs ONLY at the very end, after all bullets and before hashtags.
+Rewrite so paragraph 1 is the hook, and any CTA is the last line before hashtags.

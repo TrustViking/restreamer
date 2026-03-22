@@ -1,0 +1,4 @@
+Previous attempt had {overloaded_count} overloaded bullet(s) - single bullets listing {bullet_name_limit}+ multi-word names or spanning {bullet_char_limit}+ characters.
+RULE - SPLIT OVERLOADED BULLETS: If a bullet contains {bullet_name_limit} or more full names (first + last name) or is longer than {bullet_char_limit} characters, split it into 2 separate bullets.
+Each bullet must carry ONE clear idea or ONE person's contribution - not a container for everything that didn't fit elsewhere.
+It is better to have 7 focused bullets than 5 bullets where one is a dump of everything.

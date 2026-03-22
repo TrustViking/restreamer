@@ -5,6 +5,7 @@ import re
 from typing import List, Optional, Sequence
 
 from app.core.language import detect_language_from_text
+from app.core.text_utils import normalize_newlines
 from app.llm.merges.merge_constants import (
     ACCENT_BULLET_MARKERS,
     ACCENT_MARKER_CAP,
@@ -16,6 +17,7 @@ from app.llm.merges.merge_constants import (
     URL_LINE_PATTERN,
     URL_PATTERN,
 )
+from app.resources import canonical_service_lines
 _PLAIN_BULLET_PATTERN: re.Pattern[str] = re.compile(
     r"^\s*(?:[-*•▪◦‣–—]|(?:\d+[.)]))\s+\S+",
     flags=re.UNICODE,
@@ -117,28 +119,7 @@ _RUSSIAN_WORD_HINTS: tuple[str, ...] = (
     " этом ",
 )
 
-CANONICAL_SERVICE_LINES: dict[str, dict[str, str]] = {
-    "uk": {
-        "lead_in": "У цьому стрімі ви побачите:",
-        "links_heading": "🌐 Офіційні ресурси:",
-        "cta": "Дивіться ефір і діліться думками.",
-    },
-    "en": {
-        "lead_in": "In this stream you'll see:",
-        "links_heading": "🌐 Official links:",
-        "cta": "Watch the stream and share your thoughts.",
-    },
-    "ru": {
-        "lead_in": "В этом стриме вы увидите:",
-        "links_heading": "🌐 Официальные ссылки:",
-        "cta": "Смотрите эфир и делитесь мнением.",
-    },
-    "other": {
-        "lead_in": "In this stream you'll see:",
-        "links_heading": "🌐 Official links:",
-        "cta": "Watch the stream and share your thoughts.",
-    },
-}
+CANONICAL_SERVICE_LINES: dict[str, dict[str, str]] = canonical_service_lines()
 
 
 @dataclass(frozen=True)
@@ -316,7 +297,7 @@ class _MergeBlocks:
 
 
 def _normalize_text(text: str) -> str:
-    lines: List[str] = [line.rstrip() for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    lines: List[str] = [line.rstrip() for line in normalize_newlines(text).split("\n")]
     return "\n".join(lines).strip()
 
 

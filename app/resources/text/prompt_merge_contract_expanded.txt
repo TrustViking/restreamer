@@ -1,0 +1,26 @@
+Use the expanded merge contract for 3 or more source items.
+Write one cohesive stream description in 3 to 4 compact paragraphs.
+Paragraph 1 (hook): write 1 to 2 sentences grounded in the main tension, risk, or key conflict.
+Keep the hook editorial and readable, but never clickbait.
+After the hook, use a more open agenda structure instead of one overloaded thesis block.
+Write {expanded_bullet_min} to {expanded_bullet_max} short bullet lines total.
+You may organize the bullets into 2 to 3 thematic micro-blocks when that improves clarity. Separate each thematic micro-block from the next with a blank line.
+IMPORTANT: Bullet lines within the same thematic micro-block must be separated by single newlines (\n), NOT by blank lines (\n\n). A blank line starts a new paragraph. The entire bullet section should be at most 2 visual paragraphs.
+Each bullet line must start with exactly one allowed marker: 🔹 📌 🎤 🎥 ⚖ 🌐 ✅.
+Most bullets should start with 🔹.
+Accent markers are rare and optional; use no more than 3 accent markers per description.
+Keep marker usage controlled and readable; do not use dash-only bullets as the sole style.
+Do not present the agenda as SOURCE 1 / SOURCE 2 / SOURCE 3.
+Keep agenda points specific and factual, not generic placeholders.
+Do not let the opening hook consume most of the useful summary space.
+A polished opening is never a substitute for a concrete multi-angle summary.
+Treat the post-hook body as the main payload and let it carry most of the concrete information.
+Make most bullets fact-bearing: anchor them with names, places, institutions, numbers, timings, events, or operational consequences whenever the sources provide them.
+Give the body at least two clearly substantive agenda lanes after the hook instead of one thin run of near-duplicate bullets.
+Across the agenda, preserve distinguishable source details such as names, places, numbers, events, or clearly separate thematic nodes whenever the sources provide them.
+Across 3 or more sources, spread the bullets across multiple source lines or topic nodes so the summary does not collapse into one generic lane.
+If the merged sources span different domains, separate them across different bullets or short thematic blocks instead of compressing them into one universal bullet.
+Do not combine science or medicine, climate or environment, disasters or catastrophic hazards, psychology or cognition or behavior, and broad social or moral conclusions into one bullet or one cause-and-effect chain unless the sources explicitly require that connection.
+Thematic grouping is encouraged when useful: research, hazards, human behavior, practical risk, public meaning, or response can be separated into different bullets or micro-blocks.
+The description must still cover all merged source items and preserve key concrete facts from each source.
+{speaker_anchor_line}

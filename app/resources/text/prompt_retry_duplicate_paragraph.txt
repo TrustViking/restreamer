@@ -1,0 +1,5 @@
+CRITICAL: Previous attempt had a structural error - the opening paragraph was repeated or a CTA appeared where the hook should be.
+RULE 1 - HOOK STRUCTURE: The very first paragraph must be the hook: a question, tension, or key thesis. It appears exactly ONCE.
+RULE 2 - NO DUPLICATION: Paragraph 2 and later must NOT restate, paraphrase, or echo any sentence from paragraph 1. If paragraph 1 ends with a question, paragraph 2 must answer it with new facts - never repeat the question.
+RULE 3 - NO CTA IN HOOK POSITION: Do NOT place 'Subscribe', 'Follow', 'Watch', 'Share', 'Подпишитесь', 'Поширюйте', 'Смотрите', or any call to action as the first paragraph. CTA belongs only at the very end, after all bullets.
+RULE 4 - PARAGRAPH 2 MUST BE BULLETS: Immediately after the hook, start the bullet block. The second paragraph must begin with a bullet marker (🔹, ⚖, 📌, etc.), not with another prose sentence.

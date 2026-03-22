@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.core.text_utils import (
+    normalize_newlines,
+    normalize_multiline_text,
+    split_paragraphs as _shared_split_paragraphs,
+    starts_with_any_prefix,
+)
 from app.core.models import MergedLanguageContent
 from app.llm.merges.merge_constants import CTA_FIRST_PARAGRAPH_PREFIXES, URL_LINE_PATTERN
 from app.llm.merges.merge_validation_helpers import (
@@ -140,7 +146,7 @@ def contains_emoji(text: str) -> bool:
 
 
 def strip_meta_lines(text: str) -> str:
-    lines: List[str] = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines: List[str] = normalize_newlines(text).split("\n")
     cleaned_lines: List[str] = []
     meta_pattern: re.Pattern[str] = re.compile(r"(?i)^\s*(?:title|description|sources?)\s*:")
     for line in lines:
@@ -151,7 +157,7 @@ def strip_meta_lines(text: str) -> str:
 
 
 def validate_description_plain(text: str) -> Tuple[bool, List[str]]:
-    normalized: str = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized: str = normalize_multiline_text(text)
     reasons: List[str] = []
     if not normalized:
         reasons.append("empty")
@@ -170,29 +176,16 @@ def clean_and_validate_llm_description(*, text: str) -> Tuple[str, bool, List[st
 
 
 def _normalize_multiline_text(text: str) -> str:
-    return str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return normalize_multiline_text(text)
 
 
 def _split_paragraphs(text: str) -> List[str]:
-    normalized_text: str = _normalize_multiline_text(text)
-    if not normalized_text:
-        return []
-    return [
-        paragraph.strip()
-        for paragraph in re.split(r"\n\s*\n", normalized_text)
-        if paragraph.strip()
-    ]
+    paragraphs: List[str] = _shared_split_paragraphs(text)
+    return paragraphs
 
 
 def _starts_with_cta_prefix(text: str) -> bool:
-    normalized_text: str = str(text or "").strip().lower()
-    if not normalized_text:
-        return False
-    for raw_prefix in CTA_FIRST_PARAGRAPH_PREFIXES:
-        normalized_prefix: str = str(raw_prefix or "").strip().lower()
-        if normalized_prefix and normalized_text.startswith(normalized_prefix):
-            return True
-    return False
+    return starts_with_any_prefix(text, CTA_FIRST_PARAGRAPH_PREFIXES)
 
 
 def _description_has_raw_opener_cta(description_text: str) -> bool:

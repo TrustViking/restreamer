@@ -16,6 +16,7 @@ from app.core.models import (
     PlannedVideo,
     RowVideoCharacteristics,
 )
+from app.core.text_utils import normalize_multiline_text
 from app.ingest.youtube_metadata import normalize_youtube_video_url
 from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.llm.merges.merge_service import (
@@ -109,8 +110,8 @@ def _log_merge_attempt_outcome(
 
 
 def _strip_urls_for_summary(text: str) -> str:
-    normalized: str = str(text or "")
-    return normalized.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized: str = normalize_multiline_text(text)
+    return normalized
 
 
 def _log_merge_input_summary(

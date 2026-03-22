@@ -1,0 +1,2 @@
+Previous attempt produced only {actual_bullets} bullet lines. Rewrite with at least {required_bullets} bullets.
+Spread bullets across all {source_count} sources. Do not collapse multiple sources into one generic lane.

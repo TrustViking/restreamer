@@ -16,7 +16,9 @@ from app.core.models import (
     MergedPublicationPayload,
     PlannedVideo,
 )
-from app.llm.merges.merge_constants import CTA_FIRST_PARAGRAPH_PREFIXES
+from app.core.text_utils import split_paragraphs, starts_with_any_prefix
+from app.core.url_normalizer import normalize_display_url
+from app.llm.merges.merge_constants import CTA_FIRST_PARAGRAPH_PREFIXES, URL_PATTERN
 from app.llm.merges.merge_text_utils import _looks_like_service_tail_paragraph
 from app.planning import planned_video_block_language
 from app.publish.post_llm_sanitation import (
@@ -24,6 +26,7 @@ from app.publish.post_llm_sanitation import (
     log_safe_merge_attempt_fallback,
     should_suppress_raw_merge_attempt_publish,
 )
+from app.resources import promotional_opener_phrases
 
 
 LOGGER = _get_logger_impl(__name__)
@@ -137,55 +140,33 @@ def _fallback_source_description_text(
 
 
 def _starts_with_cta_prefix(text: str) -> bool:
-    normalized_text: str = re.sub(r"\s+", " ", str(text or "").strip())
-    if not normalized_text:
-        return False
-    normalized_casefold: str = normalized_text.casefold()
-    for raw_prefix in CTA_FIRST_PARAGRAPH_PREFIXES:
-        prefix: str = str(raw_prefix or "").strip()
-        if prefix and normalized_casefold.startswith(prefix.casefold()):
-            return True
-    return False
-
-
-_PROMOTIONAL_OPENER_PHRASES: tuple[str, ...] = (
-    "you will find the answers",
-    "you will find answers",
-    "you'll find the answers",
-    "watch till the end",
-    "watch until the end",
-    "in this video you will",
-    "in this video you'll",
-    "in this stream you will",
-    "in this stream you'll",
-    "дивіться до кінця",
-    "у цьому відео ви",
-    "у цьому стрімі ви",
-    "ви знайдете відповіді",
-    "ви дізнаєтесь",
-    "в этом видео вы",
-    "в этом стриме вы",
-    "вы найдёте ответы",
-    "вы найдете ответы",
-    "вы узнаете",
-    "все ответы вы найдёте",
-    "все ответы вы найдете",
-    "смотрите до конца",
-)
+    return starts_with_any_prefix(
+        text,
+        CTA_FIRST_PARAGRAPH_PREFIXES,
+        use_casefold=True,
+        collapse_whitespace=True,
+    )
 
 
 def _looks_like_promotional_opener(text: str) -> bool:
     normalized: str = re.sub(r"\s+", " ", str(text or "").strip()).casefold()
     if not normalized:
         return False
-    return any(phrase in normalized for phrase in _PROMOTIONAL_OPENER_PHRASES)
+    return any(phrase in normalized for phrase in promotional_opener_phrases())
 
 
 def _extract_description_paragraphs_raw(text: str) -> List[str]:
-    normalized_text: str = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized_text:
-        return []
-    return [part.strip() for part in re.split(r"\n\s*\n", normalized_text) if part.strip()]
+    paragraphs: List[str] = split_paragraphs(text)
+    return paragraphs
+
+
+def _normalize_urls_in_text(text: str) -> str:
+    def _replace_url(match: re.Match[str]) -> str:
+        matched_url: str = str(match.group(0) or "")
+        return normalize_display_url(matched_url)
+
+    normalized_text: str = URL_PATTERN.sub(_replace_url, text)
+    return normalized_text
 
 
 def _light_polish_single_source_description(text: str) -> str:
@@ -206,6 +187,7 @@ def _light_polish_single_source_description(text: str) -> str:
     polished_text: str = "\n\n".join(cleaned_paragraphs).strip()
     if not polished_text:
         return original_text
+    polished_text = _normalize_urls_in_text(polished_text)
     return polished_text
 
 

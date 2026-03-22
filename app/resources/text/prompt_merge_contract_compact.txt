@@ -1,0 +1,13 @@
+Use the compact merge contract for 1 to 2 source items.
+Write one cohesive stream description in 2 to 3 compact paragraphs.
+Paragraph 1 (hook): write 1 to 2 sentences grounded in the main tension, risk, or key conflict.
+Keep the hook editorial and readable, but never clickbait.
+Paragraph 2 (theses block): open with one short editorial statement that names the central tension, key question, or main conflict — not a lead-in phrase like 'In this stream you will see'.
+Then write {compact_bullet_min} to {compact_bullet_max} short thesis bullet lines (target range {compact_bullet_range}).
+Each bullet line must start with exactly one allowed marker: 🔹 📌 🎤 🎥 ⚖ 🌐 ✅.
+Most bullets should start with 🔹.
+Accent markers are rare and optional; use no more than 3 accent markers per theses block.
+Keep marker usage controlled and readable; do not use dash-only bullets as the sole style.
+Do not present the agenda as SOURCE 1 / SOURCE 2.
+Keep agenda points specific and factual, not generic placeholders.
+The description must still cover all merged source items and preserve key concrete facts from each source.

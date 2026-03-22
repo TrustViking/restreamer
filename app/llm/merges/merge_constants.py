@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import re
 
+from app.resources.resource_loader import load_lines_resource
+
 # ---------------------------------------------------------------------------
 # Bullet markers
 # ---------------------------------------------------------------------------
@@ -18,22 +20,7 @@ ACCENT_MARKER_CAP: int = 3
 # ---------------------------------------------------------------------------
 # CTA / promotional prefixes
 # ---------------------------------------------------------------------------
-CTA_FIRST_PARAGRAPH_PREFIXES: tuple[str, ...] = (
-    "Підпишіть",
-    "Підписуйт",
-    "Слідкуй",
-    "Subscribe",
-    "Watch",
-    "Follow",
-    "Join",
-    "Смотри",
-    "Подпишит",
-    "Следи",
-    "Поширюйт",
-    "Поділіться",
-    "Приєднуйт",
-    "Подпишитесь",
-)
+CTA_FIRST_PARAGRAPH_PREFIXES: tuple[str, ...] = load_lines_resource("lexicon_cta_prefixes.txt")
 
 # ---------------------------------------------------------------------------
 # URL patterns
@@ -49,27 +36,7 @@ SEMANTIC_TOKEN_PATTERN: re.Pattern[str] = re.compile(
     flags=re.UNICODE,
 )
 
-SEMANTIC_STOPWORDS: frozenset[str] = frozenset({
-    # English
-    "about", "after", "again", "against", "also", "among", "and", "around",
-    "because", "before", "between", "brief", "call", "conversation", "cover",
-    "details", "discussion", "during", "each", "follow", "from", "into",
-    "join", "links", "materials", "more", "most", "other", "over", "stream",
-    "talk", "that", "their", "there", "these", "this", "those", "today",
-    "topic", "topics", "update", "updates", "watch", "with",
-    # Russian
-    "будет", "более", "важный", "вместе", "всем", "всех", "главном",
-    "диалог", "для", "день", "его", "или", "как", "который", "людей",
-    "материал", "материалы", "между", "миру", "наша", "наши", "нем", "них",
-    "новый", "новости", "обзор", "общем", "подробности", "почему",
-    "разговор", "сегодня", "смотрите", "событие", "среди", "стрим",
-    "тема", "темы", "эфир", "этот",
-    # Ukrainian
-    "важлива", "всіх", "головне", "діалог", "долуч", "ефір", "людей",
-    "матеріал", "матеріали", "наші", "новий", "новини", "огляд", "оновлення",
-    "подія", "потік", "підпис", "розмова", "стрімі", "сьогодні", "теми",
-    "цей",
-})
+SEMANTIC_STOPWORDS: frozenset[str] = frozenset(load_lines_resource("lexicon_semantic_stopwords.txt"))
 
 # ---------------------------------------------------------------------------
 # Bullet overload thresholds

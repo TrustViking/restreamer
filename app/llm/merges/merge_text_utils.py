@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from typing import List
 
+from app.core.text_utils import normalize_newlines, split_paragraphs
 from app.llm.merges.merge_constants import ALLOWED_BULLET_MARKERS, SEMANTIC_TOKEN_PATTERN
+from app.resources import merge_agenda_headings, merge_service_hints
 
 _BULLET_PLAIN_PATTERN: re.Pattern[str] = re.compile(
     r"^\s*(?:[-*•▪◦‣–—]|(?:\d+[.)]))\s+\S+",
@@ -11,10 +13,8 @@ _BULLET_PLAIN_PATTERN: re.Pattern[str] = re.compile(
 )
 
 def _extract_description_paragraphs_raw(text: str) -> List[str]:
-    normalized_text: str = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized_text:
-        return []
-    return [part.strip() for part in re.split(r"\n\s*\n", normalized_text) if part.strip()]
+    paragraphs: List[str] = split_paragraphs(text)
+    return paragraphs
 
 def _is_official_links_heading_line(text: str) -> bool:
     return bool(
@@ -30,22 +30,7 @@ def _looks_like_service_tail_paragraph(text: str) -> bool:
         return True
     if _is_official_links_heading_line(normalized_text):
         return True
-    service_hints: tuple[str, ...] = (
-        "watch",
-        "join",
-        "share",
-        "follow",
-        "subscribe",
-        "learn more",
-        "links below",
-        "details below",
-        "диві",
-        "долуч",
-        "підпис",
-        "смотрите",
-        "подпис",
-        "подробности",
-    )
+    service_hints: tuple[str, ...] = merge_service_hints()
     semantic_tokens: List[str] = SEMANTIC_TOKEN_PATTERN.findall(normalized_text)
     return (
         len(normalized_text) <= 220
@@ -54,19 +39,10 @@ def _looks_like_service_tail_paragraph(text: str) -> bool:
     )
 
 def _contains_agenda_heading(text: str) -> bool:
-    agenda_headings: tuple[str, ...] = (
-        "что в этом стриме",
-        "в этом выпуске",
-        "о чем поговорим",
-        "що в цьому стрімі",
-        "про що поговоримо",
-        "what's in this stream",
-        "what’s in this stream",
-        "in this stream",
-    )
+    agenda_headings: tuple[str, ...] = merge_agenda_headings()
     lines: List[str] = [
         re.sub(r"\s+", " ", line.strip().lower())
-        for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        for line in normalize_newlines(text).split("\n")
         if line.strip()
     ]
     for line in lines:
@@ -87,7 +63,11 @@ def _looks_like_per_source_dump(text: str) -> bool:
         r"^\s*(?:source|video)\s*\d+[:.)-]?",
         flags=re.IGNORECASE,
     )
-    lines: List[str] = [line.strip() for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n") if line.strip()]
+    lines: List[str] = [
+        line.strip()
+        for line in normalize_newlines(text).split("\n")
+        if line.strip()
+    ]
     source_line_hits: int = sum(1 for line in lines if source_line_pattern.match(line))
     if source_line_hits >= 2:
         return True

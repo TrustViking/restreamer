@@ -1,0 +1,5 @@
+Previous attempt produced only 1 body paragraph. The minimum is 2.
+STRUCTURE RULE: The output must have at least 2 visual paragraphs (blocks separated by blank lines).
+Paragraph 1 = hook (1-2 editorial sentences setting the tension or key question).
+Paragraph 2 = bullet block starting with the allowed markers (🔹, 📌, 🎤, 🎥, ⚖, 🌐, ✅). Separate the hook from the bullets with one blank line.
+Do NOT merge the hook and bullets into a single block of text.
