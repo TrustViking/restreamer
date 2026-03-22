@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 
 from app.config.app_config_loader import (
@@ -15,20 +16,20 @@ class ProjectPathsTests(unittest.TestCase):
         self.assertTrue(str(paths.project_root).endswith("restreamer"))
         self.assertTrue(str(paths.entrypoint_path).endswith("restreamer.py"))
         self.assertTrue(
-            str(paths.runtime_config_path).endswith("app\\config\\runtime\\app_config.yaml")
+            str(paths.runtime_config_path).endswith(os.path.join("app", "config", "runtime", "app_config.yaml"))
         )
         self.assertTrue(
             str(paths.runtime_config_example_path).endswith(
-                "app\\config\\runtime\\app_config.example.yaml"
+                os.path.join("app", "config", "runtime", "app_config.example.yaml")
             )
         )
         self.assertTrue(
-            str(paths.templates_path).endswith("app\\llm\\prompts\\templates.yaml")
+            str(paths.templates_path).endswith(os.path.join("app", "llm", "prompts", "templates.yaml"))
         )
-        self.assertTrue(str(paths.secrets_env_path).endswith("secrets\\.env"))
-        self.assertTrue(str(paths.oauth_token_path).endswith("secrets\\token.json"))
+        self.assertTrue(str(paths.secrets_env_path).endswith(os.path.join("secrets", ".env")))
+        self.assertTrue(str(paths.oauth_token_path).endswith(os.path.join("secrets", "token.json")))
         self.assertTrue(
-            str(paths.oauth_credentials_path).endswith("secrets\\credentials.json")
+            str(paths.oauth_credentials_path).endswith(os.path.join("secrets", "credentials.json"))
         )
 
     def test_google_oauth_defaults_use_secrets_directory(self) -> None:
