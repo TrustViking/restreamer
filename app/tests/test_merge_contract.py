@@ -1437,7 +1437,7 @@ Return strict JSON with title and description only.
             '{"title":"Final title","description":"Paragraph one.\\n\\nParagraph two."}',
         )
         with patch(
-            "app.llm.merges.merge_service._attempt_merge_once",
+            "app.llm.merges.merge_orchestrator._attempt_merge_once",
             side_effect=[structured_failure, successful_merge],
         ) as attempt_mock, self.assertLogs(level="INFO") as captured:
             attempt = attempt_openai_merge_with_audit(
@@ -1493,7 +1493,7 @@ Return strict JSON with title and description only.
             '{"title":"Final title","description":"Paragraph one.\\n\\nParagraph two."}',
         )
         with patch(
-            "app.llm.merges.merge_service._attempt_merge_once",
+            "app.llm.merges.merge_orchestrator._attempt_merge_once",
             side_effect=[structured_failure, successful_merge],
         ) as attempt_mock, self.assertLogs(level="INFO") as captured:
             attempt = attempt_openai_merge_with_audit(
@@ -1538,7 +1538,7 @@ Return strict JSON with title and description only.
             '{"title":"Final title","description":"Paragraph one.\\n\\nParagraph two."}',
         )
         with patch(
-            "app.llm.merges.merge_service._attempt_merge_once",
+            "app.llm.merges.merge_orchestrator._attempt_merge_once",
             side_effect=[structured_failure, successful_merge],
         ) as attempt_mock:
             attempt = attempt_openai_merge_with_audit(

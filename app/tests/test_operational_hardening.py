@@ -189,13 +189,7 @@ class OperationalHardeningTests(unittest.TestCase):
                     args_dry_run=False,
                     processing_mode="audit",
                     config_processing_mode_raw="audit",
-                    project_root=paths.project_root,
-                    entrypoint_path=paths.entrypoint_path,
-                    runtime_config_path=paths.runtime_config_path,
-                    templates_path=paths.templates_path,
-                    secrets_env_path=paths.secrets_env_path,
-                    oauth_credentials_path=paths.oauth_credentials_path,
-                    oauth_token_path=paths.oauth_token_path,
+                    paths=paths,
                 ),
             )
         text: str = "\n".join(captured.output)

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from app.config.settings import AppConfig
 from app.core.branching import audit_branch_labels
+from app.paths import ProjectPaths
 
 if TYPE_CHECKING:
     from app.observability.startup_summary import LlmSummarySnapshot
@@ -20,13 +21,59 @@ class StartupContext:
     args_dry_run: bool
     processing_mode: str
     config_processing_mode_raw: str
-    project_root: Path
-    entrypoint_path: Path
-    runtime_config_path: Path
-    templates_path: Path
-    secrets_env_path: Path
-    oauth_credentials_path: Path
-    oauth_token_path: Path
+    paths: ProjectPaths
+
+    @classmethod
+    def from_cli(
+        cls,
+        *,
+        run_id: str,
+        argv_list: list[str],
+        args_audit_mode: str,
+        args_debug: bool,
+        args_dry_run: bool,
+        processing_mode: str,
+        config_processing_mode_raw: str,
+        paths: ProjectPaths,
+    ) -> StartupContext:
+        return cls(
+            run_id=run_id,
+            argv_list=argv_list,
+            args_audit_mode=args_audit_mode,
+            args_debug=args_debug,
+            args_dry_run=args_dry_run,
+            processing_mode=processing_mode,
+            config_processing_mode_raw=config_processing_mode_raw,
+            paths=paths,
+        )
+
+    @property
+    def project_root(self) -> Path:
+        return self.paths.project_root
+
+    @property
+    def entrypoint_path(self) -> Path:
+        return self.paths.entrypoint_path
+
+    @property
+    def runtime_config_path(self) -> Path:
+        return self.paths.runtime_config_path
+
+    @property
+    def templates_path(self) -> Path:
+        return self.paths.templates_path
+
+    @property
+    def secrets_env_path(self) -> Path:
+        return self.paths.secrets_env_path
+
+    @property
+    def oauth_credentials_path(self) -> Path:
+        return self.paths.oauth_credentials_path
+
+    @property
+    def oauth_token_path(self) -> Path:
+        return self.paths.oauth_token_path
 
 
 @dataclass(frozen=True)
@@ -51,6 +98,53 @@ class RunContext:
     llm_model_configured: str = ""
     llm_provider_model: str = ""
 
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        run_id: str,
+        processing_mode: str,
+        audit_mode: str,
+        config: AppConfig,
+        llm_summary: LlmSummarySnapshot,
+        debug_enabled: bool,
+        dry_run: bool,
+        sheets_link_writeback: bool,
+        strip_chapter_timestamps: bool,
+    ) -> RunContext:
+        audit_branches: list[str] = audit_branch_labels(audit_mode=audit_mode)
+        effective_model: str = str(
+            getattr(llm_summary, "effective_model", getattr(llm_summary, "model", ""))
+            or ""
+        ).strip()
+        configured_model: str = str(
+            getattr(llm_summary, "configured_model", effective_model) or ""
+        ).strip()
+        provider_model: str = str(
+            getattr(llm_summary, "provider_model", effective_model) or ""
+        ).strip()
+        return cls(
+            run_id=run_id,
+            processing_mode=processing_mode,
+            audit_mode=audit_mode,
+            config_processing_mode=str(config.processing_mode or "").strip(),
+            audit_branches=audit_branches,
+            debug_enabled=debug_enabled,
+            dry_run=dry_run,
+            google_enabled=config.google_enabled,
+            telegram_enabled=config.telegram_enabled,
+            llm_provider=config.llm_provider,
+            llm_model=effective_model,
+            llm_model_configured=configured_model,
+            llm_provider_model=provider_model,
+            llm_usage_reporting_mode=llm_summary.usage_reporting_mode,
+            sheet_id=config.google_sheets_id,
+            sheet_range=config.google_sheets_range,
+            sheets_link_writeback=sheets_link_writeback,
+            local_doc_export_enabled=bool(str(config.local_doc_dir_template or "").strip()),
+            strip_chapter_timestamps=strip_chapter_timestamps,
+        )
+
 
 def build_startup_context(
     *,
@@ -61,15 +155,9 @@ def build_startup_context(
     args_dry_run: bool,
     processing_mode: str,
     config_processing_mode_raw: str,
-    project_root: Path,
-    entrypoint_path: Path,
-    runtime_config_path: Path,
-    templates_path: Path,
-    secrets_env_path: Path,
-    oauth_credentials_path: Path,
-    oauth_token_path: Path,
+    paths: ProjectPaths,
 ) -> StartupContext:
-    return StartupContext(
+    return StartupContext.from_cli(
         run_id=run_id,
         argv_list=argv_list,
         args_audit_mode=args_audit_mode,
@@ -77,13 +165,7 @@ def build_startup_context(
         args_dry_run=args_dry_run,
         processing_mode=processing_mode,
         config_processing_mode_raw=config_processing_mode_raw,
-        project_root=project_root,
-        entrypoint_path=entrypoint_path,
-        runtime_config_path=runtime_config_path,
-        templates_path=templates_path,
-        secrets_env_path=secrets_env_path,
-        oauth_credentials_path=oauth_credentials_path,
-        oauth_token_path=oauth_token_path,
+        paths=paths,
     )
 
 
@@ -99,34 +181,14 @@ def build_run_context(
     sheets_link_writeback: bool,
     strip_chapter_timestamps: bool,
 ) -> RunContext:
-    audit_branches: list[str] = audit_branch_labels(audit_mode=audit_mode)
-    effective_model: str = str(
-        getattr(llm_summary, "effective_model", getattr(llm_summary, "model", "")) or ""
-    ).strip()
-    configured_model: str = str(
-        getattr(llm_summary, "configured_model", effective_model) or ""
-    ).strip()
-    provider_model: str = str(
-        getattr(llm_summary, "provider_model", effective_model) or ""
-    ).strip()
-    return RunContext(
+    return RunContext.from_config(
         run_id=run_id,
         processing_mode=processing_mode,
         audit_mode=audit_mode,
-        config_processing_mode=str(config.processing_mode or "").strip(),
-        audit_branches=audit_branches,
+        config=config,
+        llm_summary=llm_summary,
         debug_enabled=debug_enabled,
         dry_run=dry_run,
-        google_enabled=config.google_enabled,
-        telegram_enabled=config.telegram_enabled,
-        llm_provider=config.llm_provider,
-        llm_model=effective_model,
-        llm_model_configured=configured_model,
-        llm_provider_model=provider_model,
-        llm_usage_reporting_mode=llm_summary.usage_reporting_mode,
-        sheet_id=config.google_sheets_id,
-        sheet_range=config.google_sheets_range,
         sheets_link_writeback=sheets_link_writeback,
-        local_doc_export_enabled=bool(str(config.local_doc_dir_template or "").strip()),
         strip_chapter_timestamps=strip_chapter_timestamps,
     )

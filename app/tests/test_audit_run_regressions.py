@@ -193,16 +193,16 @@ class AuditRunRegressionTests(unittest.TestCase):
         )
 
         with patch(
-            "app.llm.merges.merge_service.resolve_effective_llm_model",
+            "app.llm.merges.merge_orchestrator.resolve_effective_llm_model",
             return_value="gpt-5.1",
         ), patch(
-            "app.llm.merges.merge_service.get_llm_provider",
+            "app.llm.merges.merge_orchestrator.get_llm_provider",
             return_value=SimpleNamespace(name="openai"),
         ), patch(
             "app.llm.merges.merge_prompt._select_merge_contract_mode",
             return_value=contract_mode,
         ), patch(
-            "app.llm.merges.merge_service._attempt_merge_once",
+            "app.llm.merges.merge_orchestrator._attempt_merge_once",
             return_value=(parsed_content, recovered_raw_text),
         ):
             attempt = attempt_openai_merge_with_audit(

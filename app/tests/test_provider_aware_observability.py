@@ -18,6 +18,7 @@ from app.bootstrap.run_context import RunContext, StartupContext
 from app.observability.runtime_analytics import log_run_context
 from app.observability.startup_health import run_startup_health_checks
 from app.observability.startup_summary import log_config_summary, log_startup_summary
+from app.paths import ProjectPaths
 from restreamer import _apply_llm_usage_reset, _log_llm_usage_reports
 
 
@@ -143,13 +144,17 @@ class ProviderAwareSummaryTests(unittest.TestCase):
             args_dry_run=False,
             processing_mode="audit",
             config_processing_mode_raw="audit",
-            project_root=Path("."),
-            entrypoint_path=Path("restreamer.py"),
-            runtime_config_path=Path("app_config.yaml"),
-            templates_path=Path("templates.yaml"),
-            secrets_env_path=Path(".env"),
-            oauth_credentials_path=Path("oauth.json"),
-            oauth_token_path=Path("token.json"),
+            paths=ProjectPaths(
+                project_root=Path("."),
+                entrypoint_path=Path("restreamer.py"),
+                runtime_config_path=Path("app_config.yaml"),
+                runtime_config_example_path=Path("app_config.example.yaml"),
+                templates_path=Path("templates.yaml"),
+                secrets_dir=Path("secrets"),
+                secrets_env_path=Path(".env"),
+                oauth_token_path=Path("token.json"),
+                oauth_credentials_path=Path("oauth.json"),
+            ),
         )
 
     def _config(self, provider: str) -> SimpleNamespace:
