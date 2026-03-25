@@ -10,6 +10,14 @@ FORBIDDEN first-paragraph starts:
 CTA belongs ONLY at the very end, after all bullets and before hashtags.
 If you place a CTA as the first paragraph, the output WILL be rejected.
 
+RULE — NO COMMENT CTA:
+Do not include any calls to action asking viewers to leave comments,
+write comments, or share thoughts in comments.
+Examples of prohibited phrases: "Leave a comment", "Write in the comments",
+"Напишіть у коментарях", "Оставляйте комментарии", "Залиште коментар".
+This applies to all languages and all positions in the description
+(hook, body, closing paragraph, CTA block).
+
 RULE 2 — HOOK UNIQUENESS:
 The hook paragraph appears exactly ONCE — as the first paragraph.
 Paragraph 2 and all subsequent content must move FORWARD with new facts.

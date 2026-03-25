@@ -108,7 +108,7 @@ def analyze_content_contract(
         source_label=f"contract:{tail_source}",
         log_summary=False,
     )
-    paragraph_count_actual: int = len(_split_paragraphs(sanitized_result.body_text))
+    paragraph_count_actual: int = len(split_paragraphs(sanitized_result.body_text))
     paragraph_count_min: int = 2 if mode == "merge" else 0
     paragraph_count_max: int = 4 if mode == "merge" else 0
     paragraph_count_valid: bool = (
@@ -322,12 +322,6 @@ def _resolve_contract_status(
     if not title_present or paragraph_count_actual == 0:
         return "fail"
     return "degraded_unrecovered"
-
-
-def _split_paragraphs(body_text: str) -> List[str]:
-    return split_paragraphs(body_text)
-
-
 def _tail_origin_from_source(tail_source: str, *, found: bool) -> str:
     if not found:
         return "none"

@@ -133,8 +133,8 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
         self.assertEqual(
             "Body paragraph.\n\n"
             "🌐 Official links:\n"
-            "https://example.org/official\n"
-            "https://allatra.org/resource\n\n"
+            "https://example.org\n"
+            "https://allatra.org\n\n"
             "Join us tonight and share your thoughts.\n\n"
             "#nanoplastics #microplastics",
             payload.description_text,
@@ -172,18 +172,17 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
         self.assertEqual(
             "Body paragraph.\n\n"
             "🌐 Official links:\n"
-            "https://example.org/official\n"
-            "https://example.org/second-source\n\n"
+            "https://example.org\n\n"
             "Join us tonight and share your thoughts.\n\n"
             "#nanoplastics #microplastics",
             payload.description_text,
         )
         self.assertEqual(1, payload.description_text.count("🌐 Official links:"))
-        self.assertEqual(1, payload.description_text.count("https://example.org/official"))
+        self.assertEqual(1, payload.description_text.count("https://example.org"))
         logs: str = "\n".join(captured.output)
         self.assertIn("official_links_text_links=1", logs)
-        self.assertIn("official_links_source_links=2", logs)
-        self.assertIn("official_links_final_count=2", logs)
+        self.assertIn("official_links_source_links=1", logs)
+        self.assertIn("official_links_final_count=1", logs)
         self.assertIn("official_links_dedup_applied=yes", logs)
 
     @patch("app.publish.post_llm_sanitation._fetch_recommended_youtube_title", return_value=None)
@@ -212,14 +211,13 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
                 ],
             )
         self.assertEqual(1, payload.description_text.count("🌐 Official links:"))
-        self.assertEqual(1, payload.description_text.count("https://example.org/official"))
-        self.assertEqual(1, payload.description_text.count("https://example.org/second"))
+        self.assertEqual(1, payload.description_text.count("https://example.org"))
         self.assertNotIn("Recommended materials:", payload.description_text)
         self.assertNotIn("https://youtu.be/ccccccccccc", payload.description_text)
         self.assertNotIn("Official links:\n\nOfficial links:", payload.description_text)
         logs: str = "\n".join(captured.output)
         self.assertIn("official_links_text_links=2", logs)
-        self.assertIn("official_links_final_count=2", logs)
+        self.assertIn("official_links_final_count=1", logs)
         self.assertIn("recommended_materials_final_count=0", logs)
         self.assertIn("recommended_materials_block=skipped", logs)
         self.assertIn("ignored_llm_youtube_urls=1", logs)
@@ -245,8 +243,7 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
         self.assertEqual(
             "Body paragraph.\n\n"
             "🌐 Official links:\n"
-            "https://example.org/official\n"
-            "https://example.org/second\n\n"
+            "https://example.org\n\n"
             "Join us tonight and share your thoughts.\n\n"
             "#nanoplastics #microplastics",
             payload.description_text,

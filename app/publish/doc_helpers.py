@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppTemplates
+from app.core.cta_detection import starts_with_cta_prefix
 from app.core.env_flags import (
     strip_chapter_timestamps,
     strip_chapter_timestamps_enabled_from_env,
@@ -16,9 +17,9 @@ from app.core.models import (
     MergedPublicationPayload,
     PlannedVideo,
 )
-from app.core.text_utils import split_paragraphs, starts_with_any_prefix
+from app.core.text_utils import split_paragraphs
 from app.core.url_normalizer import normalize_display_url
-from app.llm.merges.merge_constants import CTA_FIRST_PARAGRAPH_PREFIXES, URL_PATTERN
+from app.llm.merges.merge_constants import URL_PATTERN
 from app.llm.merges.merge_text_utils import _looks_like_service_tail_paragraph
 from app.planning import planned_video_block_language
 from app.publish.post_llm_sanitation import (
@@ -139,15 +140,6 @@ def _fallback_source_description_text(
     return description_text
 
 
-def _starts_with_cta_prefix(text: str) -> bool:
-    return starts_with_any_prefix(
-        text,
-        CTA_FIRST_PARAGRAPH_PREFIXES,
-        use_casefold=True,
-        collapse_whitespace=True,
-    )
-
-
 def _looks_like_promotional_opener(text: str) -> bool:
     normalized: str = re.sub(r"\s+", " ", str(text or "").strip()).casefold()
     if not normalized:
@@ -177,7 +169,7 @@ def _light_polish_single_source_description(text: str) -> str:
 
     cleaned_paragraphs: List[str] = list(paragraphs)
     if cleaned_paragraphs and (
-        _starts_with_cta_prefix(cleaned_paragraphs[0])
+        starts_with_cta_prefix(cleaned_paragraphs[0])
         or _looks_like_promotional_opener(cleaned_paragraphs[0])
     ):
         cleaned_paragraphs = cleaned_paragraphs[1:]

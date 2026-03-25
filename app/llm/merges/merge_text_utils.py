@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import List
 
+from app.core.official_links import is_official_links_heading
 from app.core.text_utils import normalize_newlines, split_paragraphs
 from app.llm.merges.merge_constants import ALLOWED_BULLET_MARKERS, SEMANTIC_TOKEN_PATTERN
 from app.resources import merge_agenda_headings, merge_service_hints
@@ -17,12 +18,7 @@ def _extract_description_paragraphs_raw(text: str) -> List[str]:
     return paragraphs
 
 def _is_official_links_heading_line(text: str) -> bool:
-    return bool(
-        re.fullmatch(
-            r"(?im)(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:",
-            str(text or "").strip(),
-        )
-    )
+    return is_official_links_heading(str(text or ""))
 
 def _looks_like_service_tail_paragraph(text: str) -> bool:
     normalized_text: str = re.sub(r"\s+", " ", str(text or "").strip()).lower()

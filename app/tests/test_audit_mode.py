@@ -91,7 +91,7 @@ class AuditModeRunnerTests(unittest.TestCase):
         ) as materialize_mock, patch(
             "app.pipeline.batch_runner.derive_planned_videos",
             side_effect=[planned_nomerge, planned_merge],
-        ) as derive_mock, patch.object(BatchRunner, "_run_branch_for_date", return_value=None):
+        ) as derive_mock, patch("app.pipeline.batch_runner.BranchExecutor.execute", return_value=None):
             runner.run(
                 dry_run=True,
                 audit_mode="audit",
@@ -121,15 +121,15 @@ class AuditModeRunnerTests(unittest.TestCase):
             api_error_param="model",
         )
         with patch.object(
-            runner,
+            runner._branch_executor,
             "_group_date_videos_by_slot_time",
             return_value={"0900": [SimpleNamespace()], "1000": [SimpleNamespace()]},
         ), patch(
-            "app.pipeline.batch_runner.process_slot",
+            "app.pipeline.branch_executor.process_slot",
             side_effect=[fatal_error, MagicMock()],
         ) as process_slot_mock:
             with self.assertRaises(LlmModelConfigurationError):
-                runner._run_branch_for_date(
+                runner._branch_executor.execute(
                     services=SimpleNamespace(),
                     branch=AuditBranch(
                         name=BRANCH_MERGE,
@@ -137,7 +137,7 @@ class AuditModeRunnerTests(unittest.TestCase):
                         llm_merge_enabled=True,
                     ),
                     date_key="010130",
-                    date_videos_all=date_videos_all,
+                    date_videos=date_videos_all,
                     dry_run=True,
                     merge_run_summary=MergeRunSummary(),
                 )
@@ -237,3 +237,4 @@ class SlotMergePolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

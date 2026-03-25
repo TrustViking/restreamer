@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core.cta_detection import looks_like_cta_paragraph
 from app.publish.sanitizers.tail_parser import EmbeddedTailParts, TailParser, TailParts
 
 
@@ -37,6 +38,31 @@ class TestTailParserLooksCta:
 
     def test_ukrainian_cta(self) -> None:
         assert TailParser.looks_like_cta_line("Дивіться ефір до кінця") is True
+
+    def test_boundary_cases(self) -> None:
+        assert TailParser.looks_like_cta_line("🌐 Official Links:") is False
+        assert TailParser.looks_like_cta_line("🔹 Some topic - explanation") is False
+        assert TailParser.looks_like_cta_line("https://example.com") is False
+        assert TailParser.looks_like_cta_line("Leave a comment with your take.") is True
+        assert TailParser.looks_like_cta_line("Смотрите и делитесь!") is True
+        assert TailParser.looks_like_cta_line("This stream covers AI regulation") is False
+        assert TailParser.looks_like_cta_line("") is False
+        assert TailParser.looks_like_cta_line(None) is False  # type: ignore[arg-type]
+
+
+class TestCtaParagraphBoundaries:
+    def test_cta_paragraph_boundary_cases(self) -> None:
+        assert looks_like_cta_paragraph("🌐 Official Links:") is False
+        assert looks_like_cta_paragraph("🔹 Some topic - explanation") is False
+        assert looks_like_cta_paragraph("https://example.com") is False
+        assert looks_like_cta_paragraph("#live #stream") is True
+        assert looks_like_cta_paragraph("Subscribe and share!") is True
+        assert looks_like_cta_paragraph("Оставляйте комментарии по фактам!") is True
+        assert looks_like_cta_paragraph("Дивіться та долучайтеся!") is True
+        assert looks_like_cta_paragraph("Смотрите и делитесь!") is True
+        assert looks_like_cta_paragraph("This stream covers AI regulation") is False
+        assert looks_like_cta_paragraph("") is False
+        assert looks_like_cta_paragraph(None) is False  # type: ignore[arg-type]
 
 
 class TestTailParserCleanDoubleBullets:

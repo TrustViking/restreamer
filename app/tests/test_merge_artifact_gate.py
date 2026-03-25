@@ -63,12 +63,12 @@ class MergeArtifactGateTests(unittest.TestCase):
         runner = self._runner()
         branch = AuditBranch(name="merge", processing_mode="merge", llm_merge_enabled=True)
         merge_run_summary = MergeRunSummary()
-        with patch("app.pipeline.batch_runner.process_slot", return_value=self._slot_result(real_merge_blocks=0)), patch(
-            "app.pipeline.batch_runner.publish_daily_document"
+        with patch("app.pipeline.branch_executor.process_slot", return_value=self._slot_result(real_merge_blocks=0)), patch(
+            "app.pipeline.branch_executor.publish_daily_document"
         ) as publish_doc_mock, patch(
-            "app.pipeline.batch_runner.publish_daily_telegram"
+            "app.pipeline.branch_executor.publish_daily_telegram"
         ) as publish_telegram_mock, self.assertLogs(level="INFO") as captured:
-            runner._run_branch_for_date(
+            runner._branch_executor.execute(
                 services=SimpleNamespace(
                     docs_client=MagicMock(),
                     drive_client=MagicMock(),
@@ -76,7 +76,7 @@ class MergeArtifactGateTests(unittest.TestCase):
                 ),
                 branch=branch,
                 date_key="100326",
-                date_videos_all=[
+                date_videos=[
                     SimpleNamespace(
                         date_key="100326",
                         scheduled_at_kiev=SimpleNamespace(strftime=lambda _: "1800"),
@@ -105,14 +105,14 @@ class MergeArtifactGateTests(unittest.TestCase):
         branch = AuditBranch(name="merge", processing_mode="merge", llm_merge_enabled=True)
         merge_run_summary = MergeRunSummary()
         with patch(
-            "app.pipeline.batch_runner.process_slot",
+            "app.pipeline.branch_executor.process_slot",
             return_value=self._slot_result(
                 real_merge_blocks=1,
                 merge_candidate_blocks=1,
                 merge_artifact_status="full",
             ),
         ), patch(
-            "app.pipeline.batch_runner.publish_daily_document",
+            "app.pipeline.branch_executor.publish_daily_document",
             return_value=DailyDocumentPublishResult(
                 doc_title="doc",
                 doc_url="DRY_RUN_DOC_URL",
@@ -120,10 +120,10 @@ class MergeArtifactGateTests(unittest.TestCase):
                 slot_keys=["100326_1800"],
             ),
         ) as publish_doc_mock, patch(
-            "app.pipeline.batch_runner.publish_daily_telegram",
+            "app.pipeline.branch_executor.publish_daily_telegram",
             return_value=DailyTelegramPublishResult(sent_count=0, failed_count=0, skipped_count=1),
         ) as publish_telegram_mock:
-            runner._run_branch_for_date(
+            runner._branch_executor.execute(
                 services=SimpleNamespace(
                     docs_client=MagicMock(),
                     drive_client=MagicMock(),
@@ -131,7 +131,7 @@ class MergeArtifactGateTests(unittest.TestCase):
                 ),
                 branch=branch,
                 date_key="100326",
-                date_videos_all=[
+                date_videos=[
                     SimpleNamespace(
                         date_key="100326",
                         scheduled_at_kiev=SimpleNamespace(strftime=lambda _: "1800"),
@@ -148,7 +148,7 @@ class MergeArtifactGateTests(unittest.TestCase):
         branch = AuditBranch(name="merge", processing_mode="merge", llm_merge_enabled=True)
         merge_run_summary = MergeRunSummary()
         with patch(
-            "app.pipeline.batch_runner.process_slot",
+            "app.pipeline.branch_executor.process_slot",
             return_value=self._slot_result(
                 real_merge_blocks=1,
                 merge_candidate_blocks=2,
@@ -157,7 +157,7 @@ class MergeArtifactGateTests(unittest.TestCase):
                 fallback_merge_targets=("100326_1800:en",),
             ),
         ), patch(
-            "app.pipeline.batch_runner.publish_daily_document",
+            "app.pipeline.branch_executor.publish_daily_document",
             return_value=DailyDocumentPublishResult(
                 doc_title="doc",
                 doc_url="DRY_RUN_DOC_URL",
@@ -165,10 +165,10 @@ class MergeArtifactGateTests(unittest.TestCase):
                 slot_keys=["100326_1800"],
             ),
         ), patch(
-            "app.pipeline.batch_runner.publish_daily_telegram",
+            "app.pipeline.branch_executor.publish_daily_telegram",
             return_value=DailyTelegramPublishResult(sent_count=0, failed_count=0, skipped_count=1),
         ), self.assertLogs(level="INFO") as captured:
-            runner._run_branch_for_date(
+            runner._branch_executor.execute(
                 services=SimpleNamespace(
                     docs_client=MagicMock(),
                     drive_client=MagicMock(),
@@ -176,7 +176,7 @@ class MergeArtifactGateTests(unittest.TestCase):
                 ),
                 branch=branch,
                 date_key="100326",
-                date_videos_all=[
+                date_videos=[
                     SimpleNamespace(
                         date_key="100326",
                         scheduled_at_kiev=SimpleNamespace(strftime=lambda _: "1800"),
@@ -195,7 +195,7 @@ class MergeArtifactGateTests(unittest.TestCase):
         branch = AuditBranch(name="merge", processing_mode="merge", llm_merge_enabled=True)
         merge_run_summary = MergeRunSummary()
         with patch(
-            "app.pipeline.batch_runner.process_slot",
+            "app.pipeline.branch_executor.process_slot",
             return_value=self._slot_result(
                 real_merge_blocks=0,
                 merge_candidate_blocks=2,
@@ -204,7 +204,7 @@ class MergeArtifactGateTests(unittest.TestCase):
                 fallback_merge_targets=("100326_1800:en", "100326_1800:uk"),
             ),
         ), patch(
-            "app.pipeline.batch_runner.publish_daily_document",
+            "app.pipeline.branch_executor.publish_daily_document",
             return_value=DailyDocumentPublishResult(
                 doc_title="doc",
                 doc_url="DRY_RUN_DOC_URL",
@@ -212,9 +212,9 @@ class MergeArtifactGateTests(unittest.TestCase):
                 slot_keys=["100326_1800"],
             ),
         ) as publish_doc_mock, patch(
-            "app.pipeline.batch_runner.publish_daily_telegram"
+            "app.pipeline.branch_executor.publish_daily_telegram"
         ) as publish_telegram_mock, self.assertLogs(level="INFO") as captured:
-            runner._run_branch_for_date(
+            runner._branch_executor.execute(
                 services=SimpleNamespace(
                     docs_client=MagicMock(),
                     drive_client=MagicMock(),
@@ -222,7 +222,7 @@ class MergeArtifactGateTests(unittest.TestCase):
                 ),
                 branch=branch,
                 date_key="100326",
-                date_videos_all=[
+                date_videos=[
                     SimpleNamespace(
                         date_key="100326",
                         scheduled_at_kiev=SimpleNamespace(strftime=lambda _: "1800"),
@@ -244,8 +244,8 @@ class MergeArtifactGateTests(unittest.TestCase):
         runner = self._runner()
         branch = AuditBranch(name="nomerge", processing_mode="nomerge", llm_merge_enabled=False)
         merge_run_summary = MergeRunSummary()
-        with patch("app.pipeline.batch_runner.process_slot", return_value=self._slot_result(real_merge_blocks=0)), patch(
-            "app.pipeline.batch_runner.publish_daily_document",
+        with patch("app.pipeline.branch_executor.process_slot", return_value=self._slot_result(real_merge_blocks=0)), patch(
+            "app.pipeline.branch_executor.publish_daily_document",
             return_value=DailyDocumentPublishResult(
                 doc_title="doc",
                 doc_url="DRY_RUN_DOC_URL",
@@ -253,10 +253,10 @@ class MergeArtifactGateTests(unittest.TestCase):
                 slot_keys=["100326_1800"],
             ),
         ), patch(
-            "app.pipeline.batch_runner.publish_daily_telegram",
+            "app.pipeline.branch_executor.publish_daily_telegram",
             return_value=DailyTelegramPublishResult(sent_count=0, failed_count=0, skipped_count=1),
         ), self.assertLogs(level="INFO") as captured:
-            runner._run_branch_for_date(
+            runner._branch_executor.execute(
                 services=SimpleNamespace(
                     docs_client=MagicMock(),
                     drive_client=MagicMock(),
@@ -264,7 +264,7 @@ class MergeArtifactGateTests(unittest.TestCase):
                 ),
                 branch=branch,
                 date_key="100326",
-                date_videos_all=[
+                date_videos=[
                     SimpleNamespace(
                         date_key="100326",
                         scheduled_at_kiev=SimpleNamespace(strftime=lambda _: "1800"),
@@ -317,14 +317,14 @@ class MergeArtifactGateTests(unittest.TestCase):
             json_path = Path(temp_dir) / "merge_reject_debug_json" / "case.json"
             runner._name_builder.build_merge_reject_debug_json_path.return_value = json_path
             with patch(
-                "app.pipeline.batch_runner.process_slot",
+                "app.pipeline.branch_executor.process_slot",
                 return_value=slot_result,
             ), patch(
-                "app.pipeline.batch_runner.publish_daily_document"
+                "app.pipeline.branch_executor.publish_daily_document"
             ) as publish_doc_mock, patch(
-                "app.pipeline.batch_runner.publish_daily_telegram"
+                "app.pipeline.branch_executor.publish_daily_telegram"
             ) as publish_telegram_mock, self.assertLogs(level="INFO") as captured:
-                runner._run_branch_for_date(
+                runner._branch_executor.execute(
                     services=SimpleNamespace(
                         docs_client=MagicMock(),
                         drive_client=MagicMock(),
@@ -332,7 +332,7 @@ class MergeArtifactGateTests(unittest.TestCase):
                     ),
                     branch=branch,
                     date_key="100326",
-                    date_videos_all=[
+                    date_videos=[
                         SimpleNamespace(
                             date_key="100326",
                             scheduled_at_kiev=SimpleNamespace(strftime=lambda _: "1800"),
@@ -359,3 +359,4 @@ class MergeArtifactGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -6,14 +6,15 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.core.cta_detection import looks_like_cta_paragraph, starts_with_cta_prefix
+from app.core.official_links import is_official_links_heading
 from app.core.text_utils import (
     normalize_newlines,
     normalize_multiline_text,
-    split_paragraphs as _shared_split_paragraphs,
-    starts_with_any_prefix,
+    split_paragraphs,
 )
 from app.core.models import MergedLanguageContent
-from app.llm.merges.merge_constants import CTA_FIRST_PARAGRAPH_PREFIXES, URL_LINE_PATTERN
+from app.llm.merges.merge_constants import URL_LINE_PATTERN
 from app.llm.merges.merge_validation_helpers import (
     has_duplicate_paragraphs as _has_duplicate_paragraphs,
     has_hook_echo_in_body as _has_hook_echo_in_body,
@@ -31,9 +32,6 @@ _FORBIDDEN_VARIANT_KEYS: set[str] = {
 _EMOJI_PATTERN: re.Pattern[str] = re.compile(
     r"[\U0001F300-\U0001FAFF\u2600-\u27BF]",
     flags=re.UNICODE,
-)
-_OFFICIAL_LINKS_HEADING_RE: re.Pattern[str] = re.compile(
-    r"(?im)^\s*(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:\s*$"
 )
 _HASHTAG_TOKEN_RE: re.Pattern[str] = re.compile(r"^#[^\s#]+$")
 
@@ -179,17 +177,8 @@ def _normalize_multiline_text(text: str) -> str:
     return normalize_multiline_text(text)
 
 
-def _split_paragraphs(text: str) -> List[str]:
-    paragraphs: List[str] = _shared_split_paragraphs(text)
-    return paragraphs
-
-
-def _starts_with_cta_prefix(text: str) -> bool:
-    return starts_with_any_prefix(text, CTA_FIRST_PARAGRAPH_PREFIXES)
-
-
 def _description_has_raw_opener_cta(description_text: str) -> bool:
-    paragraphs: List[str] = _split_paragraphs(description_text)
+    paragraphs: List[str] = split_paragraphs(description_text)
     if not paragraphs:
         return False
     first_paragraph: str = paragraphs[0]
@@ -197,7 +186,7 @@ def _description_has_raw_opener_cta(description_text: str) -> bool:
         normalized_line: str = str(raw_line or "").strip()
         if not normalized_line:
             continue
-        return _starts_with_cta_prefix(normalized_line)
+        return starts_with_cta_prefix(normalized_line)
     return False
 
 
@@ -206,50 +195,13 @@ def _looks_like_hashtags_paragraph(paragraph_text: str) -> bool:
     return bool(tokens) and all(_HASHTAG_TOKEN_RE.fullmatch(token) for token in tokens)
 
 
-def _looks_like_cta_paragraph(paragraph_text: str) -> bool:
-    lines: List[str] = _paragraph_lines(paragraph_text)
-    if not lines:
-        return False
-    if len(lines) > 2:
-        return False
-    if any(_OFFICIAL_LINKS_HEADING_RE.match(line) for line in lines):
-        return False
-    if any(line.startswith(tuple(("🔹 ", "📌 ", "🎤 ", "🎥 ", "⚖ ", "🌐 ", "✅ "))) for line in lines):
-        return False
-    if any(URL_LINE_PATTERN.fullmatch(line) for line in lines):
-        return False
-    normalized: str = re.sub(r"\s+", " ", str(paragraph_text or "")).strip().lower()
-    if not normalized:
-        return False
-    if "#" in normalized and len(normalized) <= 220:
-        return True
-    return any(
-        hint in normalized
-        for hint in (
-            "watch",
-            "join",
-            "share",
-            "follow",
-            "subscribe",
-            "learn more",
-            "дивіться",
-            "долуч",
-            "підпис",
-            "смотрите",
-            "присоединяйтесь",
-            "делитесь",
-            "подпис",
-        )
-    )
-
-
 def _paragraph_lines(paragraph_text: str) -> List[str]:
     return [line.strip() for line in str(paragraph_text or "").split("\n") if line.strip()]
 
 
 def _looks_like_official_links_paragraph(paragraph_text: str) -> bool:
     lines: List[str] = _paragraph_lines(paragraph_text)
-    if not lines or not _OFFICIAL_LINKS_HEADING_RE.match(lines[0]):
+    if not lines or not is_official_links_heading(lines[0]):
         return False
     if len(lines) == 1:
         return True
@@ -269,7 +221,7 @@ def _looks_like_youtube_links_paragraph(paragraph_text: str) -> bool:
 
 
 def _split_body_and_allowed_tail(text: str) -> tuple[List[str], List[str], List[str]]:
-    paragraphs: List[str] = _split_paragraphs(text)
+    paragraphs: List[str] = split_paragraphs(text)
     if not paragraphs:
         return ([], [], [])
     body_paragraphs: List[str] = list(paragraphs)
@@ -281,7 +233,7 @@ def _split_body_and_allowed_tail(text: str) -> tuple[List[str], List[str], List[
             tail_paragraphs_reversed.append(body_paragraphs.pop())
             tail_blocks_reversed.append("hashtags")
             continue
-        if _looks_like_cta_paragraph(candidate):
+        if looks_like_cta_paragraph(candidate):
             tail_paragraphs_reversed.append(body_paragraphs.pop())
             tail_blocks_reversed.append("cta")
             continue
@@ -345,7 +297,7 @@ def _collapse_paragraphs_to_limit(
 
 def separate_merge_body_and_tail(*, text: str, max_body_paragraphs: int = 4) -> MergeTailSeparationResult:
     normalized_text: str = _normalize_multiline_text(text)
-    raw_paragraphs: List[str] = _split_paragraphs(normalized_text)
+    raw_paragraphs: List[str] = split_paragraphs(normalized_text)
     body_paragraphs, tail_paragraphs, tail_blocks = _split_body_and_allowed_tail(normalized_text)
     recovered_body_paragraphs: List[str] = list(body_paragraphs)
     recovery_applied: bool = False
@@ -441,7 +393,7 @@ def _validate_body_paragraph_count(
     *,
     max_body_paragraphs: int = 4,
 ) -> int:
-    body_paragraphs: List[str] = _split_paragraphs(body_text)
+    body_paragraphs: List[str] = split_paragraphs(body_text)
     if not 2 <= len(body_paragraphs) <= max_body_paragraphs:
         raise RuntimeError(
             f"description body paragraph count must be between 2 and {max_body_paragraphs}, got {len(body_paragraphs)}"

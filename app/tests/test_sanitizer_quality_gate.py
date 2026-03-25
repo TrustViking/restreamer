@@ -29,5 +29,20 @@ class TestQualityGateOpenerCta:
             "Subscribe to our channel for updates!\n\n🔹 Today we discuss..."
         ) is True
 
+    def test_comment_cta_opener_en(self) -> None:
+        assert PublishQualityGate.has_opener_cta(
+            "Leave a comment with what stood out most.\n\n🔹 Today we discuss..."
+        ) is True
+
+    def test_comment_cta_opener_uk(self) -> None:
+        assert PublishQualityGate.has_opener_cta(
+            "Напишіть у коментар ваші думки.\n\n🔹 Сьогодні розглянемо..."
+        ) is True
+
+    def test_comment_cta_opener_ru(self) -> None:
+        assert PublishQualityGate.has_opener_cta(
+            "Оставляйте комментарии по фактам.\n\n🔹 Сегодня разберем..."
+        ) is True
+
     def test_empty(self) -> None:
         assert PublishQualityGate.has_opener_cta("") is False

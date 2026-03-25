@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from app.core.models import PlannedVideo
+from app.core.official_links import is_official_links_heading
 from app.core.url_normalizer import normalize_display_url
-from app.core.url_utils import TRACKING_QUERY_KEYS, _canonical_domain_key
+from app.core.url_utils import _canonical_domain_key, normalize_official_link_display, strip_tracking_params
 from app.resources.resource_loader import load_lines_resource
 from app.llm.merges.merge_constants import URL_PATTERN
 from app.llm.merges.merge_text_utils import _extract_description_paragraphs_raw, _is_official_links_heading_line
@@ -34,14 +35,11 @@ def _normalize_link_candidate(url: str) -> Optional[str]:
     parts = urlsplit(raw_url)
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         return None
-    filtered_query_items: List[tuple[str, str]] = []
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
-        normalized_key: str = key.lower().strip()
-        if normalized_key.startswith("utm_") or normalized_key in TRACKING_QUERY_KEYS:
-            continue
-        filtered_query_items.append((key, value))
-    sanitized_query: str = urlencode(filtered_query_items, doseq=True)
-    result_url: str = urlunsplit((parts.scheme, parts.netloc, parts.path, sanitized_query, ""))
+    stripped_tracking_url: str = strip_tracking_params(raw_url)
+    stripped_parts = urlsplit(stripped_tracking_url)
+    result_url: str = urlunsplit(
+        (stripped_parts.scheme, stripped_parts.netloc, stripped_parts.path, stripped_parts.query, "")
+    )
     return normalize_display_url(result_url)
 
 def _official_links_heading(language: str) -> str:
@@ -112,11 +110,9 @@ def _description_has_official_links_block(description: str) -> bool:
     normalized: str = str(description or "")
     if not normalized:
         return False
-    heading_present: bool = bool(
-        re.search(
-            r"(?im)^\s*(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:\s*$",
-            normalized,
-        )
+    heading_present: bool = any(
+        is_official_links_heading(str(line or "").strip())
+        for line in normalized.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     )
     if not heading_present:
         return False
@@ -169,7 +165,12 @@ def _inject_official_links_block_if_missing(
             links_in_output=0,
             fill_applied=False,
         )
-    links_block: str = "\n".join([_official_links_heading(language), *official_links]).strip()
+    normalized_official_links: List[str] = [
+        normalize_official_link_display(str(url or "").strip())
+        for url in official_links
+        if str(url or "").strip()
+    ]
+    links_block: str = "\n".join([_official_links_heading(language), *normalized_official_links]).strip()
     updated_paragraphs: List[str] = list(paragraphs)
     if len(updated_paragraphs) <= 3:
         if _looks_like_close_paragraph(updated_paragraphs[-1]):

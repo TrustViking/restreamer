@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from app.core.url_utils import normalize_official_link_display, strip_tracking_params
 from app.publish.sanitizers.url_selector import (
     AuthoritativeUrlSelector,
     _is_complete_source_url,
@@ -29,6 +30,71 @@ class TestSanitizeUrl:
 
     def test_empty(self) -> None:
         assert _sanitize_url("") == ""
+
+
+class TestStripTrackingParams:
+    def test_preserves_fragment_and_param_order(self) -> None:
+        result: str = strip_tracking_params(
+            "https://example.com/path?a=1&utm_source=twitter&a=2&fbclid=abc&b=3#part"
+        )
+        assert result == "https://example.com/path?a=1&a=2&b=3#part"
+
+    def test_invalid_url_returns_as_is(self) -> None:
+        value: str = "not-a-url?utm_source=twitter"
+        assert strip_tracking_params(value) == value
+
+
+class TestNormalizeOfficialLinkDisplay:
+    def test_social_x_keeps_path(self) -> None:
+        assert (
+            normalize_official_link_display("https://x.com/pastormarkburns/status/123456")
+            == "https://x.com/pastormarkburns/status/123456"
+        )
+
+    def test_social_facebook_keeps_path_and_www(self) -> None:
+        assert (
+            normalize_official_link_display("https://www.facebook.com/SomePage")
+            == "https://www.facebook.com/SomePage"
+        )
+
+    def test_social_telegram_keeps_path(self) -> None:
+        assert (
+            normalize_official_link_display("https://t.me/somechannel/12345")
+            == "https://t.me/somechannel/12345"
+        )
+
+    def test_social_instagram_strips_tracking_but_keeps_path(self) -> None:
+        assert (
+            normalize_official_link_display("https://www.instagram.com/user/?utm_source=ig")
+            == "https://www.instagram.com/user/"
+        )
+
+    def test_regular_site_strips_www_and_path(self) -> None:
+        assert (
+            normalize_official_link_display("https://www.spiritualdiplomats.org/ukraine")
+            == "https://spiritualdiplomats.org"
+        )
+
+    def test_regular_site_strips_language_path(self) -> None:
+        assert normalize_official_link_display("https://allatra.org/uk") == "https://allatra.org"
+
+    def test_social_without_path_stays_same(self) -> None:
+        assert normalize_official_link_display("https://x.com") == "https://x.com"
+
+    def test_regular_site_keeps_bare_domain(self) -> None:
+        assert normalize_official_link_display("https://example.com") == "https://example.com"
+
+    def test_regular_site_strips_trailing_slash(self) -> None:
+        assert normalize_official_link_display("https://example.com/") == "https://example.com"
+
+    def test_regular_site_strips_query(self) -> None:
+        assert normalize_official_link_display("https://www.example.org?ref=123") == "https://example.org"
+
+    def test_invalid_url_returns_as_is(self) -> None:
+        assert normalize_official_link_display("not-a-url") == "not-a-url"
+
+    def test_empty(self) -> None:
+        assert normalize_official_link_display("") == ""
 
 
 class TestIsCompleteSourceUrl:

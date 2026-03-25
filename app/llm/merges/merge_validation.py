@@ -5,7 +5,8 @@ import re
 from typing import List, Optional, Sequence
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
-from app.core.text_utils import normalize_newlines, starts_with_any_prefix
+from app.core.cta_detection import starts_with_cta_prefix
+from app.core.text_utils import normalize_newlines
 from app.core.models import (
     MergedLanguageContent,
     PlannedVideo,
@@ -13,7 +14,6 @@ from app.core.models import (
 )
 from app.llm.merges.merge_constants import (
     ALLOWED_BULLET_MARKERS,
-    CTA_FIRST_PARAGRAPH_PREFIXES,
     RECOVERABLE_REJECT_CODES,
     SEMANTIC_TOKEN_PATTERN,
     STYLE_CONTRACT_VERSION,
@@ -292,10 +292,6 @@ def _attempt_hook_echo_repair(description_text: str) -> Optional[str]:
     return _shared_attempt_hook_echo_repair(description_text)
 
 
-def _starts_with_cta_prefix(line_text: str) -> bool:
-    return starts_with_any_prefix(line_text, CTA_FIRST_PARAGRAPH_PREFIXES)
-
-
 def _has_cta_in_opening_lines_before_hook_or_bullet(
     description_paragraphs: Sequence[str],
 ) -> bool:
@@ -311,7 +307,7 @@ def _has_cta_in_opening_lines_before_hook_or_bullet(
     cta_line_indexes: list[int] = [
         line_index
         for line_index, line_text in enumerate(opening_line_window)
-        if _starts_with_cta_prefix(line_text) or _looks_like_bad_hook_paragraph(line_text)
+        if starts_with_cta_prefix(line_text) or _looks_like_bad_hook_paragraph(line_text)
     ]
     if not cta_line_indexes:
         return False
@@ -321,7 +317,7 @@ def _has_cta_in_opening_lines_before_hook_or_bullet(
             first_hook_or_bullet_line_index = line_index
             break
         if (
-            _starts_with_cta_prefix(line_text)
+            starts_with_cta_prefix(line_text)
             or _looks_like_bad_hook_paragraph(line_text)
             or _looks_like_service_tail_paragraph(line_text)
         ):
@@ -469,7 +465,7 @@ def _validate_coverage_preserving_merge_or_raise(
             reason_codes=("numbered_title_dump",),
             message="description validation failed: numbered_title_dump",
         )
-    if first_paragraph and _starts_with_cta_prefix(first_paragraph):
+    if first_paragraph and starts_with_cta_prefix(first_paragraph):
         raise _build_description_validation_failure(
             reason_codes=("cta_as_first_paragraph",),
             message="description validation failed: cta_as_first_paragraph",

@@ -3,24 +3,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.core.models import PlannedVideo
+from app.core.official_links import is_official_links_heading
 from app.core.text_utils import is_youtube_url as _is_youtube_url_canonical
 from app.core.url_normalizer import normalize_display_url
-from app.core.url_utils import TRACKING_QUERY_KEYS, _canonical_domain_key
+from app.core.url_utils import _canonical_domain_key, normalize_official_link_display, strip_tracking_params
 from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher, normalize_youtube_video_url
 from app.llm.merges.merge_constants import SEMANTIC_STOPWORDS, SEMANTIC_TOKEN_PATTERN, URL_PATTERN, URL_LINE_PATTERN
 from app.observability.runtime_analytics import record_malformed_tail_url_cleanup
 
 
 LOGGER = _get_logger_impl(__name__)
-
-_OFFICIAL_LINKS_HEADING_RE: re.Pattern[str] = re.compile(
-    r"(?im)^\s*(?:🌐\s*)?(?:official links|офіційні ресурси|официальные ссылки)\s*:\s*$"
-)
-
 
 @dataclass(frozen=True)
 class AuthoritativeSourceUrlsResult:
@@ -81,16 +77,7 @@ def _sanitize_url(url: str) -> str:
     parts = urlsplit(raw_url)
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         return prefix + raw_url + suffix
-    filtered_query_items: List[tuple[str, str]] = []
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
-        normalized_key: str = key.lower().strip()
-        if normalized_key.startswith("utm_") or normalized_key in TRACKING_QUERY_KEYS:
-            continue
-        filtered_query_items.append((key, value))
-    sanitized_query: str = urlencode(filtered_query_items, doseq=True)
-    sanitized_url: str = urlunsplit(
-        (parts.scheme, parts.netloc, parts.path, sanitized_query, parts.fragment)
-    )
+    sanitized_url: str = strip_tracking_params(raw_url)
     sanitized_url = normalize_display_url(sanitized_url)
     return prefix + sanitized_url + suffix
 
@@ -333,7 +320,7 @@ class AuthoritativeUrlSelector:
             score: int = 0
             if parts.scheme == "https":
                 score += 20
-            if _OFFICIAL_LINKS_HEADING_RE.search(str(line_text or "")) or any(
+            if is_official_links_heading(str(line_text or "")) or any(
                 hint in str(line_text or "").lower()
                 for hint in ("official", "resource", "resources", "details", "site", "website")
             ):
@@ -346,12 +333,13 @@ class AuthoritativeUrlSelector:
 
         scored_candidates.sort(reverse=True)
         for _, _, url in scored_candidates:
-            canonical_key: str = _canonical_domain_key(url)
+            normalized_official_url: str = normalize_official_link_display(url)
+            canonical_key: str = _canonical_domain_key(normalized_official_url)
             if canonical_key in seen_canonical_urls:
                 duplicate_urls_removed += 1
                 continue
             seen_canonical_urls.add(canonical_key)
-            authoritative_urls.append(url)
+            authoritative_urls.append(normalized_official_url)
             emitted_source_video_urls += 1
             if len(authoritative_urls) >= 3:
                 break
@@ -365,13 +353,14 @@ class AuthoritativeUrlSelector:
                 or _is_youtube_url(cleaned_tail_url)
             ):
                 continue
-            canonical_key = _canonical_domain_key(cleaned_tail_url)
+            normalized_tail_url: str = normalize_official_link_display(cleaned_tail_url)
+            canonical_key = _canonical_domain_key(normalized_tail_url)
             if canonical_key in seen_canonical_urls:
                 duplicate_urls_removed += 1
                 continue
             seen_canonical_urls.add(canonical_key)
-            authoritative_urls.append(cleaned_tail_url)
-            preserved_non_youtube_tail_urls.append(cleaned_tail_url)
+            authoritative_urls.append(normalized_tail_url)
+            preserved_non_youtube_tail_urls.append(normalized_tail_url)
 
         return (authoritative_urls, emitted_source_video_urls, duplicate_urls_removed)
 

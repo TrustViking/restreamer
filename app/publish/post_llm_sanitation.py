@@ -12,7 +12,7 @@ from app.core.models import (
     MergedPublicationPayload as _CoreMergedPublicationPayload,
     PlannedVideo,
 )
-from app.core.text_utils import normalize_multiline_text, split_paragraphs, is_youtube_url, has_duplicate_paragraphs
+from app.core.text_utils import normalize_multiline_text
 from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher
 from app.llm.merges.merge_quality import normalize_merge_description
 
@@ -34,7 +34,6 @@ from app.publish.sanitizers.url_selector import (
     _is_youtube_url,
     _is_complete_source_url,
     _dedupe_nonempty,
-    _OFFICIAL_LINKS_HEADING_RE,
 )
 from app.publish.sanitizers.description_composer import (
     DescriptionComposer,
@@ -529,16 +528,8 @@ def _normalize_text(text: str) -> str:
     return normalize_multiline_text(text)
 
 
-def _split_paragraphs(text: str) -> List[str]:
-    return split_paragraphs(text)
-
-
 def _join_lines(lines: Sequence[str]) -> str:
     return "\n".join(lines).strip()
-
-
-def _dedupe_cta_lines(lines: Sequence[str]) -> List[str]:
-    return TailParser.dedupe_cta_lines(lines)
 
 
 def _normalize_authoritative_video_url(video: PlannedVideo) -> Optional[str]:
@@ -558,16 +549,6 @@ def _extract_raw_description_urls(
     source_videos: Sequence[PlannedVideo],
 ) -> tuple[List[tuple[str, str, int, int]], List[tuple[str, str]], int]:
     return AuthoritativeUrlSelector._extract_raw_description_urls(source_videos)
-
-
-def _extract_official_links_url_lines(lines: Sequence[str]) -> List[str]:
-    from app.publish.sanitizers.description_composer import _extract_official_links_url_lines as _impl
-    return _impl(lines)
-
-
-def _extract_official_links_from_heading_paragraph(paragraph: str) -> tuple[bool, List[str]]:
-    from app.publish.sanitizers.description_composer import _extract_official_links_from_heading_paragraph as _impl
-    return _impl(paragraph)
 
 
 # Import AuthoritativeUrlSelector for the _extract_semantic_tokens / _strip_urls_and_hashtags wrappers

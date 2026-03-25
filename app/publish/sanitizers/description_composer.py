@@ -5,10 +5,11 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.core.official_links import is_official_links_heading
 from app.core.text_utils import split_paragraphs
+from app.core.url_utils import normalize_official_link_display
 from app.resources import resolve_official_links_heading, resolve_recommended_materials_heading
 from app.publish.sanitizers.url_selector import (
-    _OFFICIAL_LINKS_HEADING_RE,
     _sanitize_source_url,
     _is_youtube_url,
     _dedupe_nonempty,
@@ -49,7 +50,7 @@ def _extract_official_links_from_heading_paragraph(
     nonempty_lines: List[str] = [line for line in lines if line]
     if not nonempty_lines:
         return (False, [])
-    if not _OFFICIAL_LINKS_HEADING_RE.fullmatch(nonempty_lines[0]):
+    if not is_official_links_heading(nonempty_lines[0]):
         return (False, [])
     return (True, _extract_official_links_url_lines(nonempty_lines[1:]))
 
@@ -202,7 +203,7 @@ class DescriptionComposer:
                 "\n".join(
                     [resolve_official_links_heading(language)]
                     + [
-                        str(source_url or "").strip()
+                        normalize_official_link_display(str(source_url or "").strip())
                         for source_url in source_urls
                         if str(source_url or "").strip()
                     ]

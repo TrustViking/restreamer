@@ -4,9 +4,9 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
+from app.core.cta_detection import CTA_HINTS, looks_like_cta_line as _looks_like_cta_line_shared
 from app.core.text_utils import split_paragraphs
 from app.llm.merges.merge_constants import ALLOWED_BULLET_MARKERS, URL_LINE_PATTERN
-from app.resources.resource_loader import load_lines_resource
 from app.publish.sanitizers.url_selector import _sanitize_source_url, _dedupe_nonempty
 
 
@@ -16,9 +16,6 @@ _DOUBLE_BULLET_RE: re.Pattern[str] = re.compile(
     rf"^(\s*)({_DOUBLE_BULLET_MARKER_ALT})((?:\s+(?:{_DOUBLE_BULLET_MARKER_ALT}))+)\s*",
     re.MULTILINE,
 )
-_CTA_HINTS: tuple[str, ...] = load_lines_resource("lexicon_cta_hints.txt")
-
-
 @dataclass(frozen=True)
 class TailParts:
     body_end_index: int
@@ -71,10 +68,7 @@ class TailParser:
 
     @staticmethod
     def looks_like_cta_line(line: str) -> bool:
-        normalized_line: str = re.sub(r"\s+", " ", str(line or "")).strip().lower()
-        if not normalized_line:
-            return False
-        return any(hint in normalized_line for hint in _CTA_HINTS)
+        return _looks_like_cta_line_shared(line)
 
     @staticmethod
     def is_standalone_cta_line(line: str) -> bool:
@@ -82,7 +76,7 @@ class TailParser:
         if not normalized_line:
             return False
         normalized_line = normalized_line.lstrip("-*•> ")
-        return any(normalized_line.startswith(hint) for hint in _CTA_HINTS)
+        return any(normalized_line.startswith(hint) for hint in CTA_HINTS)
 
     @staticmethod
     def merge_hashtag_lines(lines: Sequence[str]) -> str:
