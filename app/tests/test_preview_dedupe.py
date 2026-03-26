@@ -68,9 +68,11 @@ class PreviewDedupeTests(unittest.TestCase):
                 materialize_prepared_previews(
                     logger=logging.getLogger("app.planning.batch_planner"),
                     config=SimpleNamespace(
-                        google_drive_preview_folder_id=None,
-                        google_drive_folder_id=None,
-                        google_drive_preview_path_template="{language}/{date}",
+                        google=SimpleNamespace(
+                            drive_preview_folder_id=None,
+                            drive_folder_id=None,
+                            drive_preview_path_template="{language}/{date}",
+                        ),
                     ),
                     drive_client=SimpleNamespace(),
                     name_builder=SimpleNamespace(build_image_path=lambda **kwargs: image_path),
@@ -92,9 +94,11 @@ class PreviewDedupeTests(unittest.TestCase):
                 materialize_prepared_previews(
                     logger=logging.getLogger("app.planning.batch_planner"),
                     config=SimpleNamespace(
-                        google_drive_preview_folder_id="preview-root",
-                        google_drive_folder_id="preview-root",
-                        google_drive_preview_path_template="{language}/{date}",
+                        google=SimpleNamespace(
+                            drive_preview_folder_id="preview-root",
+                            drive_folder_id="preview-root",
+                            drive_preview_path_template="{language}/{date}",
+                        ),
                     ),
                     drive_client=drive_client,
                     name_builder=SimpleNamespace(build_image_path=lambda **kwargs: image_path),

@@ -19,10 +19,10 @@ class OpenAIProvider(LlmProvider):
         )
 
     def timeout_sec(self, *, config: AppConfig) -> float:
-        return float(getattr(config, "openai_timeout_sec", 120.0))
+        return float(config.llm.timeout_sec)
 
     def pre_delay_sec(self, *, config: AppConfig) -> float:
-        return float(getattr(config, "openai_pre_delay_sec", 0.0))
+        return float(config.llm.pre_delay_sec)
 
     def request_merge(
         self,

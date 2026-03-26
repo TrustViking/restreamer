@@ -158,22 +158,28 @@ class ProviderAwareSummaryTests(unittest.TestCase):
         )
 
     def _config(self, provider: str) -> SimpleNamespace:
+        model_name: str = "gpt-5.1" if provider == "openai" else "claude-opus-4-6"
         return SimpleNamespace(
-            google_enabled=False,
-            telegram_enabled=False,
-            stg_templates_path=Path("templates.yaml"),
-            google_sheets_id="sheet-id",
-            google_sheets_range="A:F",
-            processing_mode="audit",
-            now_tz_mode="kyiv",
-            llm_provider=provider,
-            llm_model="gpt-5.1" if provider == "openai" else "claude-opus-4-6",
-            openai_timeout_sec=30.0,
-            openai_max_output_tokens=1000,
-            llm_source_desc_max_chars=500,
-            llm_run_if_single_source=False,
-            openai_pre_delay_sec=0.0,
-            local_doc_dir_template="D:\\docs\\{date}",
+            google=SimpleNamespace(
+                enabled=False,
+                sheets_id="sheet-id",
+                sheets_range="A:F",
+            ),
+            telegram=SimpleNamespace(enabled=False),
+            paths=SimpleNamespace(
+                templates_path=Path("templates.yaml"),
+                local_doc_dir_template="D:\\docs\\{date}",
+            ),
+            processing=SimpleNamespace(mode="audit", now_tz_mode="kyiv"),
+            llm=SimpleNamespace(
+                provider=provider,
+                model=model_name,
+                timeout_sec=30.0,
+                max_output_tokens=1000,
+                source_desc_max_chars=500,
+                run_if_single_source=False,
+                pre_delay_sec=0.0,
+            ),
         )
 
     def test_openai_summary_fields_show_current_values(self) -> None:
@@ -245,14 +251,16 @@ class ProviderAwareSummaryTests(unittest.TestCase):
     def test_startup_health_logs_current_merge_policy(self) -> None:
         logger = logging.getLogger("provider-aware-health-claude")
         config = SimpleNamespace(
-            llm_provider="claude",
-            llm_model="claude-opus-4-6",
-            openai_timeout_sec=30.0,
-            openai_max_output_tokens=1000,
-            llm_source_desc_max_chars=500,
-            openai_pre_delay_sec=0.0,
-            telegram_enabled=True,
-            google_sheets_id="sheet-id",
+            llm=SimpleNamespace(
+                provider="claude",
+                model="claude-opus-4-6",
+                timeout_sec=30.0,
+                max_output_tokens=1000,
+                source_desc_max_chars=500,
+                pre_delay_sec=0.0,
+            ),
+            telegram=SimpleNamespace(enabled=True),
+            google=SimpleNamespace(sheets_id="sheet-id"),
         )
         services = SimpleNamespace(
             factory=SimpleNamespace(
@@ -300,10 +308,9 @@ class ProviderAwareSummaryTests(unittest.TestCase):
 class EntrypointRegressionTests(unittest.TestCase):
     def _config(self) -> SimpleNamespace:
         return SimpleNamespace(
-            processing_mode="audit",
-            google_doc_share_mode="anyone_writer",
-            timezone_kiev="Europe/Kyiv",
-            timezone_cet="Europe/Berlin",
+            processing=SimpleNamespace(mode="audit"),
+            google=SimpleNamespace(doc_share_mode="anyone_writer"),
+            timezones=SimpleNamespace(kiev="Europe/Kyiv", cet="Europe/Berlin"),
         )
 
     def _llm_summary(self) -> SimpleNamespace:

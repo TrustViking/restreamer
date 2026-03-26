@@ -112,7 +112,7 @@ class MergeExecutor:
             config=self._config,
             model_name=self._model_name,
             attempt_label=attempt_label,
-            max_output_tokens=self._config.openai_max_output_tokens,
+            max_output_tokens=self._config.llm.max_output_tokens,
             structured_schema=self._STRUCTURED_SCHEMA,
             temperature=0.0,
             trace_context=LlmTraceContext(

@@ -201,14 +201,16 @@ class OperationalHardeningTests(unittest.TestCase):
     def test_startup_health_logs_current_merge_policy(self) -> None:
         logger = logging.getLogger("operational-hardening-health")
         config = SimpleNamespace(
-            llm_provider="openai",
-            llm_model="gpt-5.1",
-            openai_timeout_sec=30.0,
-            openai_max_output_tokens=1000,
-            llm_source_desc_max_chars=500,
-            openai_pre_delay_sec=0.0,
-            telegram_enabled=True,
-            google_sheets_id="sheet-id",
+            llm=SimpleNamespace(
+                provider="openai",
+                model="gpt-5.1",
+                timeout_sec=30.0,
+                max_output_tokens=1000,
+                source_desc_max_chars=500,
+                pre_delay_sec=0.0,
+            ),
+            telegram=SimpleNamespace(enabled=True),
+            google=SimpleNamespace(sheets_id="sheet-id"),
         )
         services = SimpleNamespace(
             factory=SimpleNamespace(
@@ -262,14 +264,16 @@ class OperationalHardeningTests(unittest.TestCase):
     def test_startup_health_fails_fast_for_fatal_openai_model_config_error(self) -> None:
         logger = logging.getLogger("operational-hardening-health-fatal-model")
         config = SimpleNamespace(
-            llm_provider="openai",
-            llm_model="gpt-5.4",
-            openai_timeout_sec=30.0,
-            openai_max_output_tokens=1000,
-            llm_source_desc_max_chars=500,
-            openai_pre_delay_sec=0.0,
-            telegram_enabled=True,
-            google_sheets_id="sheet-id",
+            llm=SimpleNamespace(
+                provider="openai",
+                model="gpt-5.4",
+                timeout_sec=30.0,
+                max_output_tokens=1000,
+                source_desc_max_chars=500,
+                pre_delay_sec=0.0,
+            ),
+            telegram=SimpleNamespace(enabled=True),
+            google=SimpleNamespace(sheets_id="sheet-id"),
         )
         services = SimpleNamespace(
             factory=SimpleNamespace(
@@ -331,12 +335,13 @@ class OperationalHardeningTests(unittest.TestCase):
             language="en",
         )
         config = SimpleNamespace(
-            llm_run_if_single_source=False,
-            llm_source_desc_max_chars=3000,
+            llm=SimpleNamespace(
+                run_if_single_source=False,
+                source_desc_max_chars=3000,
+                provider="openai",
+            ),
             templates=SimpleNamespace(common_no_description_text="no description"),
-            llm_provider="openai",
-            google_form_url="form",
-            google_contacts="contacts",
+            google=SimpleNamespace(form_url="form", contacts="contacts"),
         )
         with patch("app.pipeline.slot_processing.planned_video_block_language", return_value="en"), patch(
             "app.pipeline.slot_processing.attempt_llm_merge_with_audit"

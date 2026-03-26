@@ -208,33 +208,33 @@ def log_config_summary(
     logger.info(
         "run_id=%s Config summary: google=%s telegram=%s templates=%s",
         run_context.run_id,
-        "enabled" if config.google_enabled else "disabled",
-        "enabled" if config.telegram_enabled else "disabled",
-        str(config.stg_templates_path),
+        "enabled" if config.google.enabled else "disabled",
+        "enabled" if config.telegram.enabled else "disabled",
+        str(config.paths.templates_path),
     )
     logger.info(
         "run_id=%s Config summary: sheets=%s range=%s",
         run_context.run_id,
-        config.google_sheets_id,
-        config.google_sheets_range,
+        config.google.sheets_id,
+        config.google.sheets_range,
     )
     logger.info(
         "run_id=%s Config summary: config_processing_mode=%s resolved_processing_mode=%s resolved_audit_mode=%s now_tz_mode=%s llm_provider=%s llm_model_effective=%s llm_model_configured=%s llm_provider_model=%s llm_usage_reporting_mode=%s openai_timeout_sec=%.1f openai_max_output_tokens=%d llm_source_desc_max_chars=%d llm_run_if_single_source=%s openai_pre_delay_sec=%.1f",
         run_context.run_id,
-        config.processing_mode,
+        config.processing.mode,
         run_context.processing_mode,
         run_context.audit_mode,
-        config.now_tz_mode,
+        config.processing.now_tz_mode,
         llm_summary.provider,
         _summary_effective_model(llm_summary),
         _summary_configured_model(llm_summary),
         _summary_provider_model(llm_summary),
         llm_summary.usage_reporting_mode,
-        config.openai_timeout_sec,
-        config.openai_max_output_tokens,
-        config.llm_source_desc_max_chars,
-        config.llm_run_if_single_source,
-        config.openai_pre_delay_sec,
+        config.llm.timeout_sec,
+        config.llm.max_output_tokens,
+        config.llm.source_desc_max_chars,
+        config.llm.run_if_single_source,
+        config.llm.pre_delay_sec,
     )
     logger.info(
         "run_id=%s LLM summary: provider=%s effective_model=%s configured_model=%s provider_model=%s usage_reporting_mode=%s",
@@ -258,5 +258,6 @@ def log_config_summary(
     logger.info(
         "run_id=%s local_doc_export_enabled=%s",
         run_context.run_id,
-        "true" if bool(str(config.local_doc_dir_template or "").strip()) else "false",
+        "true" if bool(str(config.paths.local_doc_dir_template or "").strip()) else "false",
     )
+

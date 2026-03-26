@@ -76,8 +76,8 @@ app:
         with patch.dict(os.environ, env, clear=True):
             config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
         entrypoint_dir = get_project_paths().entrypoint_path.parent.resolve()
-        self.assertEqual(str(entrypoint_dir / Path("image") / "{language}" / "{date}"), config.local_image_dir_template)
-        self.assertEqual(str(entrypoint_dir / Path("docs") / "{date}"), config.local_doc_dir_template)
+        self.assertEqual(str(entrypoint_dir / Path("image") / "{language}" / "{date}"), config.paths.local_image_dir_template)
+        self.assertEqual(str(entrypoint_dir / Path("docs") / "{date}"), config.paths.local_doc_dir_template)
 
     def test_active_model_is_loaded_from_environment(self) -> None:
         runtime_config_path: str = self._write_runtime_config()
@@ -91,9 +91,8 @@ app:
         }
         with patch.dict(os.environ, env, clear=True):
             config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
-        self.assertEqual("openai", config.llm_provider)
-        self.assertEqual("gpt-5.2", config.llm_model)
-        self.assertEqual("gpt-5.2", config.openai_model)
+        self.assertEqual("openai", config.llm.provider)
+        self.assertEqual("gpt-5.2", config.llm.model)
 
     def test_default_active_model_is_gpt_5_1_without_hardcoding_in_callers(self) -> None:
         runtime_config_path: str = self._write_runtime_config()
@@ -106,24 +105,27 @@ app:
         }
         with patch.dict(os.environ, env, clear=True):
             config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
-        self.assertEqual("gpt-5.1", config.llm_model)
+        self.assertEqual("gpt-5.1", config.llm.model)
 
     def test_provider_factory_returns_openai_provider_for_active_model(self) -> None:
-        provider = get_llm_provider(config=SimpleNamespace(llm_model="gpt-5.2"))
+        provider = get_llm_provider(
+            config=SimpleNamespace(
+                llm=SimpleNamespace(model="gpt-5.2", provider="openai")
+            )
+        )
         self.assertEqual("openai", provider.name)
 
     def test_llm_summary_snapshot_prefers_effective_runtime_model_over_stale_provider_field(self) -> None:
         config = SimpleNamespace(
-            llm_provider="openai",
-            llm_model="gpt-5.2",
-            openai_model="gpt-5.1",
+            llm=SimpleNamespace(provider="openai", model="gpt-5.2"),
         )
         summary = build_llm_summary_snapshot(config)
         self.assertEqual("gpt-5.2", summary.effective_model)
         self.assertEqual("gpt-5.2", summary.configured_model)
-        self.assertEqual("gpt-5.1", summary.provider_model)
+        self.assertEqual("gpt-5.2", summary.provider_model)
         self.assertEqual("gpt-5.2", summary.model)
 
 
 if __name__ == "__main__":
     unittest.main()
+

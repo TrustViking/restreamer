@@ -18,11 +18,9 @@ class EffectiveLlmModelIdentity:
 def build_effective_llm_model_identity(
     config: AppConfig,
 ) -> EffectiveLlmModelIdentity:
-    provider: str = str(getattr(config, "llm_provider", "") or "").strip() or "openai"
-    configured_model: str = str(getattr(config, "llm_model", "") or "").strip()
-    provider_model: str = ""
-    if provider == "openai":
-        provider_model = str(getattr(config, "openai_model", "") or "").strip()
+    provider: str = str(config.llm.provider or "").strip() or "openai"
+    configured_model: str = str(config.llm.model or "").strip()
+    provider_model: str = configured_model
     effective_model: str = configured_model or provider_model
     if not effective_model and provider == "openai":
         effective_model = DEFAULT_OPENAI_MODEL

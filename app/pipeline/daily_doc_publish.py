@@ -312,33 +312,33 @@ def publish_daily_document(
                 f"date={date_key} title={doc_title!r} "
                 f"reason={summarize_error(error)}"
             ) from error
-        if config.google_doc_share_mode != "private":
+        if config.google.doc_share_mode != "private":
             role_by_mode: Dict[str, str] = {
                 "anyone_reader": "reader",
                 "anyone_commenter": "commenter",
                 "anyone_writer": "writer",
             }
-            role: str = role_by_mode[config.google_doc_share_mode]
+            role: str = role_by_mode[config.google.doc_share_mode]
             try:
                 drive_client.set_anyone_permission(file_id=document_id, role=role)
             except Exception as error:
                 raise RuntimeError(
                     "Google Drive set_anyone_permission failed. "
                     f"document_id={document_id} "
-                    f"share_mode={config.google_doc_share_mode} role={role} "
+                    f"share_mode={config.google.doc_share_mode} role={role} "
                     f"reason={summarize_error(error)}"
                 ) from error
-        if config.google_drive_folder_id:
+        if config.google.drive_folder_id:
             try:
                 drive_client.move_file_to_folder(
                     file_id=document_id,
-                    folder_id=config.google_drive_folder_id,
+                    folder_id=config.google.drive_folder_id,
                 )
             except Exception as error:
                 raise RuntimeError(
                     "Google Drive move_file_to_folder failed. "
                     f"document_id={document_id} "
-                    f"folder_id={config.google_drive_folder_id} "
+                    f"folder_id={config.google.drive_folder_id} "
                     f"reason={summarize_error(error)}"
                 ) from error
         try:
@@ -437,7 +437,7 @@ def publish_daily_document(
         str(exported_docx_path) if exported_docx_path is not None else "",
         "yes" if google_doc_created else "no",
         doc_url,
-        str(config.google_drive_folder_id or ""),
+        str(config.google.drive_folder_id or ""),
     )
     return DailyDocumentPublishResult(
         doc_title=doc_title,
@@ -448,3 +448,4 @@ def publish_daily_document(
         local_export_path=exported_docx_path,
         google_doc_created=google_doc_created,
     )
+

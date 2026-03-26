@@ -79,16 +79,16 @@ def _resolve_llm_merge_enabled(
         "LLM merge policy provider=%s max_attempts=%d max_output_tokens=%d source_desc_max_chars=%d pre_delay_sec=%.1f",
         llm_summary.provider,
         max_attempts,
-        config.openai_max_output_tokens,
-        config.llm_source_desc_max_chars,
-        config.openai_pre_delay_sec,
+        config.llm.max_output_tokens,
+        config.llm.source_desc_max_chars,
+        config.llm.pre_delay_sec,
     )
     logger.info(
         "OpenAI merge policy effective_model=%s configured_model=%s provider_model=%s timeout_sec=%.1f",
         effective_model,
         configured_model,
         provider_model,
-        config.openai_timeout_sec,
+        config.llm.timeout_sec,
     )
     logger.info(
         "LLM usage reporting note: scope=organization_aggregate source_of_truth_for_run=no current_run_effective_model=%s reporting_mode=%s",
@@ -157,7 +157,7 @@ def _validate_openai_merge_model_or_raise(
     probe_openai_model_access(
         provider_name="openai",
         model_name=effective_model,
-        timeout_sec=float(getattr(config, "openai_timeout_sec", 30.0)),
+        timeout_sec=float(config.llm.timeout_sec),
     )
     logger.info(
         "OpenAI model probe passed effective_model=%s configured_model=%s provider_model=%s",
@@ -243,7 +243,7 @@ def run_startup_health_checks(
     log_section(logger=logger, title="Google APIs")
     try:
         sheets_owner_info: str = services.drive_client.get_file_owner_info(
-            file_id=config.google_sheets_id
+            file_id=config.google.sheets_id
         )
         logger.info(
             "Google owner account for Sheets file: %s",
@@ -256,7 +256,7 @@ def run_startup_health_checks(
 
     try:
         sheets_id_resolved, sheets_title = services.sheets_client.ping_access(
-            spreadsheet_id=config.google_sheets_id
+            spreadsheet_id=config.google.sheets_id
         )
         logger.info(
             "Google Sheets API OK. Server response: spreadsheet_id=%s, title=%s",
@@ -340,7 +340,7 @@ def run_startup_health_checks(
 
     log_section(logger=logger, title="Telegram API")
     try:
-        if not config.telegram_enabled:
+        if not config.telegram.enabled:
             raise RuntimeError("telegram.enabled=false")
         telegram_me: Dict[str, Any] = telegram_client.get_me()
         telegram_bot_name: str = str(
@@ -377,3 +377,4 @@ def run_startup_health_checks(
     else:
         logger.info("Startup health-check decision: CONTINUE.")
     return llm_merge_enabled
+

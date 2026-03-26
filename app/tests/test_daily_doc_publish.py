@@ -60,9 +60,8 @@ class DailyDocPublishTests(unittest.TestCase):
                 google_doc_language_headings={"uk": "UK"},
                 google_doc_header="HEADER",
             ),
-            llm_model="gpt-test",
-            google_doc_share_mode="private",
-            google_drive_folder_id="",
+            llm=SimpleNamespace(provider="openai", model="gpt-test"),
+            google=SimpleNamespace(doc_share_mode="private", drive_folder_id=""),
         )
 
         video = self._video()
@@ -113,9 +112,8 @@ class DailyDocPublishTests(unittest.TestCase):
                 google_doc_language_headings={"uk": "UK"},
                 google_doc_header="{language_time_titles}",
             ),
-            llm_model="gpt-test",
-            google_doc_share_mode="private",
-            google_drive_folder_id="",
+            llm=SimpleNamespace(provider="openai", model="gpt-test"),
+            google=SimpleNamespace(doc_share_mode="private", drive_folder_id=""),
         )
         video = self._video()
         slot_result = SlotProcessResult(
@@ -188,9 +186,8 @@ class DailyDocPublishTests(unittest.TestCase):
                 google_doc_language_headings={"uk": "UK"},
                 google_doc_header="{language_time_titles}",
             ),
-            llm_model="gpt-test",
-            google_doc_share_mode="private",
-            google_drive_folder_id="",
+            llm=SimpleNamespace(provider="openai", model="gpt-test"),
+            google=SimpleNamespace(doc_share_mode="private", drive_folder_id=""),
         )
         video = self._video()
         slot_result = SlotProcessResult(

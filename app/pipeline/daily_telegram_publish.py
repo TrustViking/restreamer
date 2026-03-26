@@ -126,10 +126,10 @@ def publish_daily_telegram(
         "[%s] telegram_publish_finish date_key=%s status=%s video_count=%d",
         branch_label,
         date_key,
-        "dry_run" if dry_run else ("disabled" if not config.telegram_enabled else "sent"),
+        "dry_run" if dry_run else ("disabled" if not config.telegram.enabled else "sent"),
         len(combined_day_videos),
     )
-    if dry_run or not config.telegram_enabled:
+    if dry_run or not config.telegram.enabled:
         result = DailyTelegramPublishResult(sent_count=0, failed_count=0, skipped_count=1)
         logger.info(
             "[%s] telegram_publish_forensic date_key=%s messages_sent=%d skipped_messages=%d doc_url_attached=%s overall_status=%s",
@@ -151,3 +151,4 @@ def publish_daily_telegram(
         "yes" if str(doc_url or "").strip() else "no",
     )
     return result
+

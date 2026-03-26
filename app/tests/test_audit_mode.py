@@ -34,7 +34,10 @@ class AuditModeCliTests(unittest.TestCase):
 class AuditModeRunnerTests(unittest.TestCase):
     def _build_runner(self) -> BatchRunner:
         logger = logging.getLogger("audit-mode-runner")
-        config = SimpleNamespace(google_enabled=True, templates=SimpleNamespace())
+        config = SimpleNamespace(
+            google=SimpleNamespace(enabled=True),
+            templates=SimpleNamespace(),
+        )
         return BatchRunner(
             logger=logger,
             config=config,
@@ -168,12 +171,13 @@ class SlotMergePolicyTests(unittest.TestCase):
     def test_single_source_merge_skips_llm(self) -> None:
         logger = logging.getLogger("single-source-skip")
         config = SimpleNamespace(
-            llm_run_if_single_source=False,
-            llm_source_desc_max_chars=2000,
-            google_form_url="",
-            google_contacts="",
+            llm=SimpleNamespace(
+                run_if_single_source=False,
+                source_desc_max_chars=2000,
+                provider="openai",
+            ),
+            google=SimpleNamespace(form_url="", contacts=""),
             templates=SimpleNamespace(common_no_description_text="No description"),
-            llm_provider="openai",
         )
         with patch("app.pipeline.slot_processing.attempt_llm_merge_with_audit") as merge_mock:
             result = process_slot(
@@ -193,12 +197,13 @@ class SlotMergePolicyTests(unittest.TestCase):
     def test_multi_source_merge_uses_single_llm_call(self) -> None:
         logger = logging.getLogger("multi-source-merge")
         config = SimpleNamespace(
-            llm_run_if_single_source=False,
-            llm_source_desc_max_chars=2000,
-            google_form_url="",
-            google_contacts="",
+            llm=SimpleNamespace(
+                run_if_single_source=False,
+                source_desc_max_chars=2000,
+                provider="openai",
+            ),
+            google=SimpleNamespace(form_url="", contacts=""),
             templates=SimpleNamespace(common_no_description_text="No description"),
-            llm_provider="openai",
         )
         merge_result = SimpleNamespace(
             merged=SimpleNamespace(title="Merged", description="Body"),

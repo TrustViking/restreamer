@@ -33,16 +33,16 @@ def build_entrypoint_runtime_services(
     metadata_fetcher: YouTubeMetadataFetcher = YtDlpYouTubeMetadataFetcher()
     http_client: HttpClient = HttpClient()
     telegram_client: TelegramBotClient = TelegramBotClient(
-        bot_token=config.telegram_bot_token,
-        chat_id=config.telegram_chat_id,
+        bot_token=config.telegram.bot_token,
+        chat_id=config.telegram.chat_id,
     )
     name_builder: NamePathBuilder = NamePathBuilder(
-        local_image_dir_template=config.local_image_dir_template,
-        local_doc_dir_template=config.local_doc_dir_template,
+        local_image_dir_template=config.paths.local_image_dir_template,
+        local_doc_dir_template=config.paths.local_doc_dir_template,
         preview_name_template=config.templates.files_preview_name_template,
         doc_title_template=config.templates.files_doc_title_template,
         language_codes=config.templates.files_language_codes,
-        max_filename_stem=config.preview_filename_max_stem,
+        max_filename_stem=config.paths.preview_filename_max_stem,
     )
     batch_runner: BatchRunner = BatchRunner(
         logger=logger,
@@ -62,3 +62,4 @@ def build_entrypoint_runtime_services(
         name_builder=name_builder,
         batch_runner=batch_runner,
     )
+

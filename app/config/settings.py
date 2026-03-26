@@ -37,54 +37,83 @@ class AppTemplates:
     common_no_description_text: str
     common_single_mode_message: str
 
-# Compatibility dataclass: keep current runtime behavior in Phase 1.
+
 @dataclass(frozen=True)
-class AppConfig:
-    telegram_bot_token: str
-    telegram_chat_id: str
-    telegram_enabled: bool
-    google_enabled: bool
-    google_service_account_path: Optional[Path]
-    google_drive_folder_id: Optional[str]
-    google_drive_preview_folder_id: Optional[str]
-    google_drive_preview_path_template: str
-    google_doc_share_mode: str
-    google_sheets_id: str
-    google_sheets_range: str
-    google_form_url: str
-    google_contacts: str
+class TelegramConfig:
+    bot_token: str
+    chat_id: str
+    enabled: bool
+    use_audit: bool
+    symbol_separator: str
+    separator_repeat_count: int
+    symbol_broadcast: str
+    symbol_alert: str
+    symbol_form: str
+    symbol_description: str
+    symbol_pin: str
+    symbol_done: str
+    flag_uk: str
+    flag_en: str
+    flag_ru: str
+    flag_other: str
+    flag_repeat_count: int
+    language_name_uk: str
+    language_name_en: str
+    language_name_ru: str
+    language_name_other: str
+
+
+@dataclass(frozen=True)
+class GoogleConfig:
+    enabled: bool
+    service_account_path: Optional[Path]
+    drive_folder_id: Optional[str]
+    drive_preview_folder_id: Optional[str]
+    drive_preview_path_template: str
+    doc_share_mode: str
+    sheets_id: str
+    sheets_range: str
+    form_url: str
+    contacts: str
+
+
+@dataclass(frozen=True)
+class LlmConfig:
+    provider: str
+    model: str
+    timeout_sec: float
+    max_output_tokens: int
+    pre_delay_sec: float
+    source_desc_max_chars: int
+    run_if_single_source: bool
+
+
+@dataclass(frozen=True)
+class ProcessingConfig:
+    mode: str
+    now_tz_mode: str
+
+
+@dataclass(frozen=True)
+class PathsConfig:
     local_image_dir_template: str
     local_doc_dir_template: Optional[str]
-    timezone_kiev: str
-    timezone_cet: str
-    telegram_symbol_separator: str
-    telegram_separator_repeat_count: int
-    telegram_symbol_broadcast: str
-    telegram_symbol_alert: str
-    telegram_symbol_form: str
-    telegram_symbol_description: str
-    telegram_symbol_pin: str
-    telegram_symbol_done: str
-    telegram_flag_uk: str
-    telegram_flag_en: str
-    telegram_flag_ru: str
-    telegram_flag_other: str
-    telegram_flag_repeat_count: int
-    telegram_language_name_uk: str
-    telegram_language_name_en: str
-    telegram_language_name_ru: str
-    telegram_language_name_other: str
-    processing_mode: str
-    now_tz_mode: str
-    llm_provider: str
-    llm_model: str
-    openai_model: str
-    openai_timeout_sec: float
-    openai_max_output_tokens: int
-    openai_pre_delay_sec: float
-    llm_source_desc_max_chars: int
-    llm_run_if_single_source: bool
+    templates_path: Path
     preview_filename_max_stem: int
-    stg_templates_path: Path
-    telegram_use_audit: bool
+
+
+@dataclass(frozen=True)
+class TimezoneConfig:
+    kiev: str
+    cet: str
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    telegram: TelegramConfig
+    google: GoogleConfig
+    llm: LlmConfig
+    processing: ProcessingConfig
+    paths: PathsConfig
+    timezones: TimezoneConfig
     templates: AppTemplates

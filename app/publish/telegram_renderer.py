@@ -188,28 +188,28 @@ def build_descriptions_summary(
 
 def _telegram_language_flag(language: str, config: AppConfig) -> str:
     flag_by_language: Dict[str, str] = {
-        "uk": config.telegram_flag_uk,
-        "en": config.telegram_flag_en,
-        "ru": config.telegram_flag_ru,
-        "other": config.telegram_flag_other,
+        "uk": config.telegram.flag_uk,
+        "en": config.telegram.flag_en,
+        "ru": config.telegram.flag_ru,
+        "other": config.telegram.flag_other,
     }
-    return flag_by_language.get(language, config.telegram_flag_other)
+    return flag_by_language.get(language, config.telegram.flag_other)
 
 
 def _telegram_language_flags(language: str, config: AppConfig) -> str:
     return _telegram_language_flag(language, config) * max(
-        1, int(config.telegram_flag_repeat_count)
+        1, int(config.telegram.flag_repeat_count)
     )
 
 
 def _telegram_language_name(language: str, config: AppConfig) -> str:
     name_by_language: Dict[str, str] = {
-        "uk": config.telegram_language_name_uk,
-        "en": config.telegram_language_name_en,
-        "ru": config.telegram_language_name_ru,
-        "other": config.telegram_language_name_other,
+        "uk": config.telegram.language_name_uk,
+        "en": config.telegram.language_name_en,
+        "ru": config.telegram.language_name_ru,
+        "other": config.telegram.language_name_other,
     }
-    return name_by_language.get(language, config.telegram_language_name_other)
+    return name_by_language.get(language, config.telegram.language_name_other)
 
 
 def build_telegram_header_text(
@@ -223,13 +223,13 @@ def build_telegram_header_text(
             "time_cet": _telegram_safe_time(context["time_cet"]),
             "time_kiev": _telegram_safe_time(context["time_kiev"]),
             "time_gmt": _telegram_safe_time(context["time_gmt"]),
-            "symbol_broadcast": config.telegram_symbol_broadcast,
-            "symbol_alert": config.telegram_symbol_alert,
+            "symbol_broadcast": config.telegram.symbol_broadcast,
+            "symbol_alert": config.telegram.symbol_alert,
             "date": context["date"],
-            "symbol_form": config.telegram_symbol_form,
+            "symbol_form": config.telegram.symbol_form,
             "form_url": context["form_url"],
             "contacts": context["contacts"],
-            "symbol_description": config.telegram_symbol_description,
+            "symbol_description": config.telegram.symbol_description,
             "generated_doc_url": generated_doc_url,
         },
     )
@@ -249,7 +249,7 @@ def build_telegram_language_block(
             "time_kiev": _telegram_safe_time(
                 video.scheduled_at_kiev.strftime("%H:%M")
             ),
-            "symbol_pin": config.telegram_symbol_pin,
+            "symbol_pin": config.telegram.symbol_pin,
             "language_flags": _telegram_language_flags(language, config),
             "title": video.metadata.title,
             "description": description_text,
@@ -274,7 +274,7 @@ def build_telegram_language_merged_block(
         videos=videos,
         merged_content=merged_content,
         merge_attempt=merge_attempt,
-        use_audit_text=config.telegram_use_audit,
+        use_audit_text=config.telegram.use_audit,
     )
     if merged_payload is None:
         return build_telegram_language_nomerge_block(
@@ -288,7 +288,7 @@ def build_telegram_language_merged_block(
         {
             "date_display": videos[0].date_display,
             "time_kiev": _telegram_safe_time(times_text),
-            "symbol_pin": config.telegram_symbol_pin,
+            "symbol_pin": config.telegram.symbol_pin,
             "language_flags": _telegram_language_flags(language, config),
             "title": merged_payload.title_text.strip(),
             "description": (
@@ -320,7 +320,7 @@ def build_telegram_language_nomerge_block(
         {
             "date_display": videos[0].date_display,
             "time_kiev": _telegram_safe_time(times_text),
-            "symbol_pin": config.telegram_symbol_pin,
+            "symbol_pin": config.telegram.symbol_pin,
             "language_flags": _telegram_language_flags(language, config),
             "title": titles_text or "1) ...",
             "description": descriptions_text or _publish_no_description_text(templates),
@@ -348,7 +348,7 @@ def build_telegram_language_digest_block(
     )
     lines: List[str] = [digest_header, ""]
     for video in videos:
-        lines.append(f"{config.telegram_symbol_done} {video.metadata.title}")
+        lines.append(f"{config.telegram.symbol_done} {video.metadata.title}")
         lines.append(video.normalized_link)
         lines.append("")
     return "\n".join(lines).rstrip()
@@ -371,7 +371,7 @@ def build_telegram_post_header_text(
     return _render_template(
         config.templates.telegram_post_header,
         {
-            "symbol_broadcast": config.telegram_symbol_broadcast,
+            "symbol_broadcast": config.telegram.symbol_broadcast,
             "date": header_context["date"],
             "time_kiev": _telegram_safe_time(header_context["time_kiev"]),
         },
@@ -395,3 +395,4 @@ def build_single_mode_message(
             "url": metadata.url,
         },
     )
+

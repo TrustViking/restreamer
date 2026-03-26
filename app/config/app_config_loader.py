@@ -7,7 +7,15 @@ from typing import Any, Callable, Dict, Optional, cast
 
 import yaml
 
-from app.config.settings import AppConfig
+from app.config.settings import (
+    AppConfig,
+    GoogleConfig,
+    LlmConfig,
+    PathsConfig,
+    ProcessingConfig,
+    TelegramConfig,
+    TimezoneConfig,
+)
 from app.config.template_loader import load_templates_from_path
 from app.config.validators import (
     must_get_env,
@@ -232,68 +240,96 @@ def load_config_from_env(
 
     google_enabled: bool = setting_as_bool(app_settings, "google.enabled")
     entrypoint_dir: Path = project_paths.entrypoint_path.parent
-    config_kwargs: Dict[str, Any] = {
-        "telegram_bot_token": must_get_env("TELEGRAM_BOT_TOKEN"),
-        "telegram_chat_id": must_get_env("TELEGRAM_CHAT_ID"),
-        "telegram_enabled": setting_as_bool(app_settings, "telegram.enabled"),
-        "google_enabled": google_enabled,
-        "google_service_account_path": Path(google_service_account_path_raw) if google_service_account_path_raw else None,
-        "google_drive_folder_id": setting_as_str(app_settings, "google.drive_folder_id") or None,
-        "google_drive_preview_folder_id": setting_as_str(app_settings, "google.drive_preview_folder_id") or setting_as_str(app_settings, "google.drive_folder_id") or None,
-        "google_drive_preview_path_template": setting_as_str(app_settings, "google.drive_preview_path_template"),
-        "google_doc_share_mode": normalize_google_doc_share_mode(setting_as_str(app_settings, "google.doc_share_mode")),
-        "google_sheets_id": setting_as_str(app_settings, "google.sheets_id"),
-        "google_sheets_range": setting_as_str(app_settings, "google.sheets_range"),
-        "google_form_url": setting_as_str(app_settings, "google.form_url"),
-        "google_contacts": setting_as_str(app_settings, "google.contacts"),
-        "local_image_dir_template": _resolve_template_path(
-            setting_as_str(app_settings, "paths.local_image_dir_template"),
-            base_dir=entrypoint_dir,
-        ),
-        "local_doc_dir_template": _resolve_template_path(
-            setting_as_optional_str(app_settings, "paths.local_doc_dir_template"),
-            base_dir=entrypoint_dir,
-        ),
-        "timezone_kiev": setting_as_str(app_settings, "timezones.kiev"),
-        "timezone_cet": setting_as_str(app_settings, "timezones.cet"),
-        "telegram_symbol_separator": setting_as_str(app_settings, "telegram.symbol_separator"),
-        "telegram_separator_repeat_count": setting_as_int(app_settings, "telegram.separator_repeat_count"),
-        "telegram_symbol_broadcast": setting_as_str(app_settings, "telegram.symbol_broadcast"),
-        "telegram_symbol_alert": setting_as_str(app_settings, "telegram.symbol_alert"),
-        "telegram_symbol_form": setting_as_str(app_settings, "telegram.symbol_form"),
-        "telegram_symbol_description": setting_as_str(app_settings, "telegram.symbol_description"),
-        "telegram_symbol_pin": setting_as_str(app_settings, "telegram.symbol_pin"),
-        "telegram_symbol_done": setting_as_str(app_settings, "telegram.symbol_done"),
-        "telegram_flag_uk": setting_as_str(app_settings, "telegram.flag_uk"),
-        "telegram_flag_en": setting_as_str(app_settings, "telegram.flag_en"),
-        "telegram_flag_ru": setting_as_str(app_settings, "telegram.flag_ru"),
-        "telegram_flag_other": setting_as_str(app_settings, "telegram.flag_other"),
-        "telegram_flag_repeat_count": setting_as_int(app_settings, "telegram.flag_repeat_count"),
-        "telegram_language_name_uk": setting_as_str(app_settings, "telegram.language_name_uk"),
-        "telegram_language_name_en": setting_as_str(app_settings, "telegram.language_name_en"),
-        "telegram_language_name_ru": setting_as_str(app_settings, "telegram.language_name_ru"),
-        "telegram_language_name_other": setting_as_str(app_settings, "telegram.language_name_other"),
-        "processing_mode": processing_mode,
-        "now_tz_mode": now_tz_mode,
-        "llm_provider": llm_provider,
-        "llm_model": llm_model,
-        "openai_model": openai_model,
-        "openai_timeout_sec": openai_timeout_sec,
-        "openai_max_output_tokens": openai_max_output_tokens,
-        "openai_pre_delay_sec": openai_pre_delay_sec,
-        "llm_source_desc_max_chars": llm_source_desc_max_chars,
-        "llm_run_if_single_source": llm_run_if_single_source,
-        "preview_filename_max_stem": setting_as_int(app_settings, "files.preview_filename_max_stem"),
-        "stg_templates_path": project_paths.templates_path,
-        "telegram_use_audit": setting_as_bool(app_settings, "telegram.use_audit"),
-        "templates": templates,
-    }
+    google_service_account_path: Optional[Path] = (
+        Path(google_service_account_path_raw)
+        if google_service_account_path_raw
+        else None
+    )
 
     validate_google_service_account_path_requirement(
         google_enabled=google_enabled,
         google_auth_mode=google_auth_mode,
         service_account_path_raw=google_service_account_path_raw,
-        service_account_path=cast(Optional[Path], config_kwargs["google_service_account_path"]),
+        service_account_path=google_service_account_path,
         summarize_error=summarize_error,
     )
-    return AppConfig(**config_kwargs)
+    telegram_config: TelegramConfig = TelegramConfig(
+        bot_token=must_get_env("TELEGRAM_BOT_TOKEN"),
+        chat_id=must_get_env("TELEGRAM_CHAT_ID"),
+        enabled=setting_as_bool(app_settings, "telegram.enabled"),
+        use_audit=setting_as_bool(app_settings, "telegram.use_audit"),
+        symbol_separator=setting_as_str(app_settings, "telegram.symbol_separator"),
+        separator_repeat_count=setting_as_int(app_settings, "telegram.separator_repeat_count"),
+        symbol_broadcast=setting_as_str(app_settings, "telegram.symbol_broadcast"),
+        symbol_alert=setting_as_str(app_settings, "telegram.symbol_alert"),
+        symbol_form=setting_as_str(app_settings, "telegram.symbol_form"),
+        symbol_description=setting_as_str(app_settings, "telegram.symbol_description"),
+        symbol_pin=setting_as_str(app_settings, "telegram.symbol_pin"),
+        symbol_done=setting_as_str(app_settings, "telegram.symbol_done"),
+        flag_uk=setting_as_str(app_settings, "telegram.flag_uk"),
+        flag_en=setting_as_str(app_settings, "telegram.flag_en"),
+        flag_ru=setting_as_str(app_settings, "telegram.flag_ru"),
+        flag_other=setting_as_str(app_settings, "telegram.flag_other"),
+        flag_repeat_count=setting_as_int(app_settings, "telegram.flag_repeat_count"),
+        language_name_uk=setting_as_str(app_settings, "telegram.language_name_uk"),
+        language_name_en=setting_as_str(app_settings, "telegram.language_name_en"),
+        language_name_ru=setting_as_str(app_settings, "telegram.language_name_ru"),
+        language_name_other=setting_as_str(app_settings, "telegram.language_name_other"),
+    )
+    google_config: GoogleConfig = GoogleConfig(
+        enabled=google_enabled,
+        service_account_path=google_service_account_path,
+        drive_folder_id=setting_as_str(app_settings, "google.drive_folder_id") or None,
+        drive_preview_folder_id=(
+            setting_as_str(app_settings, "google.drive_preview_folder_id")
+            or setting_as_str(app_settings, "google.drive_folder_id")
+            or None
+        ),
+        drive_preview_path_template=setting_as_str(app_settings, "google.drive_preview_path_template"),
+        doc_share_mode=normalize_google_doc_share_mode(setting_as_str(app_settings, "google.doc_share_mode")),
+        sheets_id=setting_as_str(app_settings, "google.sheets_id"),
+        sheets_range=setting_as_str(app_settings, "google.sheets_range"),
+        form_url=setting_as_str(app_settings, "google.form_url"),
+        contacts=setting_as_str(app_settings, "google.contacts"),
+    )
+    llm_config: LlmConfig = LlmConfig(
+        provider=llm_provider,
+        model=llm_model,
+        timeout_sec=openai_timeout_sec,
+        max_output_tokens=openai_max_output_tokens,
+        pre_delay_sec=openai_pre_delay_sec,
+        source_desc_max_chars=llm_source_desc_max_chars,
+        run_if_single_source=llm_run_if_single_source,
+    )
+    processing_config: ProcessingConfig = ProcessingConfig(
+        mode=processing_mode,
+        now_tz_mode=now_tz_mode,
+    )
+    paths_config: PathsConfig = PathsConfig(
+        local_image_dir_template=str(
+            _resolve_template_path(
+                setting_as_str(app_settings, "paths.local_image_dir_template"),
+                base_dir=entrypoint_dir,
+            )
+            or ""
+        ),
+        local_doc_dir_template=_resolve_template_path(
+            setting_as_optional_str(app_settings, "paths.local_doc_dir_template"),
+            base_dir=entrypoint_dir,
+        ),
+        templates_path=project_paths.templates_path,
+        preview_filename_max_stem=setting_as_int(app_settings, "files.preview_filename_max_stem"),
+    )
+    timezone_config: TimezoneConfig = TimezoneConfig(
+        kiev=setting_as_str(app_settings, "timezones.kiev"),
+        cet=setting_as_str(app_settings, "timezones.cet"),
+    )
+    return AppConfig(
+        telegram=telegram_config,
+        google=google_config,
+        llm=llm_config,
+        processing=processing_config,
+        paths=paths_config,
+        timezones=timezone_config,
+        templates=templates,
+    )

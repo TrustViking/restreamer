@@ -39,13 +39,13 @@ def send_telegram_date_batch(
     templates: Optional[AppTemplates],
     batch: TelegramDateBatch,
 ) -> None:
-    if not config.telegram_enabled:
+    if not config.telegram.enabled:
         logger.info("Telegram disabled by TELEGRAM_ENABLED=0.")
         return
     logger.info("Telegram send for slot=%s", batch.slot_key)
 
-    date_separator: str = config.telegram_symbol_separator * max(
-        1, int(config.telegram_separator_repeat_count)
+    date_separator: str = config.telegram.symbol_separator * max(
+        1, int(config.telegram.separator_repeat_count)
     )
     header_message: str = build_telegram_header_text(
         context=batch.header_context,
@@ -253,3 +253,4 @@ def send_telegram_date_batch(
         logger.info("DRY RUN Telegram date separator end:\n%s", date_separator)
     else:
         telegram_client.send_text(date_separator)
+

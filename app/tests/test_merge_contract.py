@@ -211,13 +211,15 @@ class MergeContractParserTests(unittest.TestCase):
 class MergeContractServiceTests(unittest.TestCase):
     def _config(self) -> SimpleNamespace:
         return SimpleNamespace(
-            llm_model="gpt-5.1",
-            openai_model_primary="gpt-5.1",
-            openai_model_fallback="gpt-5.1",
-            openai_timeout_sec=30.0,
-            openai_max_output_tokens=1000,
-            openai_pre_delay_sec=0.0,
-            llm_source_desc_max_chars=500,
+            llm=SimpleNamespace(
+                provider="openai",
+                model="gpt-5.1",
+                timeout_sec=30.0,
+                max_output_tokens=1000,
+                pre_delay_sec=0.0,
+                source_desc_max_chars=500,
+                run_if_single_source=False,
+            ),
             templates=SimpleNamespace(
                 llm_language_names_json='{"en":"English"}',
                 llm_language_names={"en": "English"},

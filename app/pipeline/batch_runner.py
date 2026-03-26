@@ -142,7 +142,7 @@ class BatchRunner:
         llm_summary: LlmSummarySnapshot,
     ) -> None:
         run_started_at: float = time.perf_counter()
-        if not self._config.google_enabled:
+        if not self._config.google.enabled:
             raise RuntimeError("Для batch режима GOOGLE_ENABLED должен быть включен.")
 
         merge_run_summary: MergeRunSummary = MergeRunSummary()
@@ -425,3 +425,4 @@ class BatchRunner:
             branch_failures.append(f"branch={branch.name} date={date_key} failed: {error}")
             self._logger.error("audit_branch_done branch=%s status=failed date_key=%s reason=%s", branch.name, date_key, error)
             log_error_event(self._logger, "branch=%s date=%s failed: %s", branch.name, date_key, error, reason_code="branch_date_failed")
+

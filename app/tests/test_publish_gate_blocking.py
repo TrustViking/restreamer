@@ -72,13 +72,15 @@ class PublishGateBlockingTests(unittest.TestCase):
             has_publish_stage_opener_cta=True,
         )
         config: SimpleNamespace = SimpleNamespace(
-            telegram_use_audit=True,
-            telegram_symbol_pin="📌",
-            telegram_flag_uk="🇺🇦",
-            telegram_flag_en="🇬🇧",
-            telegram_flag_ru="🇷🇺",
-            telegram_flag_other="🏳️",
-            telegram_flag_repeat_count=1,
+            telegram=SimpleNamespace(
+                use_audit=True,
+                symbol_pin="📌",
+                flag_uk="🇺🇦",
+                flag_en="🇬🇧",
+                flag_ru="🇷🇺",
+                flag_other="🏳️",
+                flag_repeat_count=1,
+            ),
             templates=SimpleNamespace(
                 telegram_language_merged_block="{title}\n{description}",
             ),

@@ -232,7 +232,7 @@ def process_slot(
             run_classic_merge: bool = non_empty_descriptions_count >= 2
             run_single_source_translate: bool = False
             if (
-                config.llm_run_if_single_source
+                config.llm.run_if_single_source
                 and non_empty_descriptions_count == 1
                 and len(language_items_for_merge) == 1
             ):
@@ -266,8 +266,8 @@ def process_slot(
                 slot_key=slot_key,
                 language=language,
                 language_items_for_merge=language_items_for_merge,
-                desc_max_chars_limit=config.llm_source_desc_max_chars,
-                single_source_run_allowed=config.llm_run_if_single_source,
+                desc_max_chars_limit=config.llm.source_desc_max_chars,
+                single_source_run_allowed=config.llm.run_if_single_source,
                 merge_expected=merge_expected,
                 merge_skip_reason=merge_skip_reason,
             )
@@ -353,7 +353,7 @@ def process_slot(
                 "[%s] LLM merge result language=%s provider=%s model=%s success=%s",
                 branch_label,
                 language,
-                config.llm_provider,
+                config.llm.provider,
                 merge_attempt.model_name,
                 "yes" if merge_attempt.merged is not None else "no",
             )
@@ -408,7 +408,7 @@ def process_slot(
                     "[%s] LLM merge failed for language=%s provider=%s reason=%s",
                     branch_label,
                     language,
-                    config.llm_provider,
+                    config.llm.provider,
                     merge_attempt.error_summary or "unknown",
                 )
             merge_after_snapshot: Tuple[int, int, int, int, int, int] = _merge_summary_snapshot(
@@ -436,8 +436,8 @@ def process_slot(
                 slot_key=slot_key,
                 language=language,
                 language_items_for_merge=language_items_for_merge,
-                desc_max_chars_limit=config.llm_source_desc_max_chars,
-                single_source_run_allowed=config.llm_run_if_single_source,
+                desc_max_chars_limit=config.llm.source_desc_max_chars,
+                single_source_run_allowed=config.llm.run_if_single_source,
                 merge_expected=False,
                 merge_skip_reason=(
                     "processing_mode_nomerge"
@@ -473,8 +473,8 @@ def process_slot(
 
     header_context: Dict[str, str] = build_header_context(
         videos=day_videos,
-        form_url=config.google_form_url,
-        contacts=config.google_contacts,
+        form_url=config.google.form_url,
+        contacts=config.google.contacts,
         cet_tz=cet_tz,
     )
     logger.info(
@@ -526,3 +526,4 @@ def process_slot(
         merge_artifact_status=merge_artifact_status,
         fallback_merge_targets=tuple(fallback_merge_targets),
     )
+

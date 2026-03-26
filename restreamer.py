@@ -150,7 +150,7 @@ def main(argv: Sequence[str]) -> int:
     sheets_link_writeback_enabled: bool = sheets_link_writeback_enabled_from_env()
     strip_chapter_timestamps_enabled: bool = strip_chapter_timestamps_enabled_from_env()
     _apply_llm_usage_reset(logger=LOGGER, llm_summary=llm_summary)
-    config_processing_mode_raw: str = str(config.processing_mode or "").strip()
+    config_processing_mode_raw: str = str(config.processing.mode or "").strip()
     processing_mode: str = normalize_processing_mode(
         config_processing_mode_raw or "audit",
         source="runtime processing mode",
@@ -188,15 +188,15 @@ def main(argv: Sequence[str]) -> int:
     )
     LOGGER.debug(
         "Google Doc share mode resolved: %s (%s)",
-        config.google_doc_share_mode,
-        describe_google_doc_share_mode(config.google_doc_share_mode),
+        config.google.doc_share_mode,
+        describe_google_doc_share_mode(config.google.doc_share_mode),
     )
 
     runtime_services = build_entrypoint_runtime_services(
         logger=LOGGER,
         config=config,
-        kiev_tz=_load_zoneinfo(config.timezone_kiev),
-        cet_tz=_load_zoneinfo(config.timezone_cet),
+        kiev_tz=_load_zoneinfo(config.timezones.kiev),
+        cet_tz=_load_zoneinfo(config.timezones.cet),
         resolve_logger_name_meta=resolve_logger_name_meta,
     )
     batch_runner = runtime_services.batch_runner

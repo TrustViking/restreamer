@@ -89,7 +89,7 @@ def build_prepared_videos(
                 logger=logger,
                 summarize_error=summarize_error,
                 sheets_client=services.sheets_client,
-                spreadsheet_id=config.google_sheets_id,
+                spreadsheet_id=config.google.sheets_id,
                 sheet_name_for_writeback=sheet_state.sheet_name_for_writeback,
                 row_number=row.row_number,
                 links_column_index=row.links_column_index,
@@ -192,7 +192,7 @@ def materialize_prepared_previews(
     dry_run: bool,
 ) -> List[PreparedVideo]:
     preview_root_folder_id: Optional[str] = (
-        config.google_drive_preview_folder_id or config.google_drive_folder_id
+        config.google.drive_preview_folder_id or config.google.drive_folder_id
     )
     language_positions: Dict[Tuple[str, str], int] = {}
     drive_folder_cache: Dict[Tuple[str, str], Optional[str]] = {}
@@ -254,7 +254,7 @@ def materialize_prepared_previews(
             if drive_folder_key not in drive_folder_cache:
                 try:
                     preview_path_parts: List[str] = build_drive_preview_path_segments(
-                        template=config.google_drive_preview_path_template,
+                        template=config.google.drive_preview_path_template,
                         language=prepared.language,
                         date_key=prepared.date_key,
                     )
@@ -269,7 +269,7 @@ def materialize_prepared_previews(
                         prepared.date_key,
                         prepared.language,
                         preview_root_folder_id,
-                        config.google_drive_preview_path_template,
+                        config.google.drive_preview_path_template,
                         summarize_error(error),
                     )
                 drive_folder_cache[drive_folder_key] = preview_target_folder_id
@@ -463,3 +463,4 @@ def _build_base_planned_video(
         base_video,
         row_characteristics=row_characteristics,
     )
+
