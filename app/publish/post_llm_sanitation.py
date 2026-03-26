@@ -5,6 +5,7 @@ import re
 from typing import List, Optional, Sequence
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.core.cta_detection import looks_like_cta_line as _cta_gate_check
 from app.core.models import (
     BLOCK_GENERATION_MODE_REAL_MERGE,
     LanguageMergeAttempt,
@@ -215,6 +216,24 @@ def _compose_full_text(
     )
 
 
+def _apply_publish_cta_gate(
+    *,
+    language: str,
+    source_label: str,
+    cta_text: str,
+) -> str:
+    sanitized_cta_text: str = str(cta_text or "").strip()
+    if sanitized_cta_text and _cta_gate_check(sanitized_cta_text):
+        LOGGER.info(
+            "merged_publish_cta_gate_dropped lang=%s source=%s cta_chars=%d",
+            language,
+            source_label,
+            len(sanitized_cta_text),
+        )
+        return ""
+    return sanitized_cta_text
+
+
 def build_sanitized_merged_publication_payload(
     *,
     language: str,
@@ -280,10 +299,15 @@ def build_sanitized_merged_publication_payload(
         ).description_text
     else:
         normalized_body_text = sanitization_result.body_text
+    sanitized_cta_text: str = _apply_publish_cta_gate(
+        language=language,
+        source_label=source_label,
+        cta_text=sanitization_result.cta_text,
+    )
     final_description: str = _compose_full_text(
         language=language,
         body_text=normalized_body_text,
-        cta_text=sanitization_result.cta_text,
+        cta_text=sanitized_cta_text,
         hashtags_line=sanitization_result.hashtags_line,
         recommended_youtube_urls=final_selected_youtube_urls,
         source_urls=final_official_links_urls,
@@ -320,7 +344,7 @@ def build_sanitized_merged_publication_payload(
     )
     final_layout: str = _resolve_tail_layout(
         body_text=normalized_body_text,
-        cta_text=sanitization_result.cta_text,
+        cta_text=sanitized_cta_text,
         hashtags_line=sanitization_result.hashtags_line,
         recommended_youtube_urls=final_selected_youtube_urls,
         source_urls=final_official_links_urls,
@@ -395,10 +419,15 @@ def sanitize_post_llm_text_for_merged_publish(
         source_texts=(),
     ).description_text
     normalized_body_text = _clean_double_bullet_markers(normalized_body_text)
+    sanitized_cta_text: str = _apply_publish_cta_gate(
+        language=language,
+        source_label=source_label,
+        cta_text=sanitization_result.cta_text,
+    )
     return _compose_full_text(
         language=language,
         body_text=normalized_body_text,
-        cta_text=sanitization_result.cta_text,
+        cta_text=sanitized_cta_text,
         hashtags_line=sanitization_result.hashtags_line,
         recommended_youtube_urls=authoritative_source_urls.selected_youtube_urls,
         source_urls=authoritative_source_urls.source_urls,
@@ -487,10 +516,15 @@ def sanitize_post_llm_text(
         source_label,
         tail_layout,
     )
+    sanitized_cta_text: str = _apply_publish_cta_gate(
+        language=language,
+        source_label=source_label,
+        cta_text=cta_text,
+    )
     full_text: str = _compose_full_text(
         language=language,
         body_text=body_text,
-        cta_text=cta_text,
+        cta_text=sanitized_cta_text,
         hashtags_line=hashtags_line,
         recommended_youtube_urls=youtube_urls,
         source_urls=non_youtube_source_urls,

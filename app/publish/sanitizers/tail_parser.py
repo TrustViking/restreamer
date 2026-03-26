@@ -4,9 +4,9 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
+from app.core.constants import ALLOWED_BULLET_MARKERS, URL_LINE_PATTERN
 from app.core.cta_detection import CTA_HINTS, looks_like_cta_line as _looks_like_cta_line_shared
 from app.core.text_utils import split_paragraphs
-from app.llm.merges.merge_constants import ALLOWED_BULLET_MARKERS, URL_LINE_PATTERN
 from app.publish.sanitizers.url_selector import _sanitize_source_url, _dedupe_nonempty
 
 
@@ -75,8 +75,12 @@ class TailParser:
         normalized_line: str = re.sub(r"\s+", " ", str(line or "")).strip().lower()
         if not normalized_line:
             return False
-        normalized_line = normalized_line.lstrip("-*•> ")
-        return any(normalized_line.startswith(hint) for hint in CTA_HINTS)
+        cleaned_line: str = normalized_line.lstrip("-*•> ")
+        if any(cleaned_line.startswith(hint) for hint in CTA_HINTS):
+            return True
+        if len(normalized_line) <= 200 and _looks_like_cta_line_shared(line):
+            return True
+        return False
 
     @staticmethod
     def merge_hashtag_lines(lines: Sequence[str]) -> str:

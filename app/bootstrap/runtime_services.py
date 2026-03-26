@@ -41,7 +41,7 @@ def build_entrypoint_runtime_services(
         local_doc_dir_template=config.local_doc_dir_template,
         preview_name_template=config.templates.files_preview_name_template,
         doc_title_template=config.templates.files_doc_title_template,
-        language_codes_json=config.templates.files_language_codes_json,
+        language_codes=config.templates.files_language_codes,
         max_filename_stem=config.preview_filename_max_stem,
     )
     batch_runner: BatchRunner = BatchRunner(

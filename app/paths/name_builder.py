@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -124,7 +123,7 @@ class NamePathBuilder:
         local_doc_dir_template: Optional[str],
         preview_name_template: str,
         doc_title_template: str,
-        language_codes_json: str,
+        language_codes: dict[str, str],
         max_filename_stem: int,
     ) -> None:
         self._local_image_dir_template: str = local_image_dir_template
@@ -134,16 +133,10 @@ class NamePathBuilder:
         self._preview_name_template: str = preview_name_template
         self._doc_title_template: str = doc_title_template
         self._max_filename_stem: int = max(16, int(max_filename_stem))
-        self._language_codes: Dict[str, str] = {}
-        try:
-            payload: Any = json.loads(language_codes_json)
-            if isinstance(payload, dict):
-                for key, value in payload.items():
-                    self._language_codes[str(key)] = str(value).upper()
-        except Exception as error:
-            raise RuntimeError(
-                f"Invalid template files.language_codes: {error}"
-            ) from error
+        self._language_codes: Dict[str, str] = {
+            str(key): str(value).upper()
+            for key, value in language_codes.items()
+        }
 
     def build_doc_title(
         self,

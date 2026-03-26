@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
@@ -47,21 +46,19 @@ class MergeContractMode:
     contract_block: str
     max_body_paragraphs: int
 
-def _language_name_for_merge_prompt(language: str, llm_language_names_json: str) -> str:
+def _language_name_for_merge_prompt(
+    language: str,
+    llm_language_names: dict[str, str],
+) -> str:
     default_names: dict[str, str] = {
         "uk": "Ukrainian",
         "en": "English",
         "ru": "Russian",
         "other": "the original language of sources",
     }
-    try:
-        import json
-
-        payload = json.loads(llm_language_names_json)
-        if isinstance(payload, dict):
-            return str(payload.get(language, payload.get("other", default_names["other"])))
-    except Exception:
-        pass
+    payload: dict[str, str] = llm_language_names
+    if isinstance(payload, dict):
+        return str(payload.get(language, payload.get("other", default_names["other"])))
     return default_names.get(language, default_names["other"])
 
 def _normalize_source_description_text(text: str) -> str:
@@ -171,7 +168,7 @@ def build_llm_merge_prompt_text(
         raise ValueError("Expected at least 2 videos for merged generation.")
     language_name: str = _language_name_for_merge_prompt(
         language,
-        config.templates.llm_language_names_json,
+        getattr(config.templates, "llm_language_names", {}),
     )
     source_blocks: List[str] = []
     cleaned_source_texts: List[str] = []

@@ -91,7 +91,9 @@ class MergeFailedPublishFallbackTests(unittest.TestCase):
             time_display="18:00",
             templates=SimpleNamespace(
                 google_doc_table_labels_json='{"en":["TITLE","DESCRIPTION","PREVIEW"]}',
+                google_doc_table_labels={"en": ["TITLE", "DESCRIPTION", "PREVIEW"]},
                 google_doc_language_headings_json='{"en":"EN"}',
+                google_doc_language_headings={"en": "EN"},
             ),
             artifact_status="partial",
         )
@@ -109,7 +111,9 @@ class MergeFailedPublishFallbackTests(unittest.TestCase):
             time_display="18:00",
             templates=SimpleNamespace(
                 google_doc_table_labels_json='{"en":["TITLE","DESCRIPTION","PREVIEW"]}',
+                google_doc_table_labels={"en": ["TITLE", "DESCRIPTION", "PREVIEW"]},
                 google_doc_language_headings_json='{"en":"EN"}',
+                google_doc_language_headings={"en": "EN"},
             ),
             artifact_status="fallback_only",
         )
@@ -147,7 +151,9 @@ class MergeFailedPublishFallbackTests(unittest.TestCase):
             time_display="18:00",
             templates=SimpleNamespace(
                 google_doc_table_labels_json='{"en":["TITLE","DESCRIPTION","PREVIEW"]}',
+                google_doc_table_labels={"en": ["TITLE", "DESCRIPTION", "PREVIEW"]},
                 google_doc_language_headings_json='{"en":"EN"}',
+                google_doc_language_headings={"en": "EN"},
             ),
         )
         flattened_rows = [value for value, _ in rows]

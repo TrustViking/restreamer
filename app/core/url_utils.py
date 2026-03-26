@@ -68,7 +68,13 @@ def is_social_platform_host(host: str) -> bool:
     normalized_host: str = str(host or "").strip().lower()
     if normalized_host.startswith("www."):
         normalized_host = normalized_host[4:]
-    return normalized_host in SOCIAL_PLATFORM_HOSTS
+    if normalized_host in SOCIAL_PLATFORM_HOSTS:
+        return True
+    parts: list[str] = normalized_host.split(".")
+    if len(parts) >= 3:
+        candidate: str = ".".join(parts[-2:])
+        return candidate in SOCIAL_PLATFORM_HOSTS
+    return False
 
 
 def strip_tracking_params(url: str) -> str:

@@ -4,8 +4,8 @@ from __future__ import annotations
 import re
 from typing import List
 
+from app.core.constants import CTA_FIRST_PARAGRAPH_PREFIXES
 from app.core.text_utils import has_duplicate_paragraphs
-from app.llm.merges.merge_constants import CTA_FIRST_PARAGRAPH_PREFIXES
 from app.llm.merges.merge_validation_helpers import looks_like_bad_hook_paragraph
 
 

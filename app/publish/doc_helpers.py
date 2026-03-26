@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -19,7 +18,7 @@ from app.core.models import (
 )
 from app.core.text_utils import split_paragraphs
 from app.core.url_normalizer import normalize_display_url
-from app.llm.merges.merge_constants import URL_PATTERN
+from app.core.constants import URL_PATTERN
 from app.llm.merges.merge_text_utils import _looks_like_service_tail_paragraph
 from app.planning import planned_video_block_language
 from app.publish.post_llm_sanitation import (
@@ -35,12 +34,9 @@ LOGGER = _get_logger_impl(__name__)
 def _language_heading(language: str, templates: Optional[AppTemplates]) -> str:
     if templates is None:
         return "OTHER"
-    try:
-        payload: Any = json.loads(templates.google_doc_language_headings_json)
-        if isinstance(payload, dict):
-            return str(payload.get(language, payload.get("other", "OTHER")))
-    except Exception:
-        pass
+    payload: object = getattr(templates, "google_doc_language_headings", {})
+    if isinstance(payload, dict):
+        return str(payload.get(language, payload.get("other", "OTHER")))
     return "OTHER"
 
 
@@ -173,7 +169,7 @@ def _light_polish_single_source_description(text: str) -> str:
         or _looks_like_promotional_opener(cleaned_paragraphs[0])
     ):
         cleaned_paragraphs = cleaned_paragraphs[1:]
-    if cleaned_paragraphs and _looks_like_service_tail_paragraph(cleaned_paragraphs[-1]):
+    while cleaned_paragraphs and _looks_like_service_tail_paragraph(cleaned_paragraphs[-1]):
         cleaned_paragraphs = cleaned_paragraphs[:-1]
 
     polished_text: str = "\n\n".join(cleaned_paragraphs).strip()
@@ -370,17 +366,13 @@ def _build_language_table_rows(
 ) -> List[Tuple[str, bool]]:
     if templates is None:
         raise RuntimeError("Templates are required for language table labels.")
-    try:
-        labels_payload: Any = json.loads(templates.google_doc_table_labels_json)
-    except Exception as error:
-        raise RuntimeError(
-            f"Invalid template google_doc.table_labels: {error}"
-        ) from error
+    labels_payload: object = getattr(templates, "google_doc_table_labels", {})
+    if not isinstance(labels_payload, dict):
+        raise RuntimeError("Invalid template google_doc.table_labels: expected mapping")
     labels: Dict[str, Tuple[str, str, str]] = {}
-    if isinstance(labels_payload, dict):
-        for key, value in labels_payload.items():
-            if isinstance(value, list) and len(value) == 3:
-                labels[str(key)] = (str(value[0]), str(value[1]), str(value[2]))
+    for key, value in labels_payload.items():
+        if isinstance(value, list) and len(value) == 3:
+            labels[str(key)] = (str(value[0]), str(value[1]), str(value[2]))
     title_label, desc_label, preview_label = labels.get(
         language,
         labels.get("other", ("TITLE", "DESCRIPTION", "PREVIEW")),

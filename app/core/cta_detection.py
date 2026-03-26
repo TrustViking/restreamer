@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import re
 
+from app.core.constants import ALLOWED_BULLET_MARKERS, CTA_FIRST_PARAGRAPH_PREFIXES, URL_LINE_PATTERN
 from app.core.official_links import is_official_links_heading
 from app.core.text_utils import starts_with_any_prefix
-from app.llm.merges.merge_constants import ALLOWED_BULLET_MARKERS, CTA_FIRST_PARAGRAPH_PREFIXES, URL_LINE_PATTERN
 from app.resources.resource_loader import load_lines_resource
 
 CTA_HINTS: tuple[str, ...] = load_lines_resource("lexicon_cta_hints.txt")

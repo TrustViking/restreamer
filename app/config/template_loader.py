@@ -76,6 +76,32 @@ def _get_optional_template_object(
     return current
 
 
+def _normalize_string_mapping(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    normalized_mapping: dict[str, str] = {}
+    for key, item in value.items():
+        normalized_mapping[str(key)] = str(item)
+    return normalized_mapping
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _normalize_table_labels(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized_mapping: dict[str, list[str]] = {}
+    for key, item in value.items():
+        if not isinstance(item, list):
+            continue
+        normalized_mapping[str(key)] = [str(part) for part in item]
+    return normalized_mapping
+
+
 def load_templates_from_path(path: Path) -> AppTemplates:
     if not path.exists():
         raise RuntimeError(f"Templates file does not exist: {path}")
@@ -109,6 +135,20 @@ def load_templates_from_path(path: Path) -> AppTemplates:
     )
     files_language_codes_raw: Any = must_get_template_object(
         payload, "files.language_codes"
+    )
+
+    google_doc_table_labels: dict[str, list[str]] = _normalize_table_labels(
+        google_doc_table_labels_raw
+    )
+    google_doc_bold_line_prefixes: list[str] = _normalize_string_list(
+        google_doc_bold_line_prefixes_raw
+    )
+    google_doc_language_headings: dict[str, str] = _normalize_string_mapping(
+        google_doc_language_headings_raw
+    )
+    llm_language_names: dict[str, str] = _normalize_string_mapping(llm_language_names_raw)
+    files_language_codes: dict[str, str] = _normalize_string_mapping(
+        files_language_codes_raw
     )
 
     if not isinstance(llm_merge_contracts_raw, dict):
@@ -152,8 +192,11 @@ def load_templates_from_path(path: Path) -> AppTemplates:
     return AppTemplates(
         google_doc_header=must_get_template_value(payload, "google_doc.header"),
         google_doc_table_labels_json=google_doc_table_labels_json,
+        google_doc_table_labels=google_doc_table_labels,
         google_doc_bold_line_prefixes_json=google_doc_bold_line_prefixes_json,
+        google_doc_bold_line_prefixes=google_doc_bold_line_prefixes,
         google_doc_language_headings_json=google_doc_language_headings_json,
+        google_doc_language_headings=google_doc_language_headings,
         telegram_header=must_get_template_value(payload, "telegram.header"),
         telegram_language_block=must_get_template_value(payload, "telegram.language_block"),
         telegram_language_merged_block=must_get_template_value(
@@ -174,6 +217,7 @@ def load_templates_from_path(path: Path) -> AppTemplates:
         ),
         llm_startup_ping_prompt=must_get_template_value(payload, "llm.startup_ping_prompt"),
         llm_language_names_json=llm_language_names_json,
+        llm_language_names=llm_language_names,
         llm_merge_structural_rules=_get_optional_template_value(
             payload,
             "llm.merge_structural_rules",
@@ -188,6 +232,7 @@ def load_templates_from_path(path: Path) -> AppTemplates:
         ),
         files_doc_title_template=must_get_template_value(payload, "files.doc_title_template"),
         files_language_codes_json=files_language_codes_json,
+        files_language_codes=files_language_codes,
         common_no_description_text=must_get_template_value(
             payload, "common.no_description_text"
         ),

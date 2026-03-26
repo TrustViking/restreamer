@@ -83,7 +83,10 @@ class GoogleDocsWriterMainFillTests(unittest.TestCase):
         docs_client = self._DocsClient()
         writer = GoogleDocsReportWriter(
             docs_client=docs_client,
-            templates=SimpleNamespace(google_doc_bold_line_prefixes_json="[]"),
+            templates=SimpleNamespace(
+                google_doc_bold_line_prefixes_json="[]",
+                google_doc_bold_line_prefixes=[],
+            ),
         )
         row_values = [
             ("Row 1", True),

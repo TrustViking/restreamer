@@ -57,14 +57,9 @@ class DailyDocumentPublishResult:
 
 
 def _language_heading(language: str, templates: AppTemplates) -> str:
-    try:
-        import json
-
-        payload: Any = json.loads(templates.google_doc_language_headings_json)
-        if isinstance(payload, dict):
-            return str(payload.get(language, payload.get("other", "OTHER")))
-    except Exception:
-        pass
+    payload: object = getattr(templates, "google_doc_language_headings", {})
+    if isinstance(payload, dict):
+        return str(payload.get(language, payload.get("other", "OTHER")))
     return "OTHER"
 
 

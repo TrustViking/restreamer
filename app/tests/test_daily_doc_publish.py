@@ -57,6 +57,7 @@ class DailyDocPublishTests(unittest.TestCase):
         config = SimpleNamespace(
             templates=SimpleNamespace(
                 google_doc_language_headings_json='{"uk":"UK"}',
+                google_doc_language_headings={"uk": "UK"},
                 google_doc_header="HEADER",
             ),
             llm_model="gpt-test",
@@ -109,6 +110,7 @@ class DailyDocPublishTests(unittest.TestCase):
         config = SimpleNamespace(
             templates=SimpleNamespace(
                 google_doc_language_headings_json='{"uk":"UK"}',
+                google_doc_language_headings={"uk": "UK"},
                 google_doc_header="{language_time_titles}",
             ),
             llm_model="gpt-test",
@@ -183,6 +185,7 @@ class DailyDocPublishTests(unittest.TestCase):
         config = SimpleNamespace(
             templates=SimpleNamespace(
                 google_doc_language_headings_json='{"uk":"UK"}',
+                google_doc_language_headings={"uk": "UK"},
                 google_doc_header="{language_time_titles}",
             ),
             llm_model="gpt-test",

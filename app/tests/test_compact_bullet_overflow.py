@@ -21,6 +21,7 @@ class CompactBulletOverflowTests(unittest.TestCase):
             llm_source_desc_max_chars=500,
             templates=SimpleNamespace(
                 llm_language_names_json='{"en":"English"}',
+                llm_language_names={"en": "English"},
                 llm_merge_title_description_prompt=(
                     "Write in {language_name}.\n"
                     "{merge_contract_block}\n\n"

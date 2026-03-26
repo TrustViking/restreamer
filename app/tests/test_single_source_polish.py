@@ -59,6 +59,42 @@ class SingleSourcePolishTests(unittest.TestCase):
         self.assertIn("Факт один", result)
         self.assertIn("You will find", result)
 
+    def test_strips_comment_cta_tail_ru(self) -> None:
+        text = "Факт один.\nФакт два.\n\nНапишите в комментариях ваше мнение!"
+        result = _light_polish_single_source_description(text)
+        self.assertNotIn("Напишите в комментариях", result)
+        self.assertIn("Факт один", result)
+
+    def test_strips_comment_cta_tail_uk(self) -> None:
+        text = "Факт один.\nФакт два.\n\nНапишіть у коментарях, що ви думаєте."
+        result = _light_polish_single_source_description(text)
+        self.assertNotIn("Напишіть у коментарях", result)
+        self.assertIn("Факт один", result)
+
+    def test_strips_comment_cta_tail_en(self) -> None:
+        text = "Fact one.\nFact two.\n\nTell us in the comments what you think."
+        result = _light_polish_single_source_description(text)
+        self.assertNotIn("Tell us in the comments", result)
+        self.assertIn("Fact one", result)
+
+    def test_strips_multiple_service_tail_paragraphs(self) -> None:
+        """Multiple trailing service paragraphs must all be stripped."""
+        text = "Факт один.\nФакт два.\n\nSubscribe and share!\n\nJoin our community!"
+        result = _light_polish_single_source_description(text)
+        self.assertNotIn("Subscribe", result)
+        self.assertNotIn("Join our", result)
+        self.assertIn("Факт один", result)
+
+    def test_keeps_factual_paragraph_mentioning_comment(self) -> None:
+        """Long factual paragraph with word 'комментарий' must not be stripped."""
+        text = (
+            "Юрист дал развёрнутый комментарий о позиции защиты.\n\n"
+            "Анализ доказательной базы показал серьёзные нарушения."
+        )
+        result = _light_polish_single_source_description(text)
+        self.assertIn("комментарий", result)
+        self.assertIn("Анализ", result)
+
 
 if __name__ == "__main__":
     unittest.main()

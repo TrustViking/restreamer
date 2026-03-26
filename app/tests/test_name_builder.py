@@ -13,7 +13,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
             doc_title_template="{date}_{processing_mode}_Ежедневные стримы - Everyday streams{llm_models_segment}_{creation_stamp}",
-            language_codes_json='{"uk":"UA","en":"EN","ru":"RU"}',
+            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
             max_filename_stem=120,
         )
         doc_title = builder.build_doc_title(
@@ -39,7 +39,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
             doc_title_template="{date}_{processing_mode}_Ежедневные стримы - Everyday streams{llm_models_segment}_{creation_stamp}",
-            language_codes_json='{"uk":"UA","en":"EN","ru":"RU"}',
+            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
             max_filename_stem=120,
         )
         docx_path = builder.build_docx_path(
@@ -58,7 +58,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
             doc_title_template="{date}_{processing_mode}_{title_fragment}{llm_models_segment}_{creation_stamp}",
-            language_codes_json='{"uk":"UA","en":"EN","ru":"RU"}',
+            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
             max_filename_stem=120,
         )
         docx_path = builder.build_docx_path(
@@ -79,7 +79,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
             doc_title_template="{date}_{processing_mode}_{title_fragment}{llm_models_segment}_{creation_stamp}",
-            language_codes_json='{"uk":"UA","en":"EN","ru":"RU"}',
+            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
             max_filename_stem=120,
         )
         docx_path = builder.build_docx_path(
@@ -100,7 +100,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
             doc_title_template="{date}_{processing_mode}_{title_fragment}{llm_models_segment}_{creation_stamp}",
-            language_codes_json='{"uk":"UA","en":"EN","ru":"RU"}',
+            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
             max_filename_stem=120,
         )
         json_path = builder.build_merge_reject_debug_json_path(

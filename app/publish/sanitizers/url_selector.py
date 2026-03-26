@@ -12,7 +12,7 @@ from app.core.text_utils import is_youtube_url as _is_youtube_url_canonical
 from app.core.url_normalizer import normalize_display_url
 from app.core.url_utils import _canonical_domain_key, normalize_official_link_display, strip_tracking_params
 from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher, normalize_youtube_video_url
-from app.llm.merges.merge_constants import SEMANTIC_STOPWORDS, SEMANTIC_TOKEN_PATTERN, URL_PATTERN, URL_LINE_PATTERN
+from app.core.constants import SEMANTIC_STOPWORDS, SEMANTIC_TOKEN_PATTERN, URL_PATTERN, URL_LINE_PATTERN
 from app.observability.runtime_analytics import record_malformed_tail_url_cleanup
 
 

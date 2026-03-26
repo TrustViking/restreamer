@@ -220,6 +220,7 @@ class MergeContractServiceTests(unittest.TestCase):
             llm_source_desc_max_chars=500,
             templates=SimpleNamespace(
                 llm_language_names_json='{"en":"English"}',
+                llm_language_names={"en": "English"},
                 llm_merge_title_description_prompt="""
 Write a YouTube stream title and description in {language_name}.
 Generate a new final title, not a copy of any single source title.

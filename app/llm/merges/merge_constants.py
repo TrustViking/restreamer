@@ -1,53 +1,26 @@
-"""Shared constants for the merge pipeline.
+"""Constants for merge pipeline internals.
 
-All bullet markers, CTA prefixes, URL patterns, stopwords, and threshold values
-live here. Other modules import from this file - never define copies.
+Shared structural constants are re-exported from ``app.core.constants`` for
+backward compatibility and to avoid circular imports from ``app.core``.
 """
 from __future__ import annotations
 
-import re
-
-from app.resources.resource_loader import load_lines_resource
-
-# ---------------------------------------------------------------------------
-# Bullet markers
-# ---------------------------------------------------------------------------
-NEUTRAL_BULLET_MARKER: str = "🔹"
-ACCENT_BULLET_MARKERS: tuple[str, ...] = ("📌", "🎤", "🎥", "⚖", "🌐", "✅")
-ALLOWED_BULLET_MARKERS: tuple[str, ...] = (NEUTRAL_BULLET_MARKER, *ACCENT_BULLET_MARKERS)
-ACCENT_MARKER_CAP: int = 3
-
-# ---------------------------------------------------------------------------
-# CTA / promotional prefixes
-# ---------------------------------------------------------------------------
-CTA_FIRST_PARAGRAPH_PREFIXES: tuple[str, ...] = load_lines_resource("lexicon_cta_prefixes.txt")
-
-# ---------------------------------------------------------------------------
-# URL patterns
-# ---------------------------------------------------------------------------
-URL_PATTERN: re.Pattern[str] = re.compile(r"https?://\S+", flags=re.IGNORECASE)
-URL_LINE_PATTERN: re.Pattern[str] = re.compile(r"^https?://\S+$", re.IGNORECASE)
-
-# ---------------------------------------------------------------------------
-# Semantic token analysis
-# ---------------------------------------------------------------------------
-SEMANTIC_TOKEN_PATTERN: re.Pattern[str] = re.compile(
-    r"[0-9A-Za-zА-Яа-яЁёІіЇїЄєҐґ]{3,}",
-    flags=re.UNICODE,
+from app.core.constants import (
+    ACCENT_BULLET_MARKERS,
+    ACCENT_MARKER_CAP,
+    ALLOWED_BULLET_MARKERS,
+    CTA_FIRST_PARAGRAPH_PREFIXES,
+    NEUTRAL_BULLET_MARKER,
+    SEMANTIC_STOPWORDS,
+    SEMANTIC_TOKEN_PATTERN,
+    URL_LINE_PATTERN,
+    URL_PATTERN,
 )
 
-SEMANTIC_STOPWORDS: frozenset[str] = frozenset(load_lines_resource("lexicon_semantic_stopwords.txt"))
-
-# ---------------------------------------------------------------------------
-# Bullet overload thresholds
-# ---------------------------------------------------------------------------
 BULLET_OVERLOAD_CHAR_LIMIT: int = 280
 BULLET_OVERLOAD_NAME_LIMIT: int = 3
 BULLET_ABSOLUTE_MAX_CHAR_LIMIT: int = 500
 
-# ---------------------------------------------------------------------------
-# Merge orchestration
-# ---------------------------------------------------------------------------
 PRIMARY_ATTEMPTS: int = 2
 PRIMARY_ATTEMPTS_EXTENDED: int = 3
 STYLE_CONTRACT_VERSION: str = "v4_merge_quality_hardening"

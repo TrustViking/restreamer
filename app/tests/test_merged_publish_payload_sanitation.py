@@ -41,15 +41,13 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
                 source_videos=[self._video()],
             )
         self.assertEqual(
-            "Body paragraph.\n\n"
-            "Join us tonight and share your thoughts.\n\n"
-            "#nanoplastics #microplastics",
+            "Body paragraph.\n\n#nanoplastics #microplastics",
             payload.description_text,
         )
         logs: str = "\n".join(captured.output)
         self.assertIn("merged_publish_sanitation_applied=yes", logs)
         self.assertIn("hashtags_split_from_cta=yes", logs)
-        self.assertIn("tail_layout=body_blank_cta_blank_hashtags", logs)
+        self.assertIn("tail_layout=body_blank_hashtags", logs)
         self.assertEqual(BLOCK_GENERATION_MODE_REAL_MERGE, payload.block_generation_mode)
 
     def test_already_separate_hashtags_stay_stable(self) -> None:
@@ -64,7 +62,7 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
             source_videos=[self._video()],
         )
         self.assertEqual(
-            "Body paragraph.\n\nJoin us tonight and share your thoughts.\n\n#nanoplastics #microplastics",
+            "Body paragraph.\n\n#nanoplastics #microplastics",
             payload.description_text,
         )
 
@@ -93,9 +91,28 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
             source_videos=[self._video()],
         )
         self.assertEqual(
-            "Body paragraph.\n\nJoin us tonight and share your thoughts.",
+            "Body paragraph.",
             payload.description_text,
         )
+
+    def test_comment_cta_is_dropped_from_merged_description_text(self) -> None:
+        merged_content: MergedLanguageContent = self._payload(
+            "Свидетельства жертв звучат на фоне следствия.\n\n"
+            "⚖ Дело открыто и находится на стадии следствия.\n"
+            "🔹 Встреча с послом: правительство ознакомлено.\n\n"
+            "Напишите в комментариях, какие вопросы вы считаете ключевыми.\n\n"
+            "#Танзания #ЗащитаДетей"
+        )
+        payload = build_sanitized_merged_publication_payload(
+            language="ru",
+            merged_content=merged_content,
+            merge_attempt=None,
+            use_audit_text=False,
+            source_videos=[self._video()],
+        )
+        self.assertNotIn("Напишите в комментариях", payload.description_text)
+        self.assertIn("#Танзания", payload.description_text)
+        self.assertIn("Свидетельства жертв", payload.description_text)
 
     def test_empty_official_links_heading_is_suppressed(self) -> None:
         merged_content: MergedLanguageContent = self._payload(
@@ -135,7 +152,6 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
             "🌐 Official links:\n"
             "https://example.org\n"
             "https://allatra.org\n\n"
-            "Join us tonight and share your thoughts.\n\n"
             "#nanoplastics #microplastics",
             payload.description_text,
         )
@@ -146,7 +162,7 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
         self.assertIn("official_links_final_count=2", logs)
         self.assertIn("official_links_block=emitted", logs)
         self.assertIn(
-            "tail_layout=body_blank_official_links_blank_cta_blank_hashtags",
+            "tail_layout=body_blank_official_links_blank_hashtags",
             logs,
         )
 
@@ -173,7 +189,6 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
             "Body paragraph.\n\n"
             "🌐 Official links:\n"
             "https://example.org\n\n"
-            "Join us tonight and share your thoughts.\n\n"
             "#nanoplastics #microplastics",
             payload.description_text,
         )
@@ -244,7 +259,6 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
             "Body paragraph.\n\n"
             "🌐 Official links:\n"
             "https://example.org\n\n"
-            "Join us tonight and share your thoughts.\n\n"
             "#nanoplastics #microplastics",
             payload.description_text,
         )
@@ -338,10 +352,7 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
         self.assertIn("👉 https://youtu.be/ccccccccccc", payload.description_text)
         self.assertNotIn("https://youtu.be/ddddddddddd", payload.description_text)
         self.assertNotIn("✅ Title Real", payload.description_text)
-        self.assertLess(
-            payload.description_text.index("Recommended materials:"),
-            payload.description_text.index("Join us tonight and share your thoughts."),
-        )
+        self.assertNotIn("Join us tonight and share your thoughts.", payload.description_text)
         self.assertEqual(
             [
                 ("https://youtu.be/aaaaaaaaaaa",),

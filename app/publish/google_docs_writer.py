@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger
@@ -121,14 +120,13 @@ class GoogleDocsReportWriter:
         )
 
         bold_line_prefixes: Tuple[str, ...] = ()
-        try:
-            raw_prefixes: Any = json.loads(
-                self._templates.google_doc_bold_line_prefixes_json
-            )
-            if isinstance(raw_prefixes, list):
-                bold_line_prefixes = tuple(str(item) for item in raw_prefixes)
-        except Exception:
-            bold_line_prefixes = ()
+        raw_prefixes: object = getattr(
+            self._templates,
+            "google_doc_bold_line_prefixes",
+            [],
+        )
+        if isinstance(raw_prefixes, list):
+            bold_line_prefixes = tuple(str(item) for item in raw_prefixes)
 
         cursor: int = 0
         for line in text.splitlines(keepends=True):

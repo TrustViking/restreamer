@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from app.core.url_utils import normalize_official_link_display, strip_tracking_params
+from app.core.url_utils import (
+    is_social_platform_host,
+    normalize_official_link_display,
+    strip_tracking_params,
+)
 from app.publish.sanitizers.url_selector import (
     AuthoritativeUrlSelector,
     _is_complete_source_url,
@@ -69,6 +73,12 @@ class TestNormalizeOfficialLinkDisplay:
             == "https://www.instagram.com/user/"
         )
 
+    def test_social_mobile_facebook_subdomain_keeps_path(self) -> None:
+        assert (
+            normalize_official_link_display("https://m.facebook.com/page/123")
+            == "https://m.facebook.com/page/123"
+        )
+
     def test_regular_site_strips_www_and_path(self) -> None:
         assert (
             normalize_official_link_display("https://www.spiritualdiplomats.org/ukraine")
@@ -95,6 +105,23 @@ class TestNormalizeOfficialLinkDisplay:
 
     def test_empty(self) -> None:
         assert normalize_official_link_display("") == ""
+
+
+class TestIsSocialPlatformHost:
+    def test_mobile_facebook_subdomain(self) -> None:
+        assert is_social_platform_host("m.facebook.com") is True
+
+    def test_mobile_twitter_subdomain(self) -> None:
+        assert is_social_platform_host("mobile.twitter.com") is True
+
+    def test_instagram_link_subdomain(self) -> None:
+        assert is_social_platform_host("l.instagram.com") is True
+
+    def test_non_social_subdomain(self) -> None:
+        assert is_social_platform_host("api.example.com") is False
+
+    def test_base_social_domain(self) -> None:
+        assert is_social_platform_host("facebook.com") is True
 
 
 class TestIsCompleteSourceUrl:

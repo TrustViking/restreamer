@@ -37,6 +37,7 @@ class MergeStructuralRulesPromptTests(unittest.TestCase):
         return SimpleNamespace(
             templates=SimpleNamespace(
                 llm_language_names_json='{"en":"English"}',
+                llm_language_names={"en": "English"},
                 llm_merge_title_description_prompt=(
                     "Write in {language_name}.\n"
                     "{merge_contract_block}\n\n"

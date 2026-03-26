@@ -49,6 +49,33 @@ class TestTailParserLooksCta:
         assert TailParser.looks_like_cta_line("") is False
         assert TailParser.looks_like_cta_line(None) is False  # type: ignore[arg-type]
 
+    def test_comment_cta_with_preposition_ru(self) -> None:
+        """'Напишите в комментариях...' must be detected as CTA."""
+        assert TailParser.is_standalone_cta_line(
+            "Напишите в комментариях, какие вопросы вы считаете ключевыми."
+        ) is True
+
+    def test_comment_cta_with_preposition_uk(self) -> None:
+        """'Напишіть у коментарях...' must be detected as CTA."""
+        assert TailParser.is_standalone_cta_line(
+            "Напишіть у коментарях, що ви думаєте про це."
+        ) is True
+
+    def test_comment_cta_en(self) -> None:
+        """'Write a comment...' must be detected as standalone CTA."""
+        assert TailParser.is_standalone_cta_line(
+            "Write a comment and share your thoughts on this topic."
+        ) is True
+
+    def test_long_factual_text_with_comment_word_is_not_cta(self) -> None:
+        """Long factual paragraph mentioning 'комментарий' must NOT be standalone CTA."""
+        long_text: str = (
+            "Юрист прокомментировал ситуацию и дал развёрнутый комментарий о позиции защиты, "
+            "включая анализ доказательной базы, свидетельских показаний и процедурных нарушений, "
+            "которые были допущены в ходе следствия по делу обвиняемого."
+        )
+        assert TailParser.is_standalone_cta_line(long_text) is False
+
 
 class TestCtaParagraphBoundaries:
     def test_cta_paragraph_boundary_cases(self) -> None:
