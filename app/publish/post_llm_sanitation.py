@@ -22,18 +22,12 @@ from app.publish.sanitizers.tail_parser import (
     TailParser,
     TailParts as _TailParts,
     EmbeddedTailParts as _EmbeddedTailParts,
-    TailParts,
-    EmbeddedTailParts,
 )
 from app.publish.sanitizers.url_selector import (
     AuthoritativeSourceUrlsResult,
-    _select_authoritative_non_youtube_urls,
     build_authoritative_merged_source_urls,
     _sanitize_urls_in_text,
-    _sanitize_url,
-    _sanitize_source_url,
     _is_youtube_url,
-    _is_complete_source_url,
     _dedupe_nonempty,
 )
 from app.publish.sanitizers.description_composer import (

@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from app.core.models import NormalizedImage, PlannedVideo, VideoMetadata
 from app.core.url_utils import _canonical_domain_key
-from app.publish.post_llm_sanitation import _select_authoritative_non_youtube_urls
+from app.publish.sanitizers.url_selector import _select_authoritative_non_youtube_urls
 
 
 def _make_video(*, description: str, url: str = "https://youtu.be/aaaaaaaaaaa") -> PlannedVideo:
