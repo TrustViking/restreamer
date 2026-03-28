@@ -570,25 +570,6 @@ def _normalize_authoritative_video_url(video: PlannedVideo) -> Optional[str]:
     from app.publish.sanitizers.url_selector import _normalize_authoritative_video_url as _impl
     return _impl(video)
 
-
-def _extract_semantic_tokens(text: str) -> set[str]:
-    return AuthoritativeUrlSelector._extract_semantic_tokens(text)
-
-
-def _strip_urls_and_hashtags_for_context(text: str) -> str:
-    return AuthoritativeUrlSelector._strip_urls_and_hashtags_for_context(text)
-
-
-def _extract_raw_description_urls(
-    source_videos: Sequence[PlannedVideo],
-) -> tuple[List[tuple[str, str, int, int]], List[tuple[str, str]], int]:
-    return AuthoritativeUrlSelector._extract_raw_description_urls(source_videos)
-
-
-# Import AuthoritativeUrlSelector for the _extract_semantic_tokens / _strip_urls_and_hashtags wrappers
-from app.publish.sanitizers.url_selector import AuthoritativeUrlSelector
-
-
 def _log_sanitation_summary(
     *,
     language: str,

@@ -1,71 +1,25 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import logging
 import time
-from typing import Dict, List, Optional, Set
+from typing import Optional
 
 from app.bootstrap.run_context import RunContext
-from app.core.branching import (
-    BRANCH_MERGE,
-    BRANCH_NOMERGE,
+# Backward-compatible re-exports — DO NOT REMOVE
+from app.observability.analytics_formatters import (  # noqa: F401
+    _branch_date_key,
+    _format_branch_summary,
+    _format_reason_counts,
+    _has_failed_branch,
+    _resolve_run_status,
 )
-
-WARNING_CATEGORY_INFORMATIONAL: str = "informational"
-WARNING_CATEGORY_OPERATIONAL: str = "operational"
-
-
-@dataclass
-class BranchAnalyticsState:
-    started: bool = False
-    completed: bool = False
-    failed: bool = False
-
-
-@dataclass
-class BranchDateAnalyticsState:
-    docs_created: int = 0
-    docs_failed: int = 0
-    telegram_sent: int = 0
-    telegram_failed: int = 0
-    telegram_skipped: int = 0
-    contract_failures: int = 0
-    contract_recovered: int = 0
-    contract_unrecovered: int = 0
-    branch_total_ms: int = 0
-    models_used: Set[str] = field(default_factory=set)
-
-
-@dataclass
-class RuntimeAnalyticsState:
-    debug_enabled: bool
-    run_started_at: float = field(default_factory=time.perf_counter)
-    warnings_operational: int = 0
-    warnings_informational: int = 0
-    errors: int = 0
-    warning_reason_counts: Dict[str, int] = field(default_factory=dict)
-    error_reason_counts: Dict[str, int] = field(default_factory=dict)
-    rows_loaded: int = 0
-    planned_items: int = 0
-    rows_skipped: int = 0
-    unique_dates_processed: Set[str] = field(default_factory=set)
-    date_branch_executions: int = 0
-    docs_created: int = 0
-    docs_failed: int = 0
-    telegram_sent: int = 0
-    telegram_failed: int = 0
-    telegram_skipped: int = 0
-    malformed_tail_url_fragments_dropped: int = 0
-    malformed_tail_cleanup_keys: Set[str] | None = None
-    branch_results: Dict[str, BranchAnalyticsState] = field(default_factory=dict)
-    branch_date_results: Dict[str, BranchDateAnalyticsState] = field(default_factory=dict)
-    stage_durations_ms: Dict[str, int] = field(default_factory=dict)
-    slot_total_ms_by_key: Dict[str, int] = field(default_factory=dict)
-    degraded_recovered_count: int = 0
-    degraded_unrecovered_count: int = 0
-    content_contract_failures: int = 0
-    content_contract_recovered: int = 0
-    content_contract_unrecovered: int = 0
+from app.observability.analytics_state import (  # noqa: F401
+    WARNING_CATEGORY_INFORMATIONAL,
+    WARNING_CATEGORY_OPERATIONAL,
+    BranchAnalyticsState,
+    BranchDateAnalyticsState,
+    RuntimeAnalyticsState,
+)
 
 
 class _RuntimeAnalyticsCounter(logging.Handler):
@@ -141,67 +95,6 @@ def log_error_event(
         extra={"reason_code": str(reason_code or "").strip()},
     )
 
-
-def _branch_date_key(*, date_key: str, branch_label: str) -> str:
-    return f"{date_key}|{branch_label}"
-
-
-def _has_failed_branch(state: RuntimeAnalyticsState) -> bool:
-    return any(branch_state.failed for branch_state in state.branch_results.values())
-
-
-def _resolve_run_status(exit_code: int, state: RuntimeAnalyticsState) -> str:
-    if exit_code != 0 or state.errors > 0 or _has_failed_branch(state):
-        return "failed"
-    if (
-        state.warnings_operational > 0
-        or state.docs_failed > 0
-        or state.telegram_failed > 0
-        or state.malformed_tail_url_fragments_dropped > 0
-    ):
-        return "partial"
-    return "success"
-
-
-def _format_branch_summary(
-    *,
-    audit_mode: str,
-    state: RuntimeAnalyticsState,
-) -> str:
-    if not state.branch_results:
-        return "<not_run>"
-    if audit_mode == "nomerge":
-        branch_state: BranchAnalyticsState = state.branch_results.get(
-            audit_mode,
-            BranchAnalyticsState(),
-        )
-        return (
-            f"{audit_mode}:"
-            f"{'failed' if branch_state.failed else ('success' if branch_state.completed else 'not_run')}"
-        )
-    branch_labels: tuple[str, ...]
-    if audit_mode == "merge":
-        branch_labels = (BRANCH_MERGE,)
-    else:
-        branch_labels = (BRANCH_NOMERGE, BRANCH_MERGE)
-    branch_parts: list[str] = []
-    for branch_label in branch_labels:
-        branch_state: BranchAnalyticsState = state.branch_results.get(
-            branch_label,
-            BranchAnalyticsState(),
-        )
-        branch_parts.append(
-            f"{branch_label}:"
-            f"{'failed' if branch_state.failed else ('success' if branch_state.completed else 'not_run')}"
-        )
-    return ",".join(branch_parts)
-
-
-def _format_reason_counts(reason_counts: Dict[str, int]) -> str:
-    if not reason_counts:
-        return "none"
-    ordered_items: List[tuple[str, int]] = sorted(reason_counts.items())
-    return ",".join(f"{reason_code}:{count}" for reason_code, count in ordered_items)
 
 class RuntimeAnalyticsCollector:
     def __init__(self, *, debug_enabled: bool) -> None:

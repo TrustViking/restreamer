@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional, cast
 
 import yaml
 
+from app.config.env_reader import EnvReader
 from app.config.settings import (
     AppConfig,
     GoogleConfig,
@@ -18,12 +19,10 @@ from app.config.settings import (
 )
 from app.config.template_loader import load_templates_from_path
 from app.config.validators import (
-    must_get_env,
     normalize_google_doc_share_mode,
     normalize_now_tz_mode,
     normalize_processing_mode,
     setting_as_bool,
-    setting_as_float,
     setting_as_int,
     setting_as_optional_str,
     setting_as_str,
@@ -137,45 +136,6 @@ def validate_google_service_account_path_requirement(
         ) from error
 
 
-def _load_bool_env(name: str, default: bool) -> bool:
-    raw_value: str = str(os.getenv(name, "")).strip().lower()
-    if not raw_value:
-        return default
-    if raw_value in {"1", "true", "yes", "on"}:
-        return True
-    if raw_value in {"0", "false", "no", "off"}:
-        return False
-    raise RuntimeError(
-        f"Invalid boolean for {name}: {raw_value!r}. Allowed: 1/0,true/false,yes/no,on/off."
-    )
-
-
-def _load_int_env(name: str, default: int, min_value: int = 0) -> int:
-    raw_value: str = str(os.getenv(name, "")).strip()
-    if not raw_value:
-        return default
-    try:
-        value: int = int(raw_value)
-    except Exception as error:
-        raise RuntimeError(f"Invalid integer for {name}: {raw_value!r}") from error
-    if value < min_value:
-        raise RuntimeError(f"{name} must be >= {min_value}, got {value}")
-    return value
-
-
-def _load_float_env(name: str, default: float, min_value: float = 0.0) -> float:
-    raw_value: str = str(os.getenv(name, "")).strip()
-    if not raw_value:
-        return default
-    try:
-        value: float = float(raw_value)
-    except Exception as error:
-        raise RuntimeError(f"Invalid float for {name}: {raw_value!r}") from error
-    if value < min_value:
-        raise RuntimeError(f"{name} must be >= {min_value}, got {value}")
-    return value
-
-
 def _resolve_template_path(
     template_value: Optional[str],
     *,
@@ -190,22 +150,12 @@ def _resolve_template_path(
     return str((base_dir / candidate).resolve())
 
 
-def load_config_from_env(
+def _build_processing_config(
+    app_settings: Dict[str, Any],
     *,
     logger: logging.Logger,
-    summarize_error: Optional[Callable[[Exception], str]] = None,
-) -> AppConfig:
-    project_paths = get_project_paths()
-    app_config_path: Path = (
-        Path(os.getenv("APP_CONFIG_PATH", "").strip())
-        if os.getenv("APP_CONFIG_PATH", "").strip()
-        else project_paths.runtime_config_path
-    )
-    app_settings: Dict[str, Any] = load_app_settings_from_path(app_config_path)
-    warn_ignored_google_auth_mode_in_config(app_settings, logger=logger)
-
-    templates = load_templates_from_path(project_paths.templates_path)
-
+) -> ProcessingConfig:
+    """Build processing config from YAML settings + env overrides."""
     processing_mode: str = normalize_processing_mode(
         setting_as_str(app_settings, "processing.mode"),
         source="app.processing.mode",
@@ -220,16 +170,41 @@ def load_config_from_env(
         )
     now_tz_mode_input: str = env_now_tz_raw or config_now_tz_raw or "kyiv"
     now_tz_mode: str = normalize_now_tz_mode(now_tz_mode_input, source="now timezone mode")
+    return ProcessingConfig(
+        mode=processing_mode,
+        now_tz_mode=now_tz_mode,
+    )
 
+
+def _build_llm_config() -> LlmConfig:
+    """Build LLM config entirely from env variables."""
     openai_model: str = os.getenv("OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
     llm_provider: str = "openai"
     llm_model: str = openai_model
-    openai_timeout_sec: float = _load_float_env("STG_OPENAI_TIMEOUT_SEC", 120.0, min_value=1.0)
-    openai_max_output_tokens: int = _load_int_env("STG_OPENAI_MAX_OUTPUT_TOKENS", 1000, min_value=1)
-    openai_pre_delay_sec: float = _load_float_env("STG_OPENAI_PRE_DELAY_SEC", 5.0, min_value=0.0)
+    openai_timeout_sec: float = EnvReader.float("STG_OPENAI_TIMEOUT_SEC", 120.0, min_value=1.0)
+    openai_max_output_tokens: int = EnvReader.int("STG_OPENAI_MAX_OUTPUT_TOKENS", 1000, min_value=1)
+    openai_pre_delay_sec: float = EnvReader.float("STG_OPENAI_PRE_DELAY_SEC", 5.0, min_value=0.0)
     llm_source_desc_max_chars: int = 2000
-    llm_run_if_single_source: bool = _load_bool_env("STG_LLM_RUN_IF_SINGLE_SOURCE", False)
+    llm_run_if_single_source: bool = EnvReader.bool("STG_LLM_RUN_IF_SINGLE_SOURCE", False)
+    return LlmConfig(
+        provider=llm_provider,
+        model=llm_model,
+        timeout_sec=openai_timeout_sec,
+        max_output_tokens=openai_max_output_tokens,
+        pre_delay_sec=openai_pre_delay_sec,
+        source_desc_max_chars=llm_source_desc_max_chars,
+        run_if_single_source=llm_run_if_single_source,
+    )
 
+
+def _build_google_config(
+    app_settings: Dict[str, Any],
+    *,
+    logger: logging.Logger,
+    entrypoint_dir: Path,
+    summarize_error: Optional[Callable[[Exception], str]],
+) -> GoogleConfig:
+    """Build Google config from YAML settings + env + validation."""
     google_auth_mode: str = load_google_auth_mode_from_env()
     google_service_account_path_raw: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "").strip()
     if os.getenv("GOOGLE_CREDENTIALS_PATH", "").strip() or os.getenv("GOOGLE_TOKEN_PATH", "").strip():
@@ -239,13 +214,11 @@ def load_config_from_env(
         )
 
     google_enabled: bool = setting_as_bool(app_settings, "google.enabled")
-    entrypoint_dir: Path = project_paths.entrypoint_path.parent
     google_service_account_path: Optional[Path] = (
         Path(google_service_account_path_raw)
         if google_service_account_path_raw
         else None
     )
-
     validate_google_service_account_path_requirement(
         google_enabled=google_enabled,
         google_auth_mode=google_auth_mode,
@@ -253,9 +226,29 @@ def load_config_from_env(
         service_account_path=google_service_account_path,
         summarize_error=summarize_error,
     )
-    telegram_config: TelegramConfig = TelegramConfig(
-        bot_token=must_get_env("TELEGRAM_BOT_TOKEN"),
-        chat_id=must_get_env("TELEGRAM_CHAT_ID"),
+    return GoogleConfig(
+        enabled=google_enabled,
+        service_account_path=google_service_account_path,
+        drive_folder_id=setting_as_str(app_settings, "google.drive_folder_id") or None,
+        drive_preview_folder_id=(
+            setting_as_str(app_settings, "google.drive_preview_folder_id")
+            or setting_as_str(app_settings, "google.drive_folder_id")
+            or None
+        ),
+        drive_preview_path_template=setting_as_str(app_settings, "google.drive_preview_path_template"),
+        doc_share_mode=normalize_google_doc_share_mode(setting_as_str(app_settings, "google.doc_share_mode")),
+        sheets_id=setting_as_str(app_settings, "google.sheets_id"),
+        sheets_range=setting_as_str(app_settings, "google.sheets_range"),
+        form_url=setting_as_str(app_settings, "google.form_url"),
+        contacts=setting_as_str(app_settings, "google.contacts"),
+    )
+
+
+def _build_telegram_config(app_settings: Dict[str, Any]) -> TelegramConfig:
+    """Build Telegram config from YAML settings + env secrets."""
+    return TelegramConfig(
+        bot_token=EnvReader.str_required("TELEGRAM_BOT_TOKEN"),
+        chat_id=EnvReader.str_required("TELEGRAM_CHAT_ID"),
         enabled=setting_as_bool(app_settings, "telegram.enabled"),
         use_audit=setting_as_bool(app_settings, "telegram.use_audit"),
         symbol_separator=setting_as_str(app_settings, "telegram.symbol_separator"),
@@ -276,36 +269,16 @@ def load_config_from_env(
         language_name_ru=setting_as_str(app_settings, "telegram.language_name_ru"),
         language_name_other=setting_as_str(app_settings, "telegram.language_name_other"),
     )
-    google_config: GoogleConfig = GoogleConfig(
-        enabled=google_enabled,
-        service_account_path=google_service_account_path,
-        drive_folder_id=setting_as_str(app_settings, "google.drive_folder_id") or None,
-        drive_preview_folder_id=(
-            setting_as_str(app_settings, "google.drive_preview_folder_id")
-            or setting_as_str(app_settings, "google.drive_folder_id")
-            or None
-        ),
-        drive_preview_path_template=setting_as_str(app_settings, "google.drive_preview_path_template"),
-        doc_share_mode=normalize_google_doc_share_mode(setting_as_str(app_settings, "google.doc_share_mode")),
-        sheets_id=setting_as_str(app_settings, "google.sheets_id"),
-        sheets_range=setting_as_str(app_settings, "google.sheets_range"),
-        form_url=setting_as_str(app_settings, "google.form_url"),
-        contacts=setting_as_str(app_settings, "google.contacts"),
-    )
-    llm_config: LlmConfig = LlmConfig(
-        provider=llm_provider,
-        model=llm_model,
-        timeout_sec=openai_timeout_sec,
-        max_output_tokens=openai_max_output_tokens,
-        pre_delay_sec=openai_pre_delay_sec,
-        source_desc_max_chars=llm_source_desc_max_chars,
-        run_if_single_source=llm_run_if_single_source,
-    )
-    processing_config: ProcessingConfig = ProcessingConfig(
-        mode=processing_mode,
-        now_tz_mode=now_tz_mode,
-    )
-    paths_config: PathsConfig = PathsConfig(
+
+
+def _build_paths_config(
+    app_settings: Dict[str, Any],
+    *,
+    entrypoint_dir: Path,
+    templates_path: Path,
+) -> PathsConfig:
+    """Build paths config from YAML settings."""
+    return PathsConfig(
         local_image_dir_template=str(
             _resolve_template_path(
                 setting_as_str(app_settings, "paths.local_image_dir_template"),
@@ -317,19 +290,50 @@ def load_config_from_env(
             setting_as_optional_str(app_settings, "paths.local_doc_dir_template"),
             base_dir=entrypoint_dir,
         ),
-        templates_path=project_paths.templates_path,
+        templates_path=templates_path,
         preview_filename_max_stem=setting_as_int(app_settings, "files.preview_filename_max_stem"),
     )
-    timezone_config: TimezoneConfig = TimezoneConfig(
+
+
+def _build_timezone_config(app_settings: Dict[str, Any]) -> TimezoneConfig:
+    """Build timezone config from YAML settings."""
+    return TimezoneConfig(
         kiev=setting_as_str(app_settings, "timezones.kiev"),
         cet=setting_as_str(app_settings, "timezones.cet"),
     )
+
+
+def load_config_from_env(
+    *,
+    logger: logging.Logger,
+    summarize_error: Optional[Callable[[Exception], str]] = None,
+) -> AppConfig:
+    project_paths = get_project_paths()
+    app_config_path: Path = (
+        Path(os.getenv("APP_CONFIG_PATH", "").strip())
+        if os.getenv("APP_CONFIG_PATH", "").strip()
+        else project_paths.runtime_config_path
+    )
+    app_settings: Dict[str, Any] = load_app_settings_from_path(app_config_path)
+    warn_ignored_google_auth_mode_in_config(app_settings, logger=logger)
+
+    templates = load_templates_from_path(project_paths.templates_path)
+    entrypoint_dir: Path = project_paths.entrypoint_path.parent
     return AppConfig(
-        telegram=telegram_config,
-        google=google_config,
-        llm=llm_config,
-        processing=processing_config,
-        paths=paths_config,
-        timezones=timezone_config,
+        processing=_build_processing_config(app_settings, logger=logger),
+        llm=_build_llm_config(),
+        google=_build_google_config(
+            app_settings,
+            logger=logger,
+            entrypoint_dir=entrypoint_dir,
+            summarize_error=summarize_error,
+        ),
+        telegram=_build_telegram_config(app_settings),
+        paths=_build_paths_config(
+            app_settings,
+            entrypoint_dir=entrypoint_dir,
+            templates_path=project_paths.templates_path,
+        ),
+        timezones=_build_timezone_config(app_settings),
         templates=templates,
     )

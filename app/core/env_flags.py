@@ -1,41 +1,21 @@
 from __future__ import annotations
 
-import os
 import re
 from typing import Optional
 
+from app.config.env_reader import EnvReader
+
 
 def load_bool_env(name: str, default: bool) -> bool:
-    raw_value: str = os.getenv(name, "").strip().lower()
-    if not raw_value:
-        return default
-    if raw_value in {"1", "true", "yes", "on"}:
-        return True
-    if raw_value in {"0", "false", "no", "off"}:
-        return False
-    return default
+    return EnvReader.bool(name, default, strict=False)
 
 
 def load_int_env(name: str, default: int, min_value: int = 0) -> int:
-    raw_value: str = os.getenv(name, "").strip()
-    if not raw_value:
-        return default
-    try:
-        parsed: int = int(raw_value)
-    except Exception:
-        return default
-    return max(min_value, parsed)
+    return EnvReader.int(name, default, min_value=min_value, strict=False)
 
 
 def load_float_env(name: str, default: float, min_value: float = 0.0) -> float:
-    raw_value: str = os.getenv(name, "").strip()
-    if not raw_value:
-        return default
-    try:
-        parsed: float = float(raw_value)
-    except Exception:
-        return default
-    return max(min_value, parsed)
+    return EnvReader.float(name, default, min_value=min_value, strict=False)
 
 
 def sheets_link_writeback_enabled_from_env() -> bool:
@@ -75,5 +55,4 @@ def strip_chapter_timestamps(text: str) -> str:
 
 
 def optional_env(name: str) -> Optional[str]:
-    value: str = os.getenv(name, "").strip()
-    return value or None
+    return EnvReader.str_optional(name)

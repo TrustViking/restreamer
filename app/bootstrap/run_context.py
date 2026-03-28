@@ -2,14 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from app.config.settings import AppConfig
-from app.core.branching import audit_branch_labels
 from app.paths import ProjectPaths
-
-if TYPE_CHECKING:
-    from app.observability.startup_summary import LlmSummarySnapshot
 
 
 @dataclass(frozen=True)
@@ -22,30 +16,6 @@ class StartupContext:
     processing_mode: str
     config_processing_mode_raw: str
     paths: ProjectPaths
-
-    @classmethod
-    def from_cli(
-        cls,
-        *,
-        run_id: str,
-        argv_list: list[str],
-        args_audit_mode: str,
-        args_debug: bool,
-        args_dry_run: bool,
-        processing_mode: str,
-        config_processing_mode_raw: str,
-        paths: ProjectPaths,
-    ) -> StartupContext:
-        return cls(
-            run_id=run_id,
-            argv_list=argv_list,
-            args_audit_mode=args_audit_mode,
-            args_debug=args_debug,
-            args_dry_run=args_dry_run,
-            processing_mode=processing_mode,
-            config_processing_mode_raw=config_processing_mode_raw,
-            paths=paths,
-        )
 
     @property
     def project_root(self) -> Path:
@@ -97,99 +67,3 @@ class RunContext:
     strip_chapter_timestamps: bool
     llm_model_configured: str = ""
     llm_provider_model: str = ""
-
-    @classmethod
-    def from_config(
-        cls,
-        *,
-        run_id: str,
-        processing_mode: str,
-        audit_mode: str,
-        config: AppConfig,
-        llm_summary: LlmSummarySnapshot,
-        debug_enabled: bool,
-        dry_run: bool,
-        sheets_link_writeback: bool,
-        strip_chapter_timestamps: bool,
-    ) -> RunContext:
-        audit_branches: list[str] = audit_branch_labels(audit_mode=audit_mode)
-        effective_model: str = str(
-            getattr(llm_summary, "effective_model", getattr(llm_summary, "model", ""))
-            or ""
-        ).strip()
-        configured_model: str = str(
-            getattr(llm_summary, "configured_model", effective_model) or ""
-        ).strip()
-        provider_model: str = str(
-            getattr(llm_summary, "provider_model", effective_model) or ""
-        ).strip()
-        return cls(
-            run_id=run_id,
-            processing_mode=processing_mode,
-            audit_mode=audit_mode,
-            config_processing_mode=str(config.processing.mode or "").strip(),
-            audit_branches=audit_branches,
-            debug_enabled=debug_enabled,
-            dry_run=dry_run,
-            google_enabled=config.google.enabled,
-            telegram_enabled=config.telegram.enabled,
-            llm_provider=config.llm.provider,
-            llm_model=effective_model,
-            llm_model_configured=configured_model,
-            llm_provider_model=provider_model,
-            llm_usage_reporting_mode=llm_summary.usage_reporting_mode,
-            sheet_id=config.google.sheets_id,
-            sheet_range=config.google.sheets_range,
-            sheets_link_writeback=sheets_link_writeback,
-            local_doc_export_enabled=bool(str(config.paths.local_doc_dir_template or "").strip()),
-            strip_chapter_timestamps=strip_chapter_timestamps,
-        )
-
-
-def build_startup_context(
-    *,
-    run_id: str,
-    argv_list: list[str],
-    args_audit_mode: str,
-    args_debug: bool,
-    args_dry_run: bool,
-    processing_mode: str,
-    config_processing_mode_raw: str,
-    paths: ProjectPaths,
-) -> StartupContext:
-    return StartupContext.from_cli(
-        run_id=run_id,
-        argv_list=argv_list,
-        args_audit_mode=args_audit_mode,
-        args_debug=args_debug,
-        args_dry_run=args_dry_run,
-        processing_mode=processing_mode,
-        config_processing_mode_raw=config_processing_mode_raw,
-        paths=paths,
-    )
-
-
-def build_run_context(
-    *,
-    run_id: str,
-    processing_mode: str,
-    audit_mode: str,
-    config: AppConfig,
-    llm_summary: LlmSummarySnapshot,
-    debug_enabled: bool,
-    dry_run: bool,
-    sheets_link_writeback: bool,
-    strip_chapter_timestamps: bool,
-) -> RunContext:
-    return RunContext.from_config(
-        run_id=run_id,
-        processing_mode=processing_mode,
-        audit_mode=audit_mode,
-        config=config,
-        llm_summary=llm_summary,
-        debug_enabled=debug_enabled,
-        dry_run=dry_run,
-        sheets_link_writeback=sheets_link_writeback,
-        strip_chapter_timestamps=strip_chapter_timestamps,
-    )
-

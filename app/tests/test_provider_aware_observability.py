@@ -9,6 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import restreamer
+from app.application.application import (
+    RestreamerApplication,
+    _apply_llm_usage_reset,
+    _log_llm_usage_reports,
+)
+from app.application import application as application_module
 from app.llm.llm_client import reset_run_local_openai_usage
 from app.observability.openai_usage import (
     log_openai_limits_and_usage,
@@ -19,15 +25,16 @@ from app.observability.runtime_analytics import log_run_context
 from app.observability.startup_health import run_startup_health_checks
 from app.observability.startup_summary import log_config_summary, log_startup_summary
 from app.paths import ProjectPaths
-from restreamer import _apply_llm_usage_reset, _log_llm_usage_reports
 
 
 class ProviderAwareUsageHooksTests(unittest.TestCase):
     def test_openai_usage_hooks_are_active(self) -> None:
         logger = logging.getLogger("provider-aware-openai-usage")
-        with patch("restreamer.reset_run_local_openai_usage") as reset_mock, patch(
-            "restreamer.log_run_local_openai_usage"
-        ) as local_usage_mock, patch("restreamer.log_openai_limits_and_usage") as org_usage_mock, self.assertLogs(
+        with patch("app.application.application.reset_run_local_openai_usage") as reset_mock, patch(
+            "app.application.application.log_run_local_openai_usage"
+        ) as local_usage_mock, patch(
+            "app.application.application.log_openai_limits_and_usage"
+        ) as org_usage_mock, self.assertLogs(
             logger, level="INFO"
         ) as captured:
             llm_summary = SimpleNamespace(
@@ -47,9 +54,11 @@ class ProviderAwareUsageHooksTests(unittest.TestCase):
 
     def test_non_openai_provider_skips_reset_but_keeps_usage_report_logging(self) -> None:
         logger = logging.getLogger("provider-aware-claude-usage")
-        with patch("restreamer.reset_run_local_openai_usage") as reset_mock, patch(
-            "restreamer.log_run_local_openai_usage"
-        ) as local_usage_mock, patch("restreamer.log_openai_limits_and_usage") as org_usage_mock, self.assertLogs(
+        with patch("app.application.application.reset_run_local_openai_usage") as reset_mock, patch(
+            "app.application.application.log_run_local_openai_usage"
+        ) as local_usage_mock, patch(
+            "app.application.application.log_openai_limits_and_usage"
+        ) as org_usage_mock, self.assertLogs(
             logger, level="INFO"
         ) as captured:
             llm_summary = SimpleNamespace(
@@ -309,7 +318,15 @@ class EntrypointRegressionTests(unittest.TestCase):
     def _config(self) -> SimpleNamespace:
         return SimpleNamespace(
             processing=SimpleNamespace(mode="audit"),
-            google=SimpleNamespace(doc_share_mode="anyone_writer"),
+            google=SimpleNamespace(
+                doc_share_mode="anyone_writer",
+                enabled=False,
+                sheets_id="sheet-id",
+                sheets_range="A:F",
+            ),
+            telegram=SimpleNamespace(enabled=False),
+            llm=SimpleNamespace(provider="openai"),
+            paths=SimpleNamespace(local_doc_dir_template="D:\\docs\\{date}"),
             timezones=SimpleNamespace(kiev="Europe/Kyiv", cet="Europe/Berlin"),
         )
 
@@ -329,10 +346,10 @@ class EntrypointRegressionTests(unittest.TestCase):
         strip_flag_mock = MagicMock(return_value=False)
 
         with ExitStack() as stack:
-            stack.enter_context(patch.object(restreamer, "load_dotenv"))
+            stack.enter_context(patch.object(application_module, "load_dotenv"))
             stack.enter_context(
                 patch.object(
-                    restreamer,
+                    application_module,
                     "get_project_paths",
                     return_value=SimpleNamespace(
                         project_root=Path("."),
@@ -347,7 +364,7 @@ class EntrypointRegressionTests(unittest.TestCase):
             )
             stack.enter_context(
                 patch.object(
-                    restreamer,
+                    application_module,
                     "build_cli_parser",
                     return_value=SimpleNamespace(
                         parse_args=lambda argv: SimpleNamespace(
@@ -358,57 +375,64 @@ class EntrypointRegressionTests(unittest.TestCase):
                     ),
                 )
             )
-            stack.enter_context(patch.object(restreamer, "setup_logging"))
-            stack.enter_context(patch.object(restreamer, "setup_runtime_analytics"))
-            stack.enter_context(patch.object(restreamer, "run_bootstrap_preflight"))
+            stack.enter_context(patch.object(application_module, "setup_logging"))
+            stack.enter_context(patch.object(application_module, "setup_runtime_analytics"))
+            stack.enter_context(patch.object(application_module, "run_bootstrap_preflight"))
             stack.enter_context(
-                patch.object(restreamer, "_load_config_from_env", return_value=self._config())
+                patch.object(application_module, "_load_config_from_env", return_value=self._config())
             )
             stack.enter_context(
-                patch.object(restreamer, "build_llm_summary_snapshot", build_llm_summary_mock)
-            )
-            stack.enter_context(
-                patch.object(restreamer, "sheets_link_writeback_enabled_from_env", sheets_flag_mock)
+                patch.object(application_module, "build_llm_summary_snapshot", build_llm_summary_mock)
             )
             stack.enter_context(
                 patch.object(
-                    restreamer,
+                    application_module,
+                    "sheets_link_writeback_enabled_from_env",
+                    sheets_flag_mock,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    application_module,
                     "strip_chapter_timestamps_enabled_from_env",
                     strip_flag_mock,
                 )
             )
-            stack.enter_context(patch.object(restreamer, "_apply_llm_usage_reset"))
+            stack.enter_context(patch.object(application_module, "_apply_llm_usage_reset"))
             stack.enter_context(
-                patch.object(restreamer, "normalize_processing_mode", return_value="audit")
+                patch.object(application_module, "normalize_processing_mode", return_value="audit")
             )
             stack.enter_context(
-                patch.object(restreamer, "normalize_audit_mode", return_value="merge")
+                patch.object(application_module, "normalize_audit_mode", return_value="merge")
             )
             stack.enter_context(
-                patch.object(restreamer, "build_startup_context", return_value=SimpleNamespace())
+                patch.object(application_module, "StartupContext", return_value=SimpleNamespace())
             )
             stack.enter_context(
-                patch.object(restreamer, "build_run_context", return_value=SimpleNamespace())
+                patch.object(application_module, "RunContext", return_value=SimpleNamespace())
             )
-            stack.enter_context(patch.object(restreamer, "log_startup_summary"))
-            stack.enter_context(patch.object(restreamer, "log_run_context"))
-            stack.enter_context(patch.object(restreamer, "log_config_summary"))
             stack.enter_context(
-                patch.object(restreamer, "_load_zoneinfo", return_value=SimpleNamespace())
+                patch.object(application_module, "audit_branch_labels", return_value=["merge"])
+            )
+            stack.enter_context(patch.object(application_module, "log_startup_summary"))
+            stack.enter_context(patch.object(application_module, "log_run_context"))
+            stack.enter_context(patch.object(application_module, "log_config_summary"))
+            stack.enter_context(
+                patch.object(application_module, "_load_zoneinfo", return_value=SimpleNamespace())
             )
             stack.enter_context(
                 patch.object(
-                    restreamer,
-                    "build_entrypoint_runtime_services",
-                    return_value=SimpleNamespace(batch_runner=batch_runner),
+                    RestreamerApplication,
+                    "_build_batch_runner",
+                    return_value=batch_runner,
                 )
             )
-            stack.enter_context(patch.object(restreamer, "log_run_started"))
-            stack.enter_context(patch.object(restreamer, "_log_llm_usage_reports"))
-            stack.enter_context(patch.object(restreamer, "record_stage_duration"))
-            stack.enter_context(patch.object(restreamer, "log_stage_timing"))
-            stack.enter_context(patch.object(restreamer, "emit_final_run_summary"))
-            stack.enter_context(patch.object(restreamer, "_log_exit_code"))
+            stack.enter_context(patch.object(application_module, "log_run_started"))
+            stack.enter_context(patch.object(application_module, "_log_llm_usage_reports"))
+            stack.enter_context(patch.object(application_module, "record_stage_duration"))
+            stack.enter_context(patch.object(application_module, "log_stage_timing"))
+            stack.enter_context(patch.object(application_module, "emit_final_run_summary"))
+            stack.enter_context(patch.object(application_module, "_log_exit_code"))
             exit_code = restreamer.main([])
 
         return exit_code, build_llm_summary_mock, sheets_flag_mock, strip_flag_mock

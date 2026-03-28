@@ -18,7 +18,7 @@ from app.observability.startup_summary import log_startup_summary
 from app.paths import get_project_paths
 from app.planning.link_normalization import handle_normalized_link_writeback
 from app.pipeline.slot_processing import process_slot
-from restreamer import _log_exit_code
+from app.application.application import _log_exit_code
 
 
 class OperationalHardeningTests(unittest.TestCase):
