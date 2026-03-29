@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger
 from app.core.models import VideoMetadata
+from app.core.video_title_cleanup import sanitize_source_video_title
 
 
 LOGGER = get_logger(__name__)
@@ -43,6 +44,7 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
             info.get("webpage_url"),
         )
         title: str = str(info.get("title") or "").strip()
+        title = sanitize_source_video_title(title)
         description: str = str(info.get("description") or "").strip()
         thumbnail_url: str = str(info.get("thumbnail") or "").strip()
         video_id: str = str(info.get("id") or "").strip()
