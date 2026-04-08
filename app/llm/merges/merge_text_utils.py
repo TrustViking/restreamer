@@ -3,10 +3,13 @@ from __future__ import annotations
 import re
 from typing import List
 
-from app.core.official_links import is_official_links_heading
+from app.core.description_cleaner import (
+    _is_official_links_heading_line,
+    _looks_like_service_tail_paragraph,
+)
 from app.core.text_utils import normalize_newlines, split_paragraphs
-from app.llm.merges.merge_constants import ALLOWED_BULLET_MARKERS, SEMANTIC_TOKEN_PATTERN
-from app.resources import merge_agenda_headings, merge_service_hints
+from app.llm.merges.merge_constants import ALLOWED_BULLET_MARKERS
+from app.resources import merge_agenda_headings
 
 _BULLET_PLAIN_PATTERN: re.Pattern[str] = re.compile(
     r"^\s*(?:[-*•▪◦‣–—]|(?:\d+[.)]))\s+\S+",
@@ -16,23 +19,6 @@ _BULLET_PLAIN_PATTERN: re.Pattern[str] = re.compile(
 def _extract_description_paragraphs_raw(text: str) -> List[str]:
     paragraphs: List[str] = split_paragraphs(text)
     return paragraphs
-
-def _is_official_links_heading_line(text: str) -> bool:
-    return is_official_links_heading(str(text or ""))
-
-def _looks_like_service_tail_paragraph(text: str) -> bool:
-    normalized_text: str = re.sub(r"\s+", " ", str(text or "").strip()).lower()
-    if not normalized_text:
-        return True
-    if _is_official_links_heading_line(normalized_text):
-        return True
-    service_hints: tuple[str, ...] = merge_service_hints()
-    semantic_tokens: List[str] = SEMANTIC_TOKEN_PATTERN.findall(normalized_text)
-    return (
-        len(normalized_text) <= 220
-        and len(semantic_tokens) <= 12
-        and any(hint in normalized_text for hint in service_hints)
-    )
 
 def _contains_agenda_heading(text: str) -> bool:
     agenda_headings: tuple[str, ...] = merge_agenda_headings()

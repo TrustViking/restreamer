@@ -177,6 +177,7 @@ class MergeExecutor:
             description=merged_content.description,
             language=language,
             source_texts=source_texts,
+            title=merged_content.title,
         )
         if quality_result.description_text != merged_content.description:
             merged_content = dataclasses.replace(

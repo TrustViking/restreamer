@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.core.language_display import language_display_name
+
 
 def _render_template(template: str, values: Dict[str, Any]) -> str:
     try:
@@ -89,8 +91,6 @@ def build_safe_entity_name(video_title: str) -> str:
 
 
 def _display_language_code(language: str) -> str:
-    if language == "uk":
-        return "ua"
     return language
 
 
@@ -104,7 +104,8 @@ def build_drive_preview_path_segments(
     if not raw_template:
         return []
     rendered_path: str = raw_template.format(
-        streamertg="streamertg",
+        streamertg="restreamer",
+        restreamer="restreamer",
         preview="preview",
         language=_display_language_code(language),
         date=date_key,
@@ -123,7 +124,6 @@ class NamePathBuilder:
         local_doc_dir_template: Optional[str],
         preview_name_template: str,
         doc_title_template: str,
-        language_codes: dict[str, str],
         max_filename_stem: int,
     ) -> None:
         self._local_image_dir_template: str = local_image_dir_template
@@ -133,10 +133,6 @@ class NamePathBuilder:
         self._preview_name_template: str = preview_name_template
         self._doc_title_template: str = doc_title_template
         self._max_filename_stem: int = max(16, int(max_filename_stem))
-        self._language_codes: Dict[str, str] = {
-            str(key): str(value).upper()
-            for key, value in language_codes.items()
-        }
 
     def build_doc_title(
         self,
@@ -172,12 +168,14 @@ class NamePathBuilder:
         language: str,
         processing_mode: str,
         source_count: int,
+        run_id: str = "",
     ) -> Optional[Path]:
         if self._local_doc_dir_template is None:
             return None
         base_dir: Path = Path(self._local_doc_dir_template.format(date=date_key))
+        run_suffix: str = f"_{run_id}" if run_id else ""
         safe_stem: str = _normalize_local_filename_stem(
-            f"{date_key}_{processing_mode}_{slot_key}_{language}_sources{source_count}_merge_rejected"
+            f"{date_key}_{processing_mode}_{slot_key}_{language}_sources{source_count}_merge_rejected{run_suffix}"
         )
         safe_stem = safe_stem[: self._max_filename_stem].rstrip("._-") or "merge_rejected"
         return base_dir / "merge_reject_debug_json" / f"{safe_stem}.json"
@@ -195,7 +193,7 @@ class NamePathBuilder:
             language=display_language,
             date=date_key,
         )
-        file_language_code: str = self._language_codes.get(language, "OT")
+        file_language_code: str = language_display_name(language)
         safe_title: str = build_safe_entity_name(title)
         raw_stem: str = _render_template(
             self._preview_name_template,

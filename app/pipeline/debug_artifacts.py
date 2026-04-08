@@ -29,6 +29,7 @@ class DebugArtifactWriter:
         date_key: str,
         processing_mode: str,
         branch_label: str,
+        run_id: str = "",
     ) -> None:
         if branch_label != BRANCH_MERGE:
             return
@@ -38,13 +39,16 @@ class DebugArtifactWriter:
                     merge_attempt=merge_attempt
                 ):
                     continue
-                source_count: int = len(slot_result.language_groups.get(language, ()))
+                source_count: int = len(
+                    slot_result.language_groups.get(language, slot_result.day_videos)
+                )
                 json_path = self._name_builder.build_merge_reject_debug_json_path(
                     date_key=date_key,
                     slot_key=slot_result.slot_key,
                     language=language,
                     processing_mode=processing_mode,
                     source_count=source_count,
+                    run_id=run_id,
                 )
                 if json_path is None:
                     continue

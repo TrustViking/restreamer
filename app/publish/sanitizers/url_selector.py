@@ -6,6 +6,7 @@ from typing import List, Optional, Sequence
 from urllib.parse import urlsplit
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.core.language import detect_language_decision, normalize_language
 from app.core.models import PlannedVideo
 from app.core.official_links import is_official_links_heading
 from app.core.text_utils import is_youtube_url as _is_youtube_url_canonical
@@ -147,6 +148,35 @@ def _normalize_authoritative_video_url(video: PlannedVideo) -> Optional[str]:
     return None
 
 
+def _determine_recommended_video_language(url: str) -> Optional[str]:
+    """Determine unambiguous recommended-video language using metadata and description."""
+    cleaned_url: str = str(url or "").strip()
+    if not cleaned_url:
+        return None
+    try:
+        metadata = YtDlpYouTubeMetadataFetcher().fetch(cleaned_url)
+    except Exception:
+        return None
+
+    yt_lang: Optional[str] = normalize_language(metadata.youtube_language)
+    ch_lang: Optional[str] = normalize_language(metadata.channel_language)
+    decision = detect_language_decision(metadata)
+    if decision.final_language == "unknown":
+        return None
+
+    if decision.language_conflict:
+        LOGGER.info(
+            "recommended_video_language_ambiguous url=%s yt_lang=%s ch_lang=%s langdetect_lang=%s action=discard",
+            cleaned_url,
+            yt_lang or "none",
+            ch_lang or "none",
+            decision.langdetect_language or "none",
+        )
+        return None
+
+    return decision.final_language
+
+
 class AuthoritativeUrlSelector:
     """Selects and builds authoritative source URLs for publication."""
 
@@ -206,6 +236,7 @@ class AuthoritativeUrlSelector:
         source_videos: Sequence[PlannedVideo],
         summary_text: str,
         source_count: int,
+        target_language: str,
     ) -> tuple[List[str], int, int, int]:
         all_occurrences, _, raw_youtube_urls_found = AuthoritativeUrlSelector._extract_raw_description_urls(source_videos)
         summary_tokens: set[str] = AuthoritativeUrlSelector._extract_semantic_tokens(summary_text)
@@ -262,9 +293,29 @@ class AuthoritativeUrlSelector:
             reverse=True,
         )
 
+        language_safe_candidates: List[_RecommendedYouTubeCandidate] = []
+        for candidate in candidates:
+            detected_language: Optional[str] = _determine_recommended_video_language(candidate.url)
+            if detected_language is None:
+                LOGGER.info(
+                    "recommended_candidate_language_filtered url=%s target=%s detected=ambiguous action=discard",
+                    candidate.url,
+                    target_language,
+                )
+                continue
+            if detected_language != target_language:
+                LOGGER.info(
+                    "recommended_candidate_language_filtered url=%s target=%s detected=%s action=discard",
+                    candidate.url,
+                    target_language,
+                    detected_language,
+                )
+                continue
+            language_safe_candidates.append(candidate)
+
         selected_urls: List[str] = []
         _low_source_mode: bool = source_count <= 2
-        for candidate in candidates:
+        for candidate in language_safe_candidates:
             if _low_source_mode:
                 passes_threshold: bool = (
                     candidate.source_hits >= 1 and candidate.semantic_overlap_count >= 1
@@ -379,6 +430,7 @@ class AuthoritativeUrlSelector:
                 source_videos=source_videos,
                 summary_text=summary_text,
                 source_count=len(source_videos),
+                target_language=language,
             )
         )
         authoritative_urls, emitted_source_video_urls, duplicate_urls_removed = (

@@ -5,6 +5,10 @@ class RestreamerError(RuntimeError):
     """Base application error."""
 
 
+# Legacy alias
+StreamertgError = RestreamerError
+
+
 class ConfigurationError(RestreamerError):
     """Configuration/validation error."""
 

@@ -15,7 +15,6 @@ from app.core.models import (
 )
 from app.core.text_utils import normalize_multiline_text
 from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher
-from app.llm.merges.merge_quality import normalize_merge_description
 
 # Backward compat re-exports from submodules
 from app.publish.sanitizers.tail_parser import (
@@ -286,10 +285,13 @@ def build_sanitized_merged_publication_payload(
         authoritative_source_urls_result.selected_youtube_urls
     )
     if source_videos_sequence:
+        from app.llm.merges.merge_quality import normalize_merge_description
+
         normalized_body_text: str = normalize_merge_description(
             description=sanitization_result.body_text,
             language=language,
             source_texts=(),
+            title="",
         ).description_text
     else:
         normalized_body_text = sanitization_result.body_text
@@ -407,10 +409,13 @@ def sanitize_post_llm_text_for_merged_publish(
             cleanup_event_key=cleanup_event_key,
         )
     )
+    from app.llm.merges.merge_quality import normalize_merge_description
+
     normalized_body_text: str = normalize_merge_description(
         description=sanitization_result.body_text,
         language=language,
         source_texts=(),
+        title="",
     ).description_text
     normalized_body_text = _clean_double_bullet_markers(normalized_body_text)
     sanitized_cta_text: str = _apply_publish_cta_gate(

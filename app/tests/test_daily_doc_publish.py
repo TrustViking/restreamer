@@ -15,6 +15,7 @@ from app.core.models import (
 )
 from app.pipeline.daily_doc_publish import publish_daily_document
 from app.pipeline.slot_processing import SlotProcessResult
+from app.publish.doc_header import DailyDocHeader
 
 
 class DailyDocPublishTests(unittest.TestCase):
@@ -56,8 +57,6 @@ class DailyDocPublishTests(unittest.TestCase):
 
         config = SimpleNamespace(
             templates=SimpleNamespace(
-                google_doc_language_headings_json='{"uk":"UK"}',
-                google_doc_language_headings={"uk": "UK"},
                 google_doc_header="HEADER",
             ),
             llm=SimpleNamespace(provider="openai", model="gpt-test"),
@@ -92,6 +91,8 @@ class DailyDocPublishTests(unittest.TestCase):
         )
 
         self.assertEqual(1, docs_client.get_document_end_index.call_count)
+        self.assertIn("header", report_writer.write_header_only.call_args.kwargs)
+        self.assertNotIn("header_text", report_writer.write_header_only.call_args.kwargs)
         first_call = report_writer.write_language_table.call_args_list[0]
         self.assertNotIn("table_insert_index", first_call.kwargs)
 
@@ -108,8 +109,6 @@ class DailyDocPublishTests(unittest.TestCase):
 
         config = SimpleNamespace(
             templates=SimpleNamespace(
-                google_doc_language_headings_json='{"uk":"UK"}',
-                google_doc_language_headings={"uk": "UK"},
                 google_doc_header="{language_time_titles}",
             ),
             llm=SimpleNamespace(provider="openai", model="gpt-test"),
@@ -160,8 +159,20 @@ class DailyDocPublishTests(unittest.TestCase):
                 branch_label="merge",
             )
 
-        header_text = report_writer.write_header_only.call_args.kwargs["header_text"]
+        header: DailyDocHeader = report_writer.write_header_only.call_args.kwargs["header"]
+        self.assertIsInstance(header, DailyDocHeader)
+        header_text: str = header.render_text()
         self.assertIn("UK - 09:00 ⚠ [merge failed — source list]", header_text)
+        heading_lines = [
+            line
+            for line in header.lines
+            if line.text == "UK - 09:00 ⚠ [merge failed — source list]"
+        ]
+        self.assertEqual(1, len(heading_lines))
+        self.assertTrue(heading_lines[0].is_bold)
+        title_lines = [line for line in header.lines if line.text == "Title"]
+        self.assertGreaterEqual(len(title_lines), 1)
+        self.assertTrue(all(not line.is_bold for line in title_lines))
         logs: str = "\n".join(captured.output)
         self.assertIn("merge_block_publish_truth", logs)
         self.assertIn("block_generation_mode=fallback_after_merge_failure", logs)
@@ -182,8 +193,6 @@ class DailyDocPublishTests(unittest.TestCase):
 
         config = SimpleNamespace(
             templates=SimpleNamespace(
-                google_doc_language_headings_json='{"uk":"UK"}',
-                google_doc_language_headings={"uk": "UK"},
                 google_doc_header="{language_time_titles}",
             ),
             llm=SimpleNamespace(provider="openai", model="gpt-test"),
@@ -234,11 +243,19 @@ class DailyDocPublishTests(unittest.TestCase):
                 branch_label="merge",
             )
 
-        header_text = report_writer.write_header_only.call_args.kwargs["header_text"]
+        header: DailyDocHeader = report_writer.write_header_only.call_args.kwargs["header"]
+        header_text: str = header.render_text()
         self.assertIn(
             "UK - 09:00 ⚠ [merge failed — source list]",
             header_text,
         )
+        heading_lines = [
+            line
+            for line in header.lines
+            if line.text == "UK - 09:00 ⚠ [merge failed — source list]"
+        ]
+        self.assertEqual(1, len(heading_lines))
+        self.assertTrue(heading_lines[0].is_bold)
         logs: str = "\n".join(captured.output)
         self.assertIn("merge_artifact_status=fallback_only", logs)
         self.assertIn("fallback_targets=2026-03-11_09-00:uk", logs)

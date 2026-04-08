@@ -1,71 +1,37 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppTemplates
-from app.core.cta_detection import starts_with_cta_prefix
-from app.core.env_flags import (
-    strip_chapter_timestamps,
-    strip_chapter_timestamps_enabled_from_env,
-)
+from app.core.language_display import language_display_name
 from app.core.models import (
     LanguageMergeAttempt,
     MergedLanguageContent,
     MergedPublicationPayload,
     PlannedVideo,
 )
-from app.core.text_utils import split_paragraphs
-from app.core.url_normalizer import normalize_display_url
-from app.core.constants import URL_PATTERN
-from app.llm.merges.merge_text_utils import _looks_like_service_tail_paragraph
 from app.planning import planned_video_block_language
 from app.publish.post_llm_sanitation import (
     build_sanitized_merged_publication_payload,
     log_safe_merge_attempt_fallback,
     should_suppress_raw_merge_attempt_publish,
 )
-from app.resources import promotional_opener_phrases
+from app.publish.shared_helpers import (
+    fallback_source_description_text as _fallback_source_description_text,
+    is_merge_payload_blocked as _is_merge_payload_blocked,
+    no_description_text as _no_description_text,
+    normalize_urls_in_text as _normalize_urls_in_text,
+    numbered_lines as _numbered_lines,
+    numbered_original_titles as _numbered_original_titles,
+)
 
 
 LOGGER = _get_logger_impl(__name__)
 
 def _language_heading(language: str, templates: Optional[AppTemplates]) -> str:
-    if templates is None:
-        return "OTHER"
-    payload: object = getattr(templates, "google_doc_language_headings", {})
-    if isinstance(payload, dict):
-        return str(payload.get(language, payload.get("other", "OTHER")))
-    return "OTHER"
-
-
-def _numbered_lines(values: Sequence[str]) -> str:
-    cleaned_values: List[str] = [
-        str(item or "").strip() for item in values if str(item or "").strip()
-    ]
-    if not cleaned_values:
-        return "1) ..."
-    if len(cleaned_values) == 1:
-        return cleaned_values[0]
-    return "\n".join(
-        [f"{index}) {item}" for index, item in enumerate(cleaned_values, start=1)]
-    )
-
-
-def _numbered_original_titles(videos: List[PlannedVideo]) -> str:
-    source_titles: List[str] = [video.metadata.title for video in videos]
-    return _numbered_lines(source_titles)
-
-
-def _is_merge_payload_blocked(payload: MergedPublicationPayload) -> bool:
-    has_publish_stage_duplicate: bool = bool(
-        getattr(payload, "has_publish_stage_duplicate", False)
-    )
-    has_publish_stage_opener_cta: bool = bool(
-        getattr(payload, "has_publish_stage_opener_cta", False)
-    )
-    return has_publish_stage_duplicate or has_publish_stage_opener_cta
+    return language_display_name(language)
 
 
 def _build_guarded_merged_payload(
@@ -121,62 +87,6 @@ def _build_titles_summary(
     if not videos:
         return "1) ..."
     return _numbered_original_titles(videos)
-
-
-def _fallback_source_description_text(
-    video: PlannedVideo,
-    templates: Optional[AppTemplates],
-) -> str:
-    description_text: str = video.metadata.description.strip() or _no_description_text(
-        templates
-    )
-    if strip_chapter_timestamps_enabled_from_env():
-        description_text = strip_chapter_timestamps(description_text)
-    description_text = _light_polish_single_source_description(description_text)
-    return description_text
-
-
-def _looks_like_promotional_opener(text: str) -> bool:
-    normalized: str = re.sub(r"\s+", " ", str(text or "").strip()).casefold()
-    if not normalized:
-        return False
-    return any(phrase in normalized for phrase in promotional_opener_phrases())
-
-
-def _extract_description_paragraphs_raw(text: str) -> List[str]:
-    paragraphs: List[str] = split_paragraphs(text)
-    return paragraphs
-
-
-def _normalize_urls_in_text(text: str) -> str:
-    def _replace_url(match: re.Match[str]) -> str:
-        matched_url: str = str(match.group(0) or "")
-        return normalize_display_url(matched_url)
-
-    normalized_text: str = URL_PATTERN.sub(_replace_url, text)
-    return normalized_text
-
-
-def _light_polish_single_source_description(text: str) -> str:
-    original_text: str = str(text or "")
-    paragraphs: List[str] = _extract_description_paragraphs_raw(original_text)
-    if not paragraphs:
-        return original_text
-
-    cleaned_paragraphs: List[str] = list(paragraphs)
-    if cleaned_paragraphs and (
-        starts_with_cta_prefix(cleaned_paragraphs[0])
-        or _looks_like_promotional_opener(cleaned_paragraphs[0])
-    ):
-        cleaned_paragraphs = cleaned_paragraphs[1:]
-    while cleaned_paragraphs and _looks_like_service_tail_paragraph(cleaned_paragraphs[-1]):
-        cleaned_paragraphs = cleaned_paragraphs[:-1]
-
-    polished_text: str = "\n\n".join(cleaned_paragraphs).strip()
-    if not polished_text:
-        return original_text
-    polished_text = _normalize_urls_in_text(polished_text)
-    return polished_text
 
 
 def _build_rejected_attempts_block(
@@ -330,13 +240,6 @@ def _youtube_video_id_from_url(video_url: str) -> Optional[str]:
     return _extract_youtube_video_id(video_url)
 
 
-def _no_description_text(templates: Optional[AppTemplates] = None) -> str:
-    if templates is None:
-        return "no description"
-    value: str = str(templates.common_no_description_text or "").strip()
-    return value or "no description"
-
-
 def _thumbnail_candidates(video: PlannedVideo) -> List[str]:
     candidates: List[str] = []
     video_id: Optional[str] = _youtube_video_id_from_url(video.normalized_link)
@@ -375,7 +278,7 @@ def _build_language_table_rows(
             labels[str(key)] = (str(value[0]), str(value[1]), str(value[2]))
     title_label, desc_label, preview_label = labels.get(
         language,
-        labels.get("other", ("TITLE", "DESCRIPTION", "PREVIEW")),
+        ("TITLE", "DESCRIPTION", "PREVIEW"),
     )
 
     heading: str = _language_heading(language, templates)
@@ -424,7 +327,7 @@ def _build_language_table_rows(
                     merge_attempt=merge_attempt,
                 )
             ),
-            False,
+            True,
         ),
         (desc_label, True),
         (description_text, False),

@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from app.config.settings import AppConfig, AppTemplates
+from app.config.settings import AppConfig
 from app.core.branching import BRANCH_MERGE
 from app.core.error_summary import summarize_error
 from app.core.models import (
@@ -34,9 +34,11 @@ from app.paths.output_naming import (
     collect_used_runtime_models,
     render_doc_title_models_segment,
 )
+from app.core.language_display import language_display_name
 from app.planning import format_time_key_for_display
+from app.publish.doc_header import DailyDocHeader, HeaderLine
 from app.publish.google_docs_writer import GoogleDocsReportWriter
-from app.publish.doc_helpers import _build_descriptions_summary, _build_titles_summary
+from app.publish.doc_helpers import _build_titles_summary
 from app.publish.post_llm_sanitation import (
     resolve_block_generation_mode,
     sanitize_post_llm_title,
@@ -56,28 +58,165 @@ class DailyDocumentPublishResult:
     google_doc_created: bool = False
 
 
-def _language_heading(language: str, templates: AppTemplates) -> str:
-    payload: object = getattr(templates, "google_doc_language_headings", {})
-    if isinstance(payload, dict):
-        return str(payload.get(language, payload.get("other", "OTHER")))
-    return "OTHER"
+def _language_heading(language: str) -> str:
+    return language_display_name(language)
 
 
-def _render_template(template: str, values: Dict[str, Any]) -> str:
-    try:
-        return template.format(**values)
-    except KeyError as error:
-        raise RuntimeError(f"Template render failed, missing key: {error}") from error
+def _resolve_slot_language(slot: SlotProcessResult) -> str:
+    language: str = slot.language
+    if language == "unknown":
+        language = next(
+            (key for key, value in slot.language_groups.items() if value),
+            language,
+        )
+    return language
 
 
-def _build_doc_header_text(
+def _resolve_slot_language_items(
+    *,
+    slot: SlotProcessResult,
+) -> Tuple[str, List[PlannedVideo]]:
+    language: str = _resolve_slot_language(slot)
+    slot_language_items: List[PlannedVideo] = list(
+        slot.language_groups.get(language, slot.day_videos)
+    )
+    return language, slot_language_items
+
+
+def _build_merged_title_for_slot(
+    *,
+    processing_mode: str,
+    slot_language_items: List[PlannedVideo],
+    merged_content: Optional[MergedLanguageContent],
+    merge_attempt: Optional[LanguageMergeAttempt],
+) -> str:
+    merged_title: str = ""
+    if processing_mode == "nomerge":
+        merged_title = _build_titles_summary(videos=slot_language_items).strip()
+    else:
+        if merged_content is not None and merged_content.title.strip():
+            merged_title = sanitize_post_llm_title(merged_content.title.strip())
+        else:
+            merged_title = _build_titles_summary(
+                videos=slot_language_items,
+                merged_content=merged_content,
+                merge_attempt=merge_attempt,
+            ).strip()
+    return merged_title
+
+
+def _build_language_time_blocks(
+    *,
+    slot_results: List[SlotProcessResult],
+    processing_mode: str,
+) -> List[Tuple[str, str]]:
+    blocks: List[Tuple[str, str]] = []
+    slot: SlotProcessResult
+    for slot in slot_results:
+        language: str
+        slot_language_items: List[PlannedVideo]
+        language, slot_language_items = _resolve_slot_language_items(slot=slot)
+        if not slot_language_items:
+            continue
+        merged_content: Optional[MergedLanguageContent] = (
+            slot.merged_content_by_language.get(language)
+        )
+        merge_attempt: Optional[LanguageMergeAttempt] = (
+            slot.merge_audit_by_language.get(language)
+        )
+        merged_title: str = _build_merged_title_for_slot(
+            processing_mode=processing_mode,
+            slot_language_items=slot_language_items,
+            merged_content=merged_content,
+            merge_attempt=merge_attempt,
+        )
+        if not merged_title:
+            continue
+        time_display: str = format_time_key_for_display(slot.slot_time_key)
+        heading_text: str = _artifact_heading_label(
+            heading=f"{_language_heading(language)} - {time_display}",
+            merged_content=merged_content,
+            merge_attempt=merge_attempt,
+            artifact_status=slot.merge_artifact_status,
+        )
+        blocks.append((heading_text, merged_title))
+    return blocks
+
+
+def _build_language_time_titles_text(
+    *,
+    language_time_blocks: List[Tuple[str, str]],
+) -> str:
+    header_blocks: List[str] = [
+        f"{heading_text}\n{merged_title}"
+        for heading_text, merged_title in language_time_blocks
+    ]
+    return "\n\n".join(header_blocks).strip()
+
+
+def _build_language_time_header_lines(
+    *,
+    language_time_blocks: List[Tuple[str, str]],
+) -> List[HeaderLine]:
+    lines: List[HeaderLine] = []
+    block_index: int
+    block: Tuple[str, str]
+    for block_index, block in enumerate(language_time_blocks):
+        heading_text: str
+        merged_title: str
+        heading_text, merged_title = block
+        if block_index > 0:
+            lines.append(HeaderLine(text="", is_bold=False))
+        lines.append(HeaderLine(text=heading_text, is_bold=True))
+        lines.append(HeaderLine(text=merged_title, is_bold=False))
+    return lines
+
+
+def build_daily_doc_header(
     *,
     header_context: Dict[str, str],
-    templates: AppTemplates,
-) -> str:
-    context: Dict[str, str] = dict(header_context)
-    context.setdefault("language_time_titles", "")
-    return _render_template(templates.google_doc_header, context)
+    language_time_blocks: List[Tuple[str, str]],
+) -> DailyDocHeader:
+    lines: List[HeaderLine] = [
+        HeaderLine(text="Ежедневные стримы / Everyday streams", is_bold=True),
+        HeaderLine(
+            text=(
+                f"{header_context.get('time_cet', '')} CET/CEST "
+                f"({header_context.get('time_kiev', '')} Kiev, "
+                f"{header_context.get('time_gmt', '')} GMT)"
+            ),
+            is_bold=False,
+        ),
+        HeaderLine(text="", is_bold=False),
+        HeaderLine(
+            text=(
+                f"❇️ Эфир {header_context.get('date', '')}  "
+                f"Скинуть ключи до {header_context.get('time_kiev_minus_1', '')} по Киеву"
+            ),
+            is_bold=True,
+        ),
+        HeaderLine(
+            text=f"Drop the keys off before {header_context.get('time_gmt_minus_1', '')} GMT",
+            is_bold=False,
+        ),
+        HeaderLine(text="", is_bold=False),
+        HeaderLine(text="❇️ Форма для ключей /  Form for keys", is_bold=True),
+        HeaderLine(text=header_context.get("form_url", ""), is_bold=False),
+        HeaderLine(text="", is_bold=False),
+        HeaderLine(
+            text="При технических проблемах / In case of technical problems",
+            is_bold=True,
+        ),
+        HeaderLine(
+            text=f"Contact: {header_context.get('contacts', '')}",
+            is_bold=False,
+        ),
+        HeaderLine(text="", is_bold=False),
+        HeaderLine(text="❇️ Опис / Description / Описание", is_bold=True),
+        HeaderLine(text="", is_bold=False),
+    ]
+    lines.extend(_build_language_time_header_lines(language_time_blocks=language_time_blocks))
+    return DailyDocHeader(lines=tuple(lines))
 
 
 def _document_processing_mode_label(*, processing_mode: str, branch_label: str) -> str:
@@ -211,43 +350,13 @@ def publish_daily_document(
     kiev_tz: ZoneInfo,
     branch_label: str,
 ) -> DailyDocumentPublishResult:
-    header_blocks: List[str] = []
-    for slot in slot_results:
-        time_display: str = format_time_key_for_display(slot.slot_time_key)
-        for language in ("uk", "en", "ru", "other"):
-            slot_language_items: List[PlannedVideo] = slot.language_groups[language]
-            if not slot_language_items:
-                continue
-            merged_content: Optional[MergedLanguageContent] = (
-                slot.merged_content_by_language.get(language)
-            )
-            merge_attempt: Optional[LanguageMergeAttempt] = (
-                slot.merge_audit_by_language.get(language)
-            )
-            merged_title: str = ""
-            if processing_mode == "nomerge":
-                merged_title = _build_titles_summary(videos=slot_language_items).strip()
-            else:
-                if merged_content is not None and merged_content.title.strip():
-                    merged_title = sanitize_post_llm_title(merged_content.title.strip())
-                else:
-                    merged_title = _build_titles_summary(
-                        videos=slot_language_items,
-                        merged_content=merged_content,
-                        merge_attempt=merge_attempt,
-                    ).strip()
-            if not merged_title:
-                continue
-            heading_text: str = _artifact_heading_label(
-                heading=f"{_language_heading(language, config.templates)} - {time_display}",
-                merged_content=merged_content,
-                merge_attempt=merge_attempt,
-                artifact_status=slot.merge_artifact_status,
-            )
-            header_blocks.append(
-                f"{heading_text}\n{merged_title}"
-            )
-    language_time_titles: str = "\n\n".join(header_blocks).strip()
+    language_time_blocks: List[Tuple[str, str]] = _build_language_time_blocks(
+        slot_results=slot_results,
+        processing_mode=processing_mode,
+    )
+    language_time_titles: str = _build_language_time_titles_text(
+        language_time_blocks=language_time_blocks
+    )
     used_runtime_models = collect_used_runtime_models(
         slot_results=slot_results,
         configured_model=resolve_effective_llm_model(config),
@@ -280,6 +389,10 @@ def publish_daily_document(
     )
     first_header_context: Dict[str, str] = dict(slot_results[0].header_context)
     first_header_context["language_time_titles"] = language_time_titles
+    daily_doc_header: DailyDocHeader = build_daily_doc_header(
+        header_context=first_header_context,
+        language_time_blocks=language_time_blocks,
+    )
     local_export_path: Optional[Path] = name_builder.build_docx_path(
         date_key=date_key,
         doc_title=doc_title,
@@ -344,10 +457,7 @@ def publish_daily_document(
         try:
             report_writer.write_header_only(
                 document_id=document_id,
-                header_text=_build_doc_header_text(
-                    header_context=first_header_context,
-                    templates=config.templates,
-                ),
+                header=daily_doc_header,
             )
             guard_index: int = docs_client.get_document_end_index(document_id=document_id) - 1
             docs_client.insert_text_at_index(
@@ -363,33 +473,41 @@ def publish_daily_document(
             first_table: bool = True
             for slot in slot_results:
                 time_display = format_time_key_for_display(slot.slot_time_key)
-                for language in ("uk", "en", "ru", "other"):
-                    if not slot.language_groups[language]:
-                        continue
-                    merged_content = slot.merged_content_by_language.get(language)
-                    merge_attempt = slot.merge_audit_by_language.get(language)
-                    _log_merge_block_publish_truth(
-                        logger=logger,
-                        branch_label=branch_label,
-                        date_key=date_key,
-                        slot_key=slot.slot_key,
-                        language=language,
-                        source_videos=slot.language_groups[language],
-                        merged_content=merged_content,
-                        merge_attempt=merge_attempt,
+                language = slot.language
+                if language == "unknown":
+                    language = next(
+                        (key for key, value in slot.language_groups.items() if value),
+                        language,
                     )
-                    if not first_table:
-                        report_writer.insert_page_break(document_id=document_id)
-                    report_writer.write_language_table(
-                        document_id=document_id,
-                        language=language,
-                        videos=slot.language_groups[language],
-                        merged_content=merged_content,
-                        merge_attempt=merge_attempt,
-                        time_display=time_display,
-                        artifact_status=slot.merge_artifact_status,
-                    )
-                    first_table = False
+                slot_language_items: List[PlannedVideo] = list(
+                    slot.language_groups.get(language, slot.day_videos)
+                )
+                if not slot_language_items:
+                    continue
+                merged_content = slot.merged_content_by_language.get(language)
+                merge_attempt = slot.merge_audit_by_language.get(language)
+                _log_merge_block_publish_truth(
+                    logger=logger,
+                    branch_label=branch_label,
+                    date_key=date_key,
+                    slot_key=slot.slot_key,
+                    language=language,
+                    source_videos=slot_language_items,
+                    merged_content=merged_content,
+                    merge_attempt=merge_attempt,
+                )
+                if not first_table:
+                    report_writer.insert_page_break(document_id=document_id)
+                report_writer.write_language_table(
+                    document_id=document_id,
+                    language=language,
+                    videos=slot_language_items,
+                    merged_content=merged_content,
+                    merge_attempt=merge_attempt,
+                    time_display=time_display,
+                    artifact_status=slot.merge_artifact_status,
+                )
+                first_table = False
         except Exception as error:
             raise RuntimeError(
                 "Google Docs write_daily_document failed. "

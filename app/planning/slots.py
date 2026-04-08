@@ -12,7 +12,10 @@ def planned_video_time_key(video: PlannedVideo) -> str:
 
 
 def planned_video_slot_key(video: PlannedVideo) -> str:
-    return f"{video.date_key}_{planned_video_time_key(video)}"
+    return (
+        f"{video.date_key}_{planned_video_time_key(video)}_"
+        f"{planned_video_block_language(video)}"
+    )
 
 
 def format_time_key_for_display(time_key: str) -> str:
@@ -23,16 +26,19 @@ def format_time_key_for_display(time_key: str) -> str:
 
 
 def language_index(language: str) -> int:
-    order: Tuple[str, ...] = ("uk", "en", "ru", "other")
-    try:
-        return order.index(language)
-    except ValueError:
-        return len(order)
+    return language_sort_key(language)[0]
+
+
+def language_sort_key(language: str) -> Tuple[int, str]:
+    normalized: str = str(language or "").strip().lower()
+    priority: dict[str, int] = {"uk": 0, "en": 1}
+    return (priority.get(normalized, 2), normalized)
 
 
 __all__ = [
     "format_time_key_for_display",
     "language_index",
+    "language_sort_key",
     "planned_video_block_language",
     "planned_video_slot_key",
     "planned_video_time_key",

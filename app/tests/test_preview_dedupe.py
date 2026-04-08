@@ -54,8 +54,6 @@ class PreviewDedupeTests(unittest.TestCase):
                 mime_type="image/jpeg",
             ),
             local_thumbnail_path=None,
-            merge_raw="",
-            merge_languages=[],
         )
 
     def test_local_preview_duplicate_is_skipped_when_name_and_size_match(self) -> None:

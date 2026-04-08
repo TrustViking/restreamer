@@ -337,14 +337,18 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
                 ),
             ),
         ]
-        with self.assertLogs(level="INFO") as captured:
-            payload = build_sanitized_merged_publication_payload(
-                language="en",
-                merged_content=merged_content,
-                merge_attempt=None,
-                use_audit_text=False,
-                source_videos=source_videos,
-            )
+        with patch(
+            "app.publish.sanitizers.url_selector._determine_recommended_video_language",
+            return_value="en",
+        ):
+            with self.assertLogs(level="INFO") as captured:
+                payload = build_sanitized_merged_publication_payload(
+                    language="en",
+                    merged_content=merged_content,
+                    merge_attempt=None,
+                    use_audit_text=False,
+                    source_videos=source_videos,
+                )
         self.assertIn("Recommended materials:", payload.description_text)
         self.assertIn("✅ Title ✅ Real | #Hash & % $", payload.description_text)
         self.assertIn("👉 https://youtu.be/aaaaaaaaaaa", payload.description_text)
@@ -405,14 +409,18 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
                 ),
             ),
         ]
-        with self.assertLogs(level="INFO") as captured:
-            payload = build_sanitized_merged_publication_payload(
-                language="en",
-                merged_content=merged_content,
-                merge_attempt=None,
-                use_audit_text=False,
-                source_videos=source_videos,
-            )
+        with patch(
+            "app.publish.sanitizers.url_selector._determine_recommended_video_language",
+            return_value="en",
+        ):
+            with self.assertLogs(level="INFO") as captured:
+                payload = build_sanitized_merged_publication_payload(
+                    language="en",
+                    merged_content=merged_content,
+                    merge_attempt=None,
+                    use_audit_text=False,
+                    source_videos=source_videos,
+                )
         self.assertIn("Recommended materials:", payload.description_text)
         self.assertIn("👉 https://youtu.be/aaaaaaaaaaa", payload.description_text)
         self.assertIn("👉 https://youtu.be/ccccccccccc", payload.description_text)

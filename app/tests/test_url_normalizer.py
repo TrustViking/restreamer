@@ -41,3 +41,31 @@ class TestNormalizeDisplayUrl:
 
     def test_youtube_url_unchanged(self) -> None:
         assert normalize_display_url("https://youtu.be/abc123") == "https://youtu.be/abc123"
+
+
+def test_normalize_urls_in_text_cleans_youtube_watch_urls() -> None:
+    from app.publish.doc_helpers import _normalize_urls_in_text
+    text = (
+        "Check this out: https://www.youtube.com/watch?v=AygiyNcn9RM&t=1s "
+        "and also https://example.com"
+    )
+    result = _normalize_urls_in_text(text)
+    assert "https://youtu.be/AygiyNcn9RM" in result
+    assert "&t=1s" not in result
+    assert "https://example.com" in result
+
+
+def test_normalize_urls_in_text_cleans_youtube_with_tracking_params() -> None:
+    from app.publish.doc_helpers import _normalize_urls_in_text
+    text = "Video: https://www.youtube.com/watch?v=dq4dj0Bwy4w&pp=abc&si=xyz"
+    result = _normalize_urls_in_text(text)
+    assert "https://youtu.be/dq4dj0Bwy4w" in result
+    assert "&pp=" not in result
+    assert "&si=" not in result
+
+
+def test_normalize_urls_in_text_preserves_non_youtube_urls() -> None:
+    from app.publish.doc_helpers import _normalize_urls_in_text
+    text = "Visit https://example.com/page?q=test for details"
+    result = _normalize_urls_in_text(text)
+    assert "https://example.com/page?q=test" in result

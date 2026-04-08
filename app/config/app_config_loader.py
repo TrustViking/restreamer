@@ -10,6 +10,7 @@ import yaml
 from app.config.env_reader import EnvReader
 from app.config.settings import (
     AppConfig,
+    CleanupConfig,
     GoogleConfig,
     LlmConfig,
     PathsConfig,
@@ -23,6 +24,7 @@ from app.config.validators import (
     normalize_now_tz_mode,
     normalize_processing_mode,
     setting_as_bool,
+    setting_as_float,
     setting_as_int,
     setting_as_optional_str,
     setting_as_str,
@@ -95,6 +97,28 @@ def warn_ignored_google_auth_mode_in_config(
                 value,
             )
             return
+
+
+def warn_ignored_google_ids_in_config(
+    app_settings: Dict[str, Any],
+    *,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    google_payload: Any = app_settings.get("google")
+    if not isinstance(google_payload, dict):
+        return
+    ignored_keys: tuple[str, ...] = (
+        "drive_folder_id",
+        "drive_preview_folder_id",
+        "sheets_id",
+    )
+    present_keys: list[str] = [key for key in ignored_keys if key in google_payload]
+    if not present_keys:
+        return
+    (logger or logging.getLogger(__name__)).warning(
+        "google.%s in app config are ignored; use env vars GOOGLE_DRIVE_FOLDER_ID, GOOGLE_DRIVE_PREVIEW_FOLDER_ID, GOOGLE_SHEETS_ID",
+        ",google.".join(present_keys),
+    )
 
 
 def validate_google_service_account_path_requirement(
@@ -185,7 +209,6 @@ def _build_llm_config() -> LlmConfig:
     openai_max_output_tokens: int = EnvReader.int("STG_OPENAI_MAX_OUTPUT_TOKENS", 1000, min_value=1)
     openai_pre_delay_sec: float = EnvReader.float("STG_OPENAI_PRE_DELAY_SEC", 5.0, min_value=0.0)
     llm_source_desc_max_chars: int = 2000
-    llm_run_if_single_source: bool = EnvReader.bool("STG_LLM_RUN_IF_SINGLE_SOURCE", False)
     return LlmConfig(
         provider=llm_provider,
         model=llm_model,
@@ -193,15 +216,23 @@ def _build_llm_config() -> LlmConfig:
         max_output_tokens=openai_max_output_tokens,
         pre_delay_sec=openai_pre_delay_sec,
         source_desc_max_chars=llm_source_desc_max_chars,
-        run_if_single_source=llm_run_if_single_source,
     )
+
+
+def _build_cleanup_config() -> CleanupConfig:
+    """Build cleanup config from environment variables only."""
+    cleanup_max_age_days: int = EnvReader.int(
+        "STG_CLEANUP_MAX_AGE_DAYS",
+        3,
+        min_value=1,
+    )
+    return CleanupConfig(max_age_days=cleanup_max_age_days)
 
 
 def _build_google_config(
     app_settings: Dict[str, Any],
     *,
     logger: logging.Logger,
-    entrypoint_dir: Path,
     summarize_error: Optional[Callable[[Exception], str]],
 ) -> GoogleConfig:
     """Build Google config from YAML settings + env + validation."""
@@ -229,15 +260,11 @@ def _build_google_config(
     return GoogleConfig(
         enabled=google_enabled,
         service_account_path=google_service_account_path,
-        drive_folder_id=setting_as_str(app_settings, "google.drive_folder_id") or None,
-        drive_preview_folder_id=(
-            setting_as_str(app_settings, "google.drive_preview_folder_id")
-            or setting_as_str(app_settings, "google.drive_folder_id")
-            or None
-        ),
+        drive_folder_id=EnvReader.str_required("GOOGLE_DRIVE_FOLDER_ID"),
+        drive_preview_folder_id=EnvReader.str_required("GOOGLE_DRIVE_PREVIEW_FOLDER_ID"),
         drive_preview_path_template=setting_as_str(app_settings, "google.drive_preview_path_template"),
         doc_share_mode=normalize_google_doc_share_mode(setting_as_str(app_settings, "google.doc_share_mode")),
-        sheets_id=setting_as_str(app_settings, "google.sheets_id"),
+        sheets_id=EnvReader.str_required("GOOGLE_SHEETS_ID"),
         sheets_range=setting_as_str(app_settings, "google.sheets_range"),
         form_url=setting_as_str(app_settings, "google.form_url"),
         contacts=setting_as_str(app_settings, "google.contacts"),
@@ -253,21 +280,25 @@ def _build_telegram_config(app_settings: Dict[str, Any]) -> TelegramConfig:
         use_audit=setting_as_bool(app_settings, "telegram.use_audit"),
         symbol_separator=setting_as_str(app_settings, "telegram.symbol_separator"),
         separator_repeat_count=setting_as_int(app_settings, "telegram.separator_repeat_count"),
+        symbol_separator_start=setting_as_str(app_settings, "telegram.symbol_separator_start"),
+        separator_start_repeat_count=setting_as_int(app_settings, "telegram.separator_start_repeat_count"),
         symbol_broadcast=setting_as_str(app_settings, "telegram.symbol_broadcast"),
         symbol_alert=setting_as_str(app_settings, "telegram.symbol_alert"),
         symbol_form=setting_as_str(app_settings, "telegram.symbol_form"),
         symbol_description=setting_as_str(app_settings, "telegram.symbol_description"),
         symbol_pin=setting_as_str(app_settings, "telegram.symbol_pin"),
         symbol_done=setting_as_str(app_settings, "telegram.symbol_done"),
-        flag_uk=setting_as_str(app_settings, "telegram.flag_uk"),
-        flag_en=setting_as_str(app_settings, "telegram.flag_en"),
-        flag_ru=setting_as_str(app_settings, "telegram.flag_ru"),
-        flag_other=setting_as_str(app_settings, "telegram.flag_other"),
         flag_repeat_count=setting_as_int(app_settings, "telegram.flag_repeat_count"),
-        language_name_uk=setting_as_str(app_settings, "telegram.language_name_uk"),
-        language_name_en=setting_as_str(app_settings, "telegram.language_name_en"),
-        language_name_ru=setting_as_str(app_settings, "telegram.language_name_ru"),
-        language_name_other=setting_as_str(app_settings, "telegram.language_name_other"),
+        send_delay_seconds=EnvReader.float(
+            "TELEGRAM_SEND_DELAY_SECONDS",
+            default=setting_as_float(app_settings, "telegram.send_delay_seconds"),
+            min_value=0.0,
+        ),
+        max_retries=EnvReader.int(
+            "TELEGRAM_MAX_RETRIES",
+            default=setting_as_int(app_settings, "telegram.max_retries"),
+            min_value=0,
+        ),
     )
 
 
@@ -316,16 +347,17 @@ def load_config_from_env(
     )
     app_settings: Dict[str, Any] = load_app_settings_from_path(app_config_path)
     warn_ignored_google_auth_mode_in_config(app_settings, logger=logger)
+    warn_ignored_google_ids_in_config(app_settings, logger=logger)
 
     templates = load_templates_from_path(project_paths.templates_path)
     entrypoint_dir: Path = project_paths.entrypoint_path.parent
     return AppConfig(
         processing=_build_processing_config(app_settings, logger=logger),
+        cleanup=_build_cleanup_config(),
         llm=_build_llm_config(),
         google=_build_google_config(
             app_settings,
             logger=logger,
-            entrypoint_dir=entrypoint_dir,
             summarize_error=summarize_error,
         ),
         telegram=_build_telegram_config(app_settings),

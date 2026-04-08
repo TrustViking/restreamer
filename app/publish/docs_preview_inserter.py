@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.bootstrap.logging_config import get_logger
+from app.core.text_utils import utf16_len
 from app.core.models import PlannedVideo
 from app.google import GoogleDocsClient
 from app.publish.doc_helpers import _thumbnail_candidates
@@ -199,7 +200,7 @@ class DocsPreviewInserter:
         )
         effective_offset: int = 1 if plus_one_used else 0
         link_index: int = paragraph_insert_index + effective_offset
-        image_index: int = link_index + len(link_text)
+        image_index: int = link_index + utf16_len(link_text)
         return PreviewInsertPlan(
             row_index=row_index,
             row_number=row_number,

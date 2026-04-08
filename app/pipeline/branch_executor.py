@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Dict, List
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig
 from app.core.branching import BRANCH_MERGE
-from app.core.models import PlannedVideo
+from app.core.models import LanguageMergeAttempt, PlannedVideo
+from app.core.text_utils import format_date_key_for_display
 from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.llm.models.model_compatibility import LlmModelConfigurationError
 from app.observability.runtime_analytics import (
@@ -30,7 +32,11 @@ from app.observability.runtime_analytics import (
 )
 from app.observability.startup_health import log_section
 from app.paths.name_builder import NamePathBuilder
-from app.planning import planned_video_time_key
+from app.planning import (
+    language_sort_key,
+    planned_video_block_language,
+    planned_video_time_key,
+)
 from app.telegram.bot_client import TelegramBotClient
 
 from .daily_doc_publish import publish_daily_document
@@ -43,33 +49,100 @@ if TYPE_CHECKING:
     from .batch_runner import AuditBranch
 
 
-_MERGE_DOC_PUBLISHABLE_STATUSES: frozenset[str] = frozenset(
-    {"full", "partial", "fallback_only"}
-)
+@dataclass(frozen=True)
+class MergePublishDecision:
+    create_doc: bool
+    publish_telegram: bool
+    send_info_message: bool
+    info_message_text: str
+    decision_reason: str
 
 
-def _resolve_merge_doc_gate(
+def _resolve_merge_publish_decision(
     *,
     branch_name: str,
     merge_artifact_status: str,
-) -> tuple[bool, str]:
+    slot_results: List[SlotProcessResult],
+    date_key: str,
+    fallback_merge_targets: List[str],
+    merge_audit_by_language: Dict[str, LanguageMergeAttempt],
+) -> MergePublishDecision:
     if branch_name != BRANCH_MERGE:
-        return True, "nomerge_branch_publish_mode"
-    if merge_artifact_status in _MERGE_DOC_PUBLISHABLE_STATUSES:
-        return True, f"{merge_artifact_status}_merge_artifact_present"
-    return False, "no_publishable_merge_artifact"
+        return MergePublishDecision(
+            create_doc=True,
+            publish_telegram=True,
+            send_info_message=False,
+            info_message_text="",
+            decision_reason="nomerge_branch",
+        )
 
+    if merge_artifact_status in {"full", "partial"}:
+        return MergePublishDecision(
+            create_doc=True,
+            publish_telegram=True,
+            send_info_message=False,
+            info_message_text="",
+            decision_reason=f"{merge_artifact_status}_merge_success",
+        )
 
-def _resolve_merge_telegram_gate(
-    *,
-    branch_name: str,
-    real_merge_blocks: int,
-) -> tuple[bool, str]:
-    if branch_name != BRANCH_MERGE:
-        return True, "nomerge_branch_publish_mode"
-    if real_merge_blocks > 0:
-        return True, "real_merge_blocks_present"
-    return False, "no_real_merge_blocks"
+    if merge_artifact_status == "fallback_only":
+        failure_details: List[str] = []
+        for target in fallback_merge_targets:
+            parts: List[str] = target.split(":", maxsplit=1)
+            slot_key: str = parts[0] if parts else target
+            language: str = parts[1] if len(parts) > 1 else "unknown"
+            attempt: LanguageMergeAttempt | None = merge_audit_by_language.get(language)
+            reasons_text: str = "unknown"
+            attempts_text: str = ""
+            if attempt is not None:
+                reasons_list: List[str] = list(attempt.validation_reasons or [])
+                if reasons_list:
+                    reasons_text = ", ".join(reasons_list)
+                total_attempts: int = 1 + len(attempt.rejected_attempts)
+                attempts_text = f", {total_attempts} попыток"
+            failure_details.append(
+                f"• {language} ({slot_key}) - забраковано: {reasons_text}{attempts_text}"
+            )
+        details_text: str = "\n".join(failure_details) if failure_details else "• детали недоступны"
+        info_text: str = (
+            "⚠️ Merge: объединение не удалось\n\n"
+            f"{details_text}\n\n"
+            "Документ не создан."
+        )
+        return MergePublishDecision(
+            create_doc=False,
+            publish_telegram=False,
+            send_info_message=True,
+            info_message_text=info_text,
+            decision_reason="merge_fallback_only_rejected",
+        )
+
+    all_merge_skipped_languages: List[str] = []
+    has_any_items: bool = False
+    for slot in slot_results:
+        all_merge_skipped_languages.extend(slot.merge_skipped_languages)
+        if slot.day_videos or any(slot.language_groups.values()):
+            has_any_items = True
+    if has_any_items and all_merge_skipped_languages:
+        info_text = (
+            "ℹ️ Режим: merge. Для этой даты объединение не требуется. "
+            "Ниже — вывод без объединения 👇"
+        )
+        return MergePublishDecision(
+            create_doc=True,
+            publish_telegram=True,
+            send_info_message=True,
+            info_message_text=info_text,
+            decision_reason="merge_insufficient_publish_as_nomerge",
+        )
+
+    return MergePublishDecision(
+        create_doc=False,
+        publish_telegram=False,
+        send_info_message=False,
+        info_message_text="",
+        decision_reason="no_data",
+    )
 
 
 class BranchExecutor:
@@ -92,6 +165,22 @@ class BranchExecutor:
         self._cet_tz = cet_tz
         self._debug_artifact_writer = debug_artifact_writer
 
+    def _send_runtime_stage_message(
+        self,
+        *,
+        text: str,
+        dry_run: bool,
+    ) -> None:
+        if dry_run:
+            self._logger.info("DRY RUN stage message:\n%s", text)
+            return
+        if not self._config.telegram.enabled:
+            return
+        try:
+            self._telegram_client.send_text(text)
+        except Exception as error:
+            self._logger.warning("stage_message_send_failed error=%s", error)
+
     def execute(
         self,
         *,
@@ -101,16 +190,30 @@ class BranchExecutor:
         date_videos: List[PlannedVideo],
         dry_run: bool,
         merge_run_summary: MergeRunSummary,
+        run_id: str = "",
+        stage_index: int = 1,
+        stage_count: int = 1,
     ) -> None:
         slot_processing_started_at: float = time.perf_counter()
-        slots_by_time: Dict[str, List[PlannedVideo]] = self._group_date_videos_by_slot_time(
+        slots_by_time_and_language: Dict[Tuple[str, str], List[PlannedVideo]] = (
+            self._group_date_videos_by_time_and_language(
             date_videos=date_videos
+        )
+        )
+        if stage_count > 1 and stage_index > 1:
+            self._send_runtime_stage_message(
+                text=f"⏭ Переход к этапу {branch.name}",
+                dry_run=dry_run,
+            )
+        self._send_runtime_stage_message(
+            text=f"▶️ Этап {stage_index}/{stage_count}: {branch.name}, дата {format_date_key_for_display(date_key)}",
+            dry_run=dry_run,
         )
         self._logger.info(
             "[%s] Date branch started: %s slots=%d items=%d",
             branch.name,
             date_key,
-            len(slots_by_time),
+            len(slots_by_time_and_language),
             len(date_videos),
         )
         record_branch_started(branch_label=branch.name)
@@ -118,7 +221,7 @@ class BranchExecutor:
         log_date_started(
             logger=self._logger,
             date_key=f"{date_key}/{branch.name}",
-            slot_count=len(slots_by_time),
+            slot_count=len(slots_by_time_and_language),
             item_count=len(date_videos),
         )
 
@@ -134,12 +237,16 @@ class BranchExecutor:
             merge_run_summary.partial_merge_artifacts,
         )
         slot_results: List[SlotProcessResult] = []
-        for slot_time_key in sorted(slots_by_time.keys()):
+        ordered_slot_keys: List[Tuple[str, str]] = sorted(
+            slots_by_time_and_language.keys(),
+            key=lambda key: (key[0], language_sort_key(key[1])),
+        )
+        for slot_time_key, slot_language in ordered_slot_keys:
             try:
                 processed_slot_result = process_slot(
                     logger=self._logger,
                     config=self._config,
-                    videos=slots_by_time[slot_time_key],
+                    videos=slots_by_time_and_language[(slot_time_key, slot_language)],
                     date_key=date_key,
                     slot_time_key=slot_time_key,
                     llm_merge_enabled=branch.llm_merge_enabled,
@@ -152,7 +259,7 @@ class BranchExecutor:
                     "[%s] slot_process_fatal_model_config date_key=%s slot_key=%s reason_code=%s model=%s provider=%s reason=%s",
                     branch.name,
                     date_key,
-                    f"{date_key}_{slot_time_key}",
+                    f"{date_key}_{slot_time_key}_{slot_language}",
                     error.reason_code,
                     error.model_name or "unknown",
                     error.provider_name or "unknown",
@@ -235,39 +342,68 @@ class BranchExecutor:
             date_key=date_key,
             processing_mode=branch.processing_mode,
             branch_label=branch.name,
+            run_id=run_id,
         )
-        merge_doc_allowed, merge_doc_reason = _resolve_merge_doc_gate(
+        combined_merge_audit: Dict[str, LanguageMergeAttempt] = {}
+        for slot in slot_results:
+            for language, attempt in slot.merge_audit_by_language.items():
+                combined_merge_audit.setdefault(language, attempt)
+        publish_decision: MergePublishDecision = _resolve_merge_publish_decision(
             branch_name=branch.name,
             merge_artifact_status=merge_artifact_status,
+            slot_results=slot_results,
+            date_key=date_key,
+            fallback_merge_targets=fallback_merge_targets,
+            merge_audit_by_language=combined_merge_audit,
         )
         self._logger.info(
-            "[%s] merge_doc_decision date_key=%s had_real_merge_blocks=%s real_merge_blocks=%d fallback_merge_blocks=%d merge_artifact_status=%s merge_doc_allowed=%s reason=%s",
+            "[%s] merge_publish_decision date_key=%s create_doc=%s publish_telegram=%s send_info=%s reason=%s",
             branch.name,
             date_key,
-            "yes" if real_merge_blocks > 0 else "no",
-            real_merge_blocks,
-            fallback_merge_blocks,
-            merge_artifact_status,
-            "yes" if merge_doc_allowed else "no",
-            merge_doc_reason,
+            "yes" if publish_decision.create_doc else "no",
+            "yes" if publish_decision.publish_telegram else "no",
+            "yes" if publish_decision.send_info_message else "no",
+            publish_decision.decision_reason,
         )
-        if not merge_doc_allowed:
+        merge_status_text: str = ""
+        if branch.name == BRANCH_MERGE:
+            if publish_decision.decision_reason in {"full_merge_success", "partial_merge_success"}:
+                merge_status_text = f"✅ Этап merge, дата {format_date_key_for_display(date_key)}: объединение выполнено."
+            elif publish_decision.decision_reason == "no_data":
+                merge_status_text = f"ℹ️ Этап merge, дата {format_date_key_for_display(date_key)}: нет данных для объединения."
+        if publish_decision.send_info_message and publish_decision.info_message_text:
+            if not dry_run and self._telegram_client is not None:
+                try:
+                    self._telegram_client.send_text(publish_decision.info_message_text)
+                    self._logger.info(
+                        "[%s] merge_info_message_sent date_key=%s reason=%s",
+                        branch.name,
+                        date_key,
+                        publish_decision.decision_reason,
+                    )
+                except Exception as info_send_error:
+                    self._logger.warning(
+                        "[%s] merge_info_message_failed date_key=%s error=%s",
+                        branch.name,
+                        date_key,
+                        info_send_error,
+                    )
+        if not publish_decision.create_doc:
             self._logger.info(
-                "[%s] merge_doc_result date_key=%s merge_doc_created=no reason=%s",
+                "[%s] merge_doc_skipped date_key=%s reason=%s",
                 branch.name,
                 date_key,
-                merge_doc_reason,
+                publish_decision.decision_reason,
             )
             log_docs_publish_summary(logger=self._logger, created=0, failed=0)
             log_telegram_publish_summary(logger=self._logger, sent=0, failed=0, skipped=1)
             record_telegram_skipped(count=1, date_key=date_key, branch_label=branch.name)
+            if merge_status_text:
+                self._send_runtime_stage_message(
+                    text=merge_status_text,
+                    dry_run=dry_run,
+                )
             record_branch_completed(branch_label=branch.name)
-            self._logger.info(
-                "[%s] merge_artifact_skipped date_key=%s reason=%s",
-                branch.name,
-                date_key,
-                merge_doc_reason,
-            )
             return
 
         log_section(logger=self._logger, title=f"Publish Daily Docs [{branch.name}]")
@@ -312,28 +448,12 @@ class BranchExecutor:
         )
         record_docs_created(count=docs_created_count, date_key=date_key, branch_label=branch.name)
         log_docs_publish_summary(logger=self._logger, created=docs_created_count, failed=0)
-
-        merge_telegram_allowed, merge_telegram_reason = _resolve_merge_telegram_gate(
-            branch_name=branch.name,
-            real_merge_blocks=real_merge_blocks,
-        )
-        self._logger.info(
-            "[%s] merge_telegram_decision date_key=%s had_real_merge_blocks=%s real_merge_blocks=%d fallback_merge_blocks=%d merge_artifact_status=%s merge_telegram_allowed=%s reason=%s",
-            branch.name,
-            date_key,
-            "yes" if real_merge_blocks > 0 else "no",
-            real_merge_blocks,
-            fallback_merge_blocks,
-            merge_artifact_status,
-            "yes" if merge_telegram_allowed else "no",
-            merge_telegram_reason,
-        )
-        if not merge_telegram_allowed:
+        if not publish_decision.publish_telegram:
             self._logger.info(
-                "[%s] merge_telegram_result date_key=%s telegram_sent=no reason=%s",
+                "[%s] merge_telegram_skipped date_key=%s reason=%s",
                 branch.name,
                 date_key,
-                merge_telegram_reason,
+                publish_decision.decision_reason,
             )
             log_telegram_publish_summary(
                 logger=self._logger,
@@ -346,10 +466,18 @@ class BranchExecutor:
                 date_key=date_key,
                 branch_label=branch.name,
             )
+            if merge_status_text:
+                self._send_runtime_stage_message(
+                    text=merge_status_text,
+                    dry_run=dry_run,
+                )
             record_branch_completed(branch_label=branch.name)
             return
 
         log_section(logger=self._logger, title=f"Publish Daily Telegram [{branch.name}]")
+        effective_processing_mode: str = branch.processing_mode
+        if publish_decision.decision_reason == "merge_insufficient_publish_as_nomerge":
+            effective_processing_mode = "nomerge"
         telegram_publish_started_at: float = time.perf_counter()
         try:
             telegram_result = publish_daily_telegram(
@@ -362,7 +490,7 @@ class BranchExecutor:
                 doc_url=doc_publish_result.doc_url,
                 header_context=doc_publish_result.header_context,
                 dry_run=dry_run,
-                processing_mode=branch.processing_mode,
+                processing_mode=effective_processing_mode,
                 branch_label=branch.name,
             )
         except Exception:
@@ -389,14 +517,23 @@ class BranchExecutor:
             failed=telegram_result.failed_count,
             skipped=telegram_result.skipped_count,
         )
+        if merge_status_text:
+            self._send_runtime_stage_message(
+                text=merge_status_text,
+                dry_run=dry_run,
+            )
         record_branch_completed(branch_label=branch.name)
 
-    def _group_date_videos_by_slot_time(
+    def _group_date_videos_by_time_and_language(
         self,
         *,
         date_videos: List[PlannedVideo],
-    ) -> Dict[str, List[PlannedVideo]]:
-        slots_by_time: Dict[str, List[PlannedVideo]] = {}
+    ) -> Dict[Tuple[str, str], List[PlannedVideo]]:
+        slots_by_time_and_language: Dict[Tuple[str, str], List[PlannedVideo]] = {}
         for item in date_videos:
-            slots_by_time.setdefault(planned_video_time_key(item), []).append(item)
-        return slots_by_time
+            key: Tuple[str, str] = (
+                planned_video_time_key(item),
+                planned_video_block_language(item),
+            )
+            slots_by_time_and_language.setdefault(key, []).append(item)
+        return slots_by_time_and_language

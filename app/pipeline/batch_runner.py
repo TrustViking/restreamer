@@ -10,6 +10,7 @@ from app.config.settings import AppConfig
 from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.core.env_flags import sheets_link_normalize_report_limit_from_env
 from app.core.models import PlannedVideo, PreparedVideo
+from app.core.text_utils import format_date_key_for_display
 from app.ingest.youtube_metadata import YouTubeMetadataFetcher
 from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.llm.models.model_compatibility import LlmModelConfigurationError
@@ -71,6 +72,7 @@ class BatchRunner:
         kiev_tz: ZoneInfo,
         cet_tz: ZoneInfo,
         resolve_logger_name_meta: Any,
+        progress_callback: Any = None,
     ) -> None:
         self._logger = logger
         self._config = config
@@ -81,6 +83,7 @@ class BatchRunner:
         self._kiev_tz = kiev_tz
         self._cet_tz = cet_tz
         self._resolve_logger_name_meta = resolve_logger_name_meta
+        self._progress_callback: Any = progress_callback
         self._last_merge_run_summary: Optional[MergeRunSummary] = None
         self._debug_writer = DebugArtifactWriter(
             logger=logger,
@@ -107,6 +110,14 @@ class BatchRunner:
 
     def _log_section(self, title: str) -> None:
         log_section(logger=self._logger, title=title)
+
+    def _emit_progress(self, message: str) -> None:
+        """Send a progress status to the bot if callback is set."""
+        if self._progress_callback is not None:
+            try:
+                self._progress_callback(message)
+            except Exception:
+                self._logger.debug("progress_callback_failed message=%s", message)
 
     def _group_processed_videos_by_date(
         self,
@@ -188,10 +199,10 @@ class BatchRunner:
             processed_by_branch: Dict[str, Dict[str, List[PlannedVideo]]] = self._build_processed_by_branch(
                 branches=branches,
                 prepared_videos=prepared_context.prepared_videos,
-                merge_semantics=prepared_context.sheet_state.merge_semantics,
             )
 
             self._log_section("Process Slots")
+            self._emit_progress("✅ Обработка слотов...")
             self._execute_branch_dates(
                 services=services,
                 branches=branches,
@@ -200,6 +211,7 @@ class BatchRunner:
                 merge_run_summary=merge_run_summary,
                 audit_mode=audit_mode,
                 branch_failures=branch_failures,
+                run_id=run_id,
             )
 
             log_link_normalization_report(
@@ -219,10 +231,16 @@ class BatchRunner:
                 elapsed_ms=total_run_ms,
                 scope="run",
             )
+            if branch_failures:
+                overall_status = "failed"
+            elif self._last_merge_run_summary is not None and self._last_merge_run_summary.final_failure > 0:
+                overall_status = "partial"
+            else:
+                overall_status = "ok"
             self._logger.info(
                 "audit_done audit_mode=%s overall_status=%s run_id=%s",
                 audit_mode,
-                "ok" if not branch_failures else "failed",
+                overall_status,
                 run_id,
             )
 
@@ -254,6 +272,7 @@ class BatchRunner:
         startup_health_ms: int = int(round((time.perf_counter() - startup_health_started_at) * 1000.0))
         record_stage_duration(stage_name="startup_health", elapsed_ms=startup_health_ms)
         log_stage_timing(logger=self._logger, stage_name="startup_health", elapsed_ms=startup_health_ms, scope="run")
+        self._emit_progress("✅ Проверка сервисов и конфигурации: OK")
 
         self._log_section("Sheet Load")
         sheet_load_started_at: float = time.perf_counter()
@@ -269,6 +288,7 @@ class BatchRunner:
         log_stage_timing(logger=self._logger, stage_name="sheet_load", elapsed_ms=sheet_load_ms, scope="run")
         record_sheet_loaded(rows=len(sheet_state.rows))
         log_sheet_loaded(logger=self._logger, rows=len(sheet_state.rows))
+        self._emit_progress(f"✅ Загружено строк из таблицы: {len(sheet_state.rows)}")
 
         self._log_section("Shared Preparation")
         shared_preparation_started_at: float = time.perf_counter()
@@ -297,6 +317,7 @@ class BatchRunner:
             elapsed_ms=shared_preparation_ms,
             scope="run",
         )
+        self._emit_progress(f"✅ Подготовлено ссылок видео: {len(prepared_videos)}")
 
         rows_skipped: int = max(0, len(sheet_state.rows) - len(prepared_videos))
         prepared_dates_count: int = len({item.date_key for item in prepared_videos})
@@ -321,7 +342,6 @@ class BatchRunner:
         *,
         branches: List[AuditBranch],
         prepared_videos: List[PreparedVideo],
-        merge_semantics: str,
     ) -> Dict[str, Dict[str, List[PlannedVideo]]]:
         processed_by_branch: Dict[str, Dict[str, List[PlannedVideo]]] = {}
         planning_started_at: float = time.perf_counter()
@@ -337,7 +357,6 @@ class BatchRunner:
                     logger=self._logger,
                     prepared_videos=prepared_videos,
                     processing_mode=branch.processing_mode,
-                    merge_semantics=merge_semantics,
                 )
             )
         planning_ms: int = int(round((time.perf_counter() - planning_started_at) * 1000.0))
@@ -355,10 +374,12 @@ class BatchRunner:
         merge_run_summary: MergeRunSummary,
         audit_mode: str,
         branch_failures: List[str],
+        run_id: str = "",
     ) -> None:
         date_keys: List[str] = sorted({date_key for branch_videos in processed_by_branch.values() for date_key in branch_videos.keys()})
+        stage_count: int = len(branches)
         for date_key in date_keys:
-            for branch in branches:
+            for stage_index, branch in enumerate(branches, start=1):
                 self._execute_single_branch_date(
                     services=services,
                     branch=branch,
@@ -368,7 +389,44 @@ class BatchRunner:
                     merge_run_summary=merge_run_summary,
                     audit_mode=audit_mode,
                     branch_failures=branch_failures,
+                    run_id=run_id,
+                    stage_index=stage_index,
+                    stage_count=stage_count,
                 )
+            self._send_date_completed_message(
+                date_key=date_key,
+                dry_run=dry_run,
+                has_merge_failures=(
+                    merge_run_summary is not None
+                    and merge_run_summary.final_failure > 0
+                ),
+            )
+
+    def _send_date_completed_message(
+        self,
+        *,
+        date_key: str,
+        dry_run: bool,
+        has_merge_failures: bool = False,
+    ) -> None:
+        """Send a 'date completed' notification to Telegram."""
+        if has_merge_failures:
+            message: str = f"⚠️ Дата {format_date_key_for_display(date_key)} завершена частично"
+        else:
+            message = f"✅ Дата {format_date_key_for_display(date_key)} завершена"
+        if dry_run:
+            self._logger.info("DRY RUN date completed message: %s", message)
+            return
+        if not self._config.telegram.enabled:
+            return
+        try:
+            self._telegram_client.send_text(message)
+        except Exception as error:
+            self._logger.warning(
+                "date_completed_message_failed date_key=%s error=%s",
+                date_key,
+                error,
+            )
 
     def _execute_single_branch_date(
         self,
@@ -381,6 +439,9 @@ class BatchRunner:
         merge_run_summary: MergeRunSummary,
         audit_mode: str,
         branch_failures: List[str],
+        run_id: str = "",
+        stage_index: int,
+        stage_count: int,
     ) -> None:
         date_videos_all: List[PlannedVideo] = processed_by_branch.get(branch.name, {}).get(date_key, [])
         if not date_videos_all:
@@ -396,6 +457,9 @@ class BatchRunner:
                 date_videos=date_videos_all,
                 dry_run=dry_run,
                 merge_run_summary=merge_run_summary,
+                run_id=run_id,
+                stage_index=stage_index,
+                stage_count=stage_count,
             )
             branch_total_ms: int = int(round((time.perf_counter() - branch_started_at) * 1000.0))
             record_branch_total_ms(date_key=date_key, branch_label=branch.name, elapsed_ms=branch_total_ms)
@@ -407,12 +471,22 @@ class BatchRunner:
                 branch_label=branch.name,
                 date_key=date_key,
             )
-            self._logger.info("audit_branch_done branch=%s status=ok date_key=%s elapsed_ms=%d", branch.name, date_key, branch_total_ms)
+            branch_status: str = "ok"
+            if branch.name == BRANCH_MERGE and merge_run_summary.final_failure > 0:
+                branch_status = "partial"
+            self._logger.info(
+                "audit_branch_done branch=%s status=%s date_key=%s elapsed_ms=%d",
+                branch.name,
+                branch_status,
+                date_key,
+                branch_total_ms,
+            )
             if audit_mode == "audit":
                 self._debug_writer.log_audit_branch_compare(date_key=date_key)
         except LlmModelConfigurationError as error:
             branch_failures.append(f"branch={branch.name} date={date_key} failed: {error}")
             record_branch_failed(branch_label=branch.name)
+            self._emit_progress(f"❌ Ошибка ветки {branch.name}, дата {format_date_key_for_display(date_key)}")
             self._logger.error(
                 "audit_branch_done branch=%s status=fatal_model_config date_key=%s reason_code=%s reason=%s",
                 branch.name,
@@ -423,6 +497,7 @@ class BatchRunner:
             raise
         except Exception as error:
             branch_failures.append(f"branch={branch.name} date={date_key} failed: {error}")
+            self._emit_progress(f"❌ Ошибка ветки {branch.name}, дата {format_date_key_for_display(date_key)}")
             self._logger.error("audit_branch_done branch=%s status=failed date_key=%s reason=%s", branch.name, date_key, error)
             log_error_event(self._logger, "branch=%s date=%s failed: %s", branch.name, date_key, error, reason_code="branch_date_failed")
 

@@ -60,6 +60,34 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
             str(info.get("webpage_url") or info.get("original_url") or video_url).strip()
             or video_url
         )
+        # --- Language signals extraction (for VideoLanguageProfile) ---
+        formats_list: list = info.get("formats") or []
+        audio_langs: list[str] = []
+        for fmt in formats_list:
+            acodec_val: str = str(fmt.get("acodec") or "").strip()
+            fmt_lang: str = str(fmt.get("language") or "").strip()
+            if acodec_val and acodec_val != "none" and fmt_lang and fmt_lang not in audio_langs:
+                audio_langs.append(fmt_lang)
+
+        raw_subtitles: dict = info.get("subtitles") or {}
+        raw_auto_captions: dict = info.get("automatic_captions") or {}
+        subtitle_lang_keys: tuple[str, ...] = tuple(raw_subtitles.keys())
+        auto_caption_lang_keys: tuple[str, ...] = tuple(raw_auto_captions.keys())
+
+        LOGGER.debug(
+            "yt-dlp language signals: url=%s video_language=%s channel_language=%s "
+            "audio_languages=%s subtitle_languages=%s auto_caption_languages=%s "
+            "formats_count=%d subtitles_count=%d auto_captions_count=%d",
+            video_url,
+            youtube_language,
+            channel_language,
+            audio_langs,
+            subtitle_lang_keys,
+            auto_caption_lang_keys,
+            len(formats_list),
+            len(raw_subtitles),
+            len(raw_auto_captions),
+        )
 
         if not title:
             raise ValueError("Не удалось получить title (yt-dlp вернул пусто).")
@@ -102,6 +130,9 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
             channel_language=channel_language,
             duration_seconds=duration_seconds,
             canonical_url=canonical_url,
+            audio_languages=tuple(audio_langs),
+            subtitle_languages=subtitle_lang_keys,
+            auto_caption_languages=auto_caption_lang_keys,
         )
 
 

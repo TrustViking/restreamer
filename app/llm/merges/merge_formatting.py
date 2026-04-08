@@ -116,6 +116,7 @@ def _normalize_formatting_only_description(
         description=normalized_description_text,
         language=language,
         source_texts=source_texts,
+        title="",
     )
     if quality_result.description_text != normalized_description_text:
         normalized_description_text = quality_result.description_text
@@ -178,6 +179,7 @@ def _attempt_expanded_formatting_recovery(
         description=recovered_content.description,
         language=language,
         source_texts=source_texts,
+        title=recovered_content.title,
     )
     if recovery_quality_result.description_text != recovered_content.description:
         recovered_content = dataclasses.replace(

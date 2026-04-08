@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from datetime import time as datetime_time
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from app.config.settings import AppConfig, AppTemplates
-from app.core.models import LanguageMergeAttempt, MergedLanguageContent, PlannedVideo
-from app.planning import planned_video_block_language
+from app.core.language_display import language_to_flag_emoji
+from app.core.models import PlannedVideo
+from app.planning import language_sort_key
 from app.publish.telegram_renderer import (
     build_telegram_header_text,
     build_telegram_key_form_reminder,
@@ -18,17 +20,27 @@ from app.publish.telegram_renderer import (
 )
 from app.telegram.bot_client import TelegramBotClient
 
+if TYPE_CHECKING:
+    from app.pipeline.slot_processing import SlotProcessResult
+
 
 @dataclass(frozen=True)
 class TelegramDateBatch:
-    day_videos: List[PlannedVideo]
+    slot_results: List["SlotProcessResult"]
     header_context: Dict[str, str]
     doc_url: str
-    merged_content_by_language: Optional[Dict[str, MergedLanguageContent]]
-    merge_audit_by_language: Optional[Dict[str, LanguageMergeAttempt]]
     dry_run: bool
-    slot_key: str
+    date_key: str
     processing_mode: str
+
+
+def _slot_language_flag(language: str) -> str:
+    return language_to_flag_emoji(language)
+
+
+def _slot_language_separator(language: str, config: AppConfig) -> str:
+    flag_symbol: str = _slot_language_flag(language)
+    return flag_symbol * max(1, int(config.telegram.flag_repeat_count))
 
 
 def send_telegram_date_batch(
@@ -42,10 +54,13 @@ def send_telegram_date_batch(
     if not config.telegram.enabled:
         logger.info("Telegram disabled by TELEGRAM_ENABLED=0.")
         return
-    logger.info("Telegram send for slot=%s", batch.slot_key)
+    logger.info("Telegram send for date=%s", batch.date_key)
 
     date_separator: str = config.telegram.symbol_separator * max(
         1, int(config.telegram.separator_repeat_count)
+    )
+    start_separator: str = config.telegram.symbol_separator_start * max(
+        1, int(config.telegram.separator_start_repeat_count)
     )
     header_message: str = build_telegram_header_text(
         context=batch.header_context,
@@ -53,48 +68,65 @@ def send_telegram_date_batch(
         config=config,
     )
     if batch.dry_run:
-        logger.info("DRY RUN Telegram date separator start:\n%s", date_separator)
+        logger.info("DRY RUN Telegram date separator start:\n%s", start_separator)
         logger.info("DRY RUN Telegram header:\n%s", header_message)
     else:
-        telegram_client.send_text(date_separator)
+        telegram_client.send_text(start_separator)
         telegram_client.send_text(header_message)
 
-    grouped: Dict[str, List[PlannedVideo]] = {
-        "uk": [],
-        "en": [],
-        "ru": [],
-        "other": [],
-    }
-    merged_map: Dict[str, MergedLanguageContent] = (
-        batch.merged_content_by_language or {}
-    )
-    merge_attempt_map: Dict[str, LanguageMergeAttempt] = (
-        batch.merge_audit_by_language or {}
-    )
-    for video in batch.day_videos:
-        grouped[planned_video_block_language(video)].append(video)
-    logger.info(
-        "telegram_send batch_key=%s items_uk=%d en=%d ru=%d other=%d processing_mode=%s",
-        batch.slot_key,
-        len(grouped["uk"]),
-        len(grouped["en"]),
-        len(grouped["ru"]),
-        len(grouped["other"]),
-        batch.processing_mode,
-    )
+    def _send_slot_key_form(*, context: Dict[str, str]) -> None:
+        key_form_reminder: str = build_telegram_key_form_reminder(
+            context,
+            config=config,
+        )
+        if batch.dry_run:
+            logger.info("DRY RUN Telegram key form reminder block:\n%s", key_form_reminder)
+            return
+        telegram_client.send_text(key_form_reminder)
 
-    for language in ("uk", "en", "ru", "other"):
+    grouped_for_digest: Dict[str, List[PlannedVideo]] = {}
+    for slot in batch.slot_results:
+        language: str = slot.language
+        if language == "unknown":
+            language = next(
+                (key for key, value in slot.language_groups.items() if value),
+                language,
+            )
+        source_items: List[PlannedVideo] = list(
+            slot.day_videos or slot.language_groups.get(language, [])
+        )
         items: List[PlannedVideo] = sorted(
-            grouped[language],
+            source_items,
             key=lambda item: (item.scheduled_at_kiev.time(), item.row_number),
         )
-        merged_for_language: Optional[MergedLanguageContent] = merged_map.get(language)
+        if not items:
+            continue
+        slot_context: Dict[str, str] = slot.header_context or batch.header_context
+        slot_separator: str = _slot_language_separator(language, config)
+        if batch.dry_run:
+            logger.info(
+                "DRY RUN Telegram slot separator (%s):\n%s",
+                language,
+                slot_separator,
+            )
+        else:
+            telegram_client.send_text(slot_separator)
+        grouped_for_digest.setdefault(language, []).extend(items)
+        merged_for_language = slot.merged_content_by_language.get(language)
+        merge_attempt = slot.merge_audit_by_language.get(language)
+        logger.info(
+            "telegram_send slot_key=%s language=%s item_count=%d processing_mode=%s",
+            slot.slot_key,
+            language,
+            len(items),
+            batch.processing_mode,
+        )
         if len(items) > 1 and merged_for_language is not None:
             merged_block_text: str = build_telegram_language_merged_block(
                 language=language,
                 videos=items,
                 merged_content=merged_for_language,
-                merge_attempt=merge_attempt_map.get(language),
+                merge_attempt=merge_attempt,
                 config=config,
                 templates=templates,
             )
@@ -126,6 +158,7 @@ def send_telegram_date_batch(
                         filename=item.local_thumbnail_path.name,
                         mime_type=item.thumbnail.mime_type,
                     )
+            _send_slot_key_form(context=slot_context)
             continue
         if len(items) > 1 and batch.processing_mode == "nomerge":
             nomerge_block_text: str = build_telegram_language_nomerge_block(
@@ -162,6 +195,7 @@ def send_telegram_date_batch(
                         filename=item.local_thumbnail_path.name,
                         mime_type=item.thumbnail.mime_type,
                     )
+            _send_slot_key_form(context=slot_context)
             continue
         for item in items:
             block_text: str = build_telegram_language_block(
@@ -186,15 +220,7 @@ def send_telegram_date_batch(
                 filename=item.local_thumbnail_path.name,
                 mime_type=item.thumbnail.mime_type,
             )
-
-    key_form_reminder: str = build_telegram_key_form_reminder(
-        batch.header_context,
-        config=config,
-    )
-    if batch.dry_run:
-        logger.info("DRY RUN Telegram key form reminder block:\n%s", key_form_reminder)
-    else:
-        telegram_client.send_text(key_form_reminder)
+        _send_slot_key_form(context=slot_context)
 
     sparkle_separator_message: str = config.templates.telegram_sparkle_separator
     if batch.dry_run:
@@ -215,11 +241,23 @@ def send_telegram_date_batch(
             post_header_message,
         )
     else:
-        telegram_client.send_text(post_header_message)
+            telegram_client.send_text(post_header_message)
 
-    for language in ("uk", "en", "ru", "other"):
-        items = sorted(
-            grouped[language],
+    def _digest_language_sort_key(lang: str) -> tuple:
+        lang_items: List[PlannedVideo] = grouped_for_digest.get(lang, [])
+        earliest_time = min(
+            (item.scheduled_at_kiev.time() for item in lang_items),
+            default=None,
+        )
+        return (earliest_time or datetime_time(), language_sort_key(lang))
+
+    ordered_digest_languages: List[str] = sorted(
+        grouped_for_digest.keys(),
+        key=_digest_language_sort_key,
+    )
+    for language in ordered_digest_languages:
+        items: List[PlannedVideo] = sorted(
+            grouped_for_digest.get(language, []),
             key=lambda item: (item.scheduled_at_kiev.time(), item.row_number),
         )
         if not items:

@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING, Tuple
 
 from app.bootstrap.logging_config import get_logger
 from app.config.settings import AppTemplates
+from app.core.text_utils import utf16_len
 from app.core.models import (
     LanguageMergeAttempt,
     MergedLanguageContent,
@@ -11,7 +12,7 @@ from app.core.models import (
     VideoMetadata,
 )
 from app.google import GoogleDocsClient
-from app.publish.doc_helpers import _no_description_text
+from app.publish.shared_helpers import no_description_text as _no_description_text
 
 from .docs_request_builder import DocsRequestBuilder
 from .docs_table_helpers import (
@@ -508,7 +509,7 @@ class DocsTableWriter:
 
             cell_idx: int = _cell_index(row=row_index, col=0, columns=columns)
             paragraph_start: int = cell_start_indices[cell_idx] + 1
-            paragraph_end: int = paragraph_start + len(row_values[row_index][0]) + 1
+            paragraph_end: int = paragraph_start + utf16_len(row_values[row_index][0]) + 1
             requests_payload.append(
                 self._request_builder.build_paragraph_style_request(
                     start=paragraph_start,
@@ -544,24 +545,14 @@ class DocsTableWriter:
 
         def _row_range(row_index: int) -> Tuple[int, int]:
             cell_idx: int = _cell_index(row=row_index, col=0, columns=columns)
-            start_index: int = cell_start_indices[cell_idx]
-            end_index: int = start_index + len(row_values[row_index][0]) + 1
+            start_index: int = cell_start_indices[cell_idx] + 1
+            end_index: int = start_index + utf16_len(row_values[row_index][0]) + 1
             return start_index, end_index
 
         title_start, title_end = _row_range(title_text_row)
         desc_start, desc_end = _row_range(description_text_row)
 
         requests_payload: List[Dict[str, Any]] = [
-            self._request_builder.build_text_style_request(
-                start=title_start,
-                end=title_end,
-                bold=True,
-            ),
-            self._request_builder.build_text_style_request(
-                start=desc_start,
-                end=desc_end,
-                bold=False,
-            ),
             self._request_builder.build_paragraph_style_request(
                 start=title_start,
                 end=title_end,

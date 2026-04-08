@@ -62,6 +62,7 @@ ENV/
 .venv_*/
 # на всякий случай (если вдруг создашь так)
 .venv-*/
+.env*
 # если используешь poetry:
 .poetry/
 
@@ -79,6 +80,8 @@ downloads/
 data/
 docs/
 image/
+handoff/
+tg/
 
 ########################################
 # IDE / OS / local workspace stuff

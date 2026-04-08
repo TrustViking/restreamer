@@ -103,7 +103,7 @@ def detect_paragraph_language(text: str) -> str:
 
 
 def is_wrong_service_language(detected: str, expected: str) -> bool:
-    if detected in {"none", "other"}:
+    if detected in {"none", "other", "unknown"}:
         return False
     normalized_expected: str = expected if expected in {"uk", "en", "ru"} else "other"
     if normalized_expected == "other":

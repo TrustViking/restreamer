@@ -37,7 +37,6 @@ from app.llm.merges.merge_retry import (
     _targeted_paragraph_underflow_retry_profile,
 )
 from app.llm.merges.merge_run_summary import MergeRunSummary
-from app.llm.merges.merge_single_source import _main_stage_field_source
 from app.llm.merges.merge_validation import (
     MergeAttemptFailure,
     MergeSemanticDiagnostics,
@@ -49,6 +48,11 @@ from app.llm.providers.provider_base import LlmProvider
 from app.observability.runtime_analytics import log_warning_operational
 
 LOGGER = _get_logger_impl(__name__)
+
+
+def _main_stage_field_source(*, provider_name: str) -> str:
+    normalized_provider: str = str(provider_name or "").strip().lower()
+    return f"{normalized_provider}_main" if normalized_provider else "llm_main"
 
 
 def _log_merge_attempt_start(

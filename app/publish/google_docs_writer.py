@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, cast
 
 from app.bootstrap.logging_config import get_logger
 from app.config.settings import AppTemplates
@@ -11,6 +11,8 @@ from app.core.models import (
     VideoMetadata,
 )
 from app.google import GoogleDocsClient
+from app.planning import language_sort_key
+from app.publish.doc_header import DailyDocHeader, HeaderLine, TextStyleSpan
 from app.publish.doc_helpers import _build_language_table_rows
 
 from .docs_preview_inserter import DocsPreviewInserter
@@ -46,9 +48,12 @@ class GoogleDocsReportWriter:
         merged_content_by_language: Optional[Dict[str, MergedLanguageContent]] = None,
         merge_audit_by_language: Optional[Dict[str, LanguageMergeAttempt]] = None,
     ) -> None:
-        self._insert_header_text(
+        legacy_header: DailyDocHeader = DailyDocHeader(
+            lines=(HeaderLine(text=f"{header_text}\n\n", is_bold=False),)
+        )
+        self._insert_header(
             document_id=document_id,
-            text=f"{header_text}\n\n",
+            header=legacy_header,
         )
         guard_index: int = (
             self._docs_client.get_document_end_index(document_id=document_id) - 1
@@ -64,10 +69,9 @@ class GoogleDocsReportWriter:
         )
 
         non_empty_languages: List[str] = [
-            language
-            for language in ("uk", "en", "ru", "other")
-            if language_groups.get(language)
+            language for language, videos in language_groups.items() if videos
         ]
+        non_empty_languages.sort(key=language_sort_key)
 
         for index, language in enumerate(non_empty_languages):
             self.write_language_table(
@@ -106,53 +110,56 @@ class GoogleDocsReportWriter:
             ),
         )
 
-    def _insert_header_text(self, document_id: str, text: str) -> None:
+    def _get_document_insert_index(self, document_id: str) -> int:
         doc: Dict[str, Any] = self._docs_client.get_document(document_id=document_id)
         content: List[Dict[str, Any]] = cast(
             List[Dict[str, Any]], doc["body"]["content"]
         )
-        start_index: int = int(content[-1]["endIndex"]) - 1
+        return int(content[-1]["endIndex"]) - 1
 
+    def _build_header_requests_payload(
+        self,
+        *,
+        start_index: int,
+        header: DailyDocHeader,
+    ) -> List[Dict[str, Any]]:
+        rendered_text: str = header.render_text()
         requests_payload: List[Dict[str, Any]] = self._request_builder.build_insert_and_style_requests(
             index=start_index,
-            text=text,
+            text=rendered_text,
             bold=False,
         )
-
-        bold_line_prefixes: Tuple[str, ...] = ()
-        raw_prefixes: object = getattr(
-            self._templates,
-            "google_doc_bold_line_prefixes",
-            [],
-        )
-        if isinstance(raw_prefixes, list):
-            bold_line_prefixes = tuple(str(item) for item in raw_prefixes)
-
-        cursor: int = 0
-        for line in text.splitlines(keepends=True):
-            line_start: int = start_index + cursor
-            line_end: int = line_start + len(line)
-            if any(line.startswith(prefix) for prefix in bold_line_prefixes):
-                requests_payload.append(
-                    self._request_builder.build_text_style_request(
-                        start=line_start,
-                        end=line_end,
-                        bold=True,
-                    )
+        relative_span: TextStyleSpan
+        for relative_span in header.build_relative_style_spans():
+            if not relative_span.is_bold:
+                continue
+            absolute_start: int = start_index + relative_span.start
+            absolute_end: int = start_index + relative_span.end
+            if absolute_start >= absolute_end:
+                continue
+            requests_payload.append(
+                self._request_builder.build_text_style_request(
+                    start=absolute_start,
+                    end=absolute_end,
+                    bold=True,
                 )
-            cursor += len(line)
+            )
+        return requests_payload
 
-        self._docs_client.batch_update(
-            document_id=document_id,
-            requests_payload=requests_payload,
+    def _insert_header(self, document_id: str, header: DailyDocHeader) -> None:
+        start_index: int = self._get_document_insert_index(document_id=document_id)
+        requests_payload: List[Dict[str, Any]] = self._build_header_requests_payload(
+            start_index=start_index,
+            header=header,
         )
+        self._docs_client.batch_update(document_id=document_id, requests_payload=requests_payload)
 
     def write_header_only(
         self,
         document_id: str,
-        header_text: str,
+        header: DailyDocHeader,
     ) -> None:
-        self._insert_header_text(document_id=document_id, text=header_text)
+        self._insert_header(document_id=document_id, header=header)
 
     def insert_page_break(self, document_id: str) -> None:
         self._docs_client.batch_update(

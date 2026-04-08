@@ -163,6 +163,8 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 secrets_env_path=Path(".env"),
                 oauth_token_path=Path("token.json"),
                 oauth_credentials_path=Path("oauth.json"),
+                bundled_config_path=Path("app_config.yaml"),
+                bundled_templates_path=Path("templates.yaml"),
             ),
         )
 

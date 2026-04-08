@@ -87,8 +87,8 @@ class MergeArtifactGateTests(unittest.TestCase):
             )
         publish_doc_mock.assert_not_called()
         publish_telegram_mock.assert_not_called()
-        self.assertIn("merge_doc_created=no", "\n".join(captured.output))
-        self.assertIn("reason=no_publishable_merge_artifact", "\n".join(captured.output))
+        self.assertIn("merge_doc_skipped", "\n".join(captured.output))
+        self.assertIn("reason=no_data", "\n".join(captured.output))
 
     def test_fallback_only_status_is_resolved_explicitly(self) -> None:
         self.assertEqual(
@@ -187,10 +187,10 @@ class MergeArtifactGateTests(unittest.TestCase):
             )
         joined_logs: str = "\n".join(captured.output)
         self.assertIn("merge_artifact_status=partial", joined_logs)
-        self.assertIn("fallback_merge_blocks=1", joined_logs)
+        self.assertIn("fallback_blocks=1", joined_logs)
         self.assertIn("fallback_targets=100326_1800:en", joined_logs)
 
-    def test_fallback_only_merge_artifact_publishes_doc_but_skips_telegram(self) -> None:
+    def test_fallback_only_merge_artifact_skips_doc_and_telegram(self) -> None:
         runner = self._runner()
         branch = AuditBranch(name="merge", processing_mode="merge", llm_merge_enabled=True)
         merge_run_summary = MergeRunSummary()
@@ -231,14 +231,12 @@ class MergeArtifactGateTests(unittest.TestCase):
                 dry_run=True,
                 merge_run_summary=merge_run_summary,
             )
-        publish_doc_mock.assert_called_once()
+        publish_doc_mock.assert_not_called()
         publish_telegram_mock.assert_not_called()
         joined_logs: str = "\n".join(captured.output)
         self.assertIn("merge_artifact_status=fallback_only", joined_logs)
-        self.assertIn("merge_doc_allowed=yes", joined_logs)
-        self.assertIn("reason=fallback_only_merge_artifact_present", joined_logs)
-        self.assertIn("merge_telegram_allowed=no", joined_logs)
-        self.assertIn("reason=no_real_merge_blocks", joined_logs)
+        self.assertIn("merge_doc_skipped", joined_logs)
+        self.assertIn("reason=merge_fallback_only_rejected", joined_logs)
 
     def test_nomerge_logging_reason_is_honest(self) -> None:
         runner = self._runner()
@@ -274,8 +272,68 @@ class MergeArtifactGateTests(unittest.TestCase):
                 merge_run_summary=merge_run_summary,
             )
         joined_logs: str = "\n".join(captured.output)
-        self.assertIn("reason=nomerge_branch_publish_mode", joined_logs)
-        self.assertNotIn("reason=real_merge_blocks_present", joined_logs)
+        self.assertIn("reason=nomerge_branch", joined_logs)
+
+    def test_insufficient_merge_uses_nomerge_processing_mode_for_telegram(self) -> None:
+        runner = self._runner()
+        branch = AuditBranch(name="merge", processing_mode="merge", llm_merge_enabled=True)
+        merge_run_summary = MergeRunSummary()
+        slot_result = SlotProcessResult(
+            slot_key="100326_1800",
+            slot_time_key="1800",
+            header_context={"time_kiev": "18:00"},
+            day_videos=[
+                SimpleNamespace(
+                    date_key="100326",
+                    scheduled_at_kiev=SimpleNamespace(time=lambda: None),
+                    row_number=1,
+                )
+            ],
+            language_groups={"uk": [SimpleNamespace()], "en": [], "ru": [], "other": []},
+            merged_content_by_language={},
+            merge_audit_by_language={},
+            real_merge_blocks=0,
+            merge_candidate_blocks=0,
+            fallback_merge_blocks=0,
+            merge_artifact_status="none",
+            fallback_merge_targets=(),
+            merge_skipped_languages=("uk",),
+        )
+        with patch(
+            "app.pipeline.branch_executor.process_slot",
+            return_value=slot_result,
+        ), patch(
+            "app.pipeline.branch_executor.publish_daily_document",
+            return_value=DailyDocumentPublishResult(
+                doc_title="doc",
+                doc_url="DRY_RUN_DOC_URL",
+                header_context={"time_kiev": "18:00"},
+                slot_keys=["100326_1800"],
+            ),
+        ) as publish_doc_mock, patch(
+            "app.pipeline.branch_executor.publish_daily_telegram",
+            return_value=DailyTelegramPublishResult(sent_count=0, failed_count=0, skipped_count=1),
+        ) as publish_telegram_mock:
+            runner._branch_executor.execute(
+                services=SimpleNamespace(
+                    docs_client=MagicMock(),
+                    drive_client=MagicMock(),
+                    report_writer=MagicMock(),
+                ),
+                branch=branch,
+                date_key="100326",
+                date_videos=[
+                    SimpleNamespace(
+                        date_key="100326",
+                        scheduled_at_kiev=SimpleNamespace(strftime=lambda _: "1800"),
+                    )
+                ],
+                dry_run=True,
+                merge_run_summary=merge_run_summary,
+            )
+        publish_doc_mock.assert_called_once()
+        publish_telegram_mock.assert_called_once()
+        self.assertEqual("nomerge", publish_telegram_mock.call_args.kwargs["processing_mode"])
 
     def test_merge_failed_case_writes_debug_json_artifact_even_without_real_merge_blocks(self) -> None:
         runner = self._runner()
@@ -341,7 +399,7 @@ class MergeArtifactGateTests(unittest.TestCase):
                     dry_run=True,
                     merge_run_summary=merge_run_summary,
                 )
-            publish_doc_mock.assert_called_once()
+            publish_doc_mock.assert_not_called()
             publish_telegram_mock.assert_not_called()
             self.assertTrue(json_path.exists())
             payload = json.loads(json_path.read_text(encoding="utf-8"))
@@ -354,7 +412,7 @@ class MergeArtifactGateTests(unittest.TestCase):
             logs: str = "\n".join(captured.output)
             self.assertIn("merge_reject_debug_json_written", logs)
             self.assertIn("merge_artifact_status=fallback_only", logs)
-            self.assertIn("merge_telegram_allowed=no", logs)
+            self.assertIn("reason=merge_fallback_only_rejected", logs)
 
 
 if __name__ == "__main__":

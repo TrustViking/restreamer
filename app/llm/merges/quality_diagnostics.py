@@ -38,6 +38,10 @@ _ALLOWED_LATIN_SCRIPT_TOKENS: set[str] = {
 }
 _HASHTAG_PATTERN: re.Pattern[str] = re.compile(r"(?:^|\s)(#[^\s#]+)")
 _EMAIL_PATTERN: re.Pattern[str] = re.compile(r"\b\S+@\S+\.\S+\b", re.IGNORECASE)
+_BARE_DOMAIN_PATTERN: re.Pattern[str] = re.compile(
+    r"\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z]{2,}){1,3}\b",
+    flags=re.IGNORECASE,
+)
 _PROPER_NAME_PATTERN: re.Pattern[str] = re.compile(
     r"\b[A-ZА-ЯЁІЇЄҐ][a-zа-яёіїєґ'`-]{1,25}"
     r"(?:\s+[A-ZА-ЯЁІЇЄҐ][a-zа-яёіїєґ'`-]{1,25}){1,3}\b",
@@ -79,6 +83,7 @@ class MergeQualityNormalizationResult:
 def build_diagnostics(
     *,
     description_text: str,
+    title: str = "",
     language: str,
     block_spacing_ok: bool,
     accent_overflow: bool,
@@ -97,6 +102,7 @@ def build_diagnostics(
     links_heading_language_detected: str = detect_service_language(blocks.links_heading)
     cta_language_detected: str = detect_service_language(blocks.cta)
     script_mix_suspects: tuple[str, ...] = _detect_script_mix_suspects(
+        title=title,
         hook=blocks.hook,
         theses_lines=blocks.theses_lines,
         language=language,
@@ -198,6 +204,7 @@ def _normalize_script_mix_probe_text(text: str) -> str:
     normalized_text: str = URL_PATTERN.sub(" ", str(text or ""))
     normalized_text = _EMAIL_PATTERN.sub(" ", normalized_text)
     normalized_text = _HASHTAG_PATTERN.sub(" ", normalized_text)
+    normalized_text = _BARE_DOMAIN_PATTERN.sub(" ", normalized_text)
     return normalized_text
 
 
@@ -241,6 +248,7 @@ def _is_suspicious_script_token(*, token: str, language: str) -> bool:
 
 def _detect_script_mix_suspects(
     *,
+    title: str = "",
     hook: str,
     theses_lines: Sequence[str],
     language: str,
@@ -248,7 +256,7 @@ def _detect_script_mix_suspects(
     if language not in {"uk", "en", "ru"}:
         return ()
     suspect_tokens: List[str] = []
-    for raw_text in (hook, *theses_lines):
+    for raw_text in (title, hook, *theses_lines):
         probe_text: str = _normalize_script_mix_probe_text(raw_text)
         for token in _SCRIPT_TOKEN_PATTERN.findall(probe_text):
             cleaned_token: str = str(token or "").strip()

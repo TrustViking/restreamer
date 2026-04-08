@@ -12,8 +12,6 @@ class AppTemplates:
     google_doc_table_labels: dict[str, list[str]]
     google_doc_bold_line_prefixes_json: str
     google_doc_bold_line_prefixes: list[str]
-    google_doc_language_headings_json: str
-    google_doc_language_headings: dict[str, str]
     telegram_header: str
     telegram_language_block: str
     telegram_language_merged_block: str
@@ -23,8 +21,6 @@ class AppTemplates:
     telegram_language_digest_header: str
     llm_merge_title_description_prompt: str
     llm_startup_ping_prompt: str
-    llm_language_names_json: str
-    llm_language_names: dict[str, str]
     llm_merge_structural_rules: str
     llm_merge_contracts_json: str
     llm_merge_retry_reinforcements_json: str
@@ -32,8 +28,6 @@ class AppTemplates:
     llm_merge_retry_reinforcements: dict[str, Any]
     files_preview_name_template: str
     files_doc_title_template: str
-    files_language_codes_json: str
-    files_language_codes: dict[str, str]
     common_no_description_text: str
     common_single_mode_message: str
 
@@ -46,21 +40,17 @@ class TelegramConfig:
     use_audit: bool
     symbol_separator: str
     separator_repeat_count: int
+    symbol_separator_start: str
+    separator_start_repeat_count: int
     symbol_broadcast: str
     symbol_alert: str
     symbol_form: str
     symbol_description: str
     symbol_pin: str
     symbol_done: str
-    flag_uk: str
-    flag_en: str
-    flag_ru: str
-    flag_other: str
     flag_repeat_count: int
-    language_name_uk: str
-    language_name_en: str
-    language_name_ru: str
-    language_name_other: str
+    send_delay_seconds: float
+    max_retries: int
 
 
 @dataclass(frozen=True)
@@ -85,13 +75,17 @@ class LlmConfig:
     max_output_tokens: int
     pre_delay_sec: float
     source_desc_max_chars: int
-    run_if_single_source: bool
 
 
 @dataclass(frozen=True)
 class ProcessingConfig:
     mode: str
     now_tz_mode: str
+
+
+@dataclass(frozen=True)
+class CleanupConfig:
+    max_age_days: int
 
 
 @dataclass(frozen=True)
@@ -114,6 +108,7 @@ class AppConfig:
     google: GoogleConfig
     llm: LlmConfig
     processing: ProcessingConfig
+    cleanup: CleanupConfig
     paths: PathsConfig
     timezones: TimezoneConfig
     templates: AppTemplates

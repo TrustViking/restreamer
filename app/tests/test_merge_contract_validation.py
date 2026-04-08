@@ -12,7 +12,6 @@ from app.core.models import (
 from app.llm.merges.merge_quality import normalize_merge_description
 from app.llm.merges.merge_service import (
     attempt_openai_merge_with_audit,
-    attempt_openai_single_source_translate_with_audit,
     enforce_openai_merged_paragraphs,
 )
 from app.llm.merges.merge_run_summary import MergeRunSummary
@@ -562,6 +561,56 @@ class MergeContractValidationTests(MergeContractServiceBase):
         self.assertFalse(result.diagnostics.script_mix_detected)
         self.assertNotIn("script_mix_contamination", result.diagnostics.semantic_gate_reason_codes)
 
+    def test_script_mix_guard_ignores_bare_domain_in_cyrillic_text(self) -> None:
+        """lstv.co.uk inside RU text must NOT trigger script_mix_contamination."""
+        result = normalize_merge_description(
+            description=(
+                "После решения украинского суда антикультист дал ссылку на lstv.co.uk как ключевой эпизод.\n\n"
+                "⚖ Конфликт фактов и манипуляций: что стоит за антикультовой риторикой.\n"
+                "🔹 Луиджи Корвальо, член правления ФЕКРИС: реакция на реабилитацию.\n"
+                "🔹 Техническая верификация lstv.co.uk: инфраструктура хостинга.\n"
+                "🔹 Следы в открытых источниках и вывод расследования.\n\n"
+                "Оставляйте комментарии по фактам. #расследование"
+            ),
+            language="ru",
+            source_texts=(),
+        )
+        self.assertFalse(result.diagnostics.script_mix_detected)
+        self.assertNotIn("script_mix_contamination", result.diagnostics.semantic_gate_reason_codes)
+
+    def test_script_mix_guard_ignores_multi_level_bare_domain(self) -> None:
+        """Multi-level domains like news.bbc.co.uk must not be flagged."""
+        result = normalize_merge_description(
+            description=(
+                "Ця новина була опублікована на news.bbc.co.uk та підтверджена.\n\n"
+                "У цьому стрімі ви побачите:\n"
+                "🔹 пункт один\n"
+                "🔹 пункт два\n\n"
+                "Дивіться ефір. #новини"
+            ),
+            language="uk",
+            source_texts=(),
+        )
+        self.assertFalse(result.diagnostics.script_mix_detected)
+
+    def test_script_mix_guard_catches_mixed_script_token_in_title(self) -> None:
+        """A token like FЕКРИС (Latin F + Cyrillic ЕКРИС) in title must be caught."""
+        result = normalize_merge_description(
+            description=(
+                "Антикульт под лупой: что стоит за риторикой.\n\n"
+                "🔹 пункт один\n"
+                "🔹 пункт два\n\n"
+                "Оставляйте комментарии. #тест"
+            ),
+            language="ru",
+            source_texts=(),
+            title="Антикульт под лупой: сайт lstv.co.uk, FЕКРИС и тени",
+        )
+        self.assertTrue(result.diagnostics.script_mix_detected)
+        self.assertIn("script_mix_contamination", result.diagnostics.semantic_gate_reason_codes)
+        self.assertIn("FЕКРИС", result.diagnostics.script_mix_suspects)
+        self.assertNotIn("lstv", result.diagnostics.script_mix_suspects)
+
     def test_core_wrong_language_hook_is_hard_reject(self) -> None:
         result = normalize_merge_description(
             description=(
@@ -631,34 +680,6 @@ class MergeContractValidationTests(MergeContractServiceBase):
         )
         self.assertEqual(merged_content, result)
         self.assertEqual(0, summary.paragraph_recovery_used)
-
-    def test_single_source_translate_path_is_unchanged(self) -> None:
-        one_video = [
-            SimpleNamespace(
-                language="en",
-                metadata=SimpleNamespace(
-                    title="Source title",
-                    description="Original source paragraph one.\n\nOriginal source paragraph two.",
-                ),
-                normalized_link="https://youtube.com/watch?v=aaaaaaaaaaa",
-            )
-        ]
-        plain_response = SimpleNamespace(
-            raw_text="Translated paragraph one.\n\nTranslated paragraph two.",
-            structured_payload=None,
-        )
-        with patch("app.llm.merges.merge_service.openai_request_merge", side_effect=[plain_response]):
-            attempt = attempt_openai_single_source_translate_with_audit(
-                language="ru",
-                videos=one_video,
-                config=self._config(),
-                attempt_label="TEST_SINGLE",
-                summarize_error=lambda error: str(error),
-                no_description_text="no description",
-            )
-        self.assertIsNotNone(attempt.merged)
-        self.assertEqual("single_source_plain_ok", attempt.publish_source_label)
-        self.assertEqual("Source title", attempt.merged.title if attempt.merged else "")
 
     def test_merge_service_logs_quality_hardening_fields(self) -> None:
         videos = [

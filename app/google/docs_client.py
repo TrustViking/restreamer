@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional, cast
+
+from app.bootstrap.logging_config import get_logger as _get_logger_impl
 
 try:
     from googleapiclient.errors import HttpError
 except ImportError:
     HttpError = Exception  # type: ignore
+
+LOGGER = _get_logger_impl(__name__)
+
+_DOCS_WRITE_MAX_RETRIES: int = 4
+_DOCS_WRITE_BASE_DELAY_SEC: float = 15.0
+_DOCS_WRITE_MAX_DELAY_SEC: float = 90.0
+
+
+def _compute_retry_delay(attempt: int) -> float:
+    """Exponential backoff: base * 2^(attempt-1), capped at max."""
+    delay: float = _DOCS_WRITE_BASE_DELAY_SEC * (2 ** (attempt - 1))
+    return min(delay, _DOCS_WRITE_MAX_DELAY_SEC)
 
 
 class GoogleDocsClient:
@@ -15,7 +30,7 @@ class GoogleDocsClient:
     def ping_access(self) -> str:
         # Safe ping without mutating user documents.
         try:
-            self._docs_service.documents().get(documentId="streamertg-ping").execute()
+            self._docs_service.documents().get(documentId="restreamer-ping").execute()
             return "probe_document_found(unexpected)"
         except HttpError as error:
             status_code: Optional[int] = getattr(
@@ -37,10 +52,29 @@ class GoogleDocsClient:
     def batch_update(
         self, document_id: str, requests_payload: List[Dict[str, Any]]
     ) -> None:
-        self._docs_service.documents().batchUpdate(
-            documentId=document_id,
-            body={"requests": requests_payload},
-        ).execute()
+        for attempt in range(1, _DOCS_WRITE_MAX_RETRIES + 1):
+            try:
+                self._docs_service.documents().batchUpdate(
+                    documentId=document_id,
+                    body={"requests": requests_payload},
+                ).execute()
+                return
+            except HttpError as error:
+                status_code: Optional[int] = getattr(
+                    getattr(error, "resp", None), "status", None
+                )
+                if status_code != 429 or attempt == _DOCS_WRITE_MAX_RETRIES:
+                    raise
+                delay_sec: float = _compute_retry_delay(attempt)
+                LOGGER.warning(
+                    "docs_batch_update_429 attempt=%d/%d delay_sec=%.1f document_id=%s requests_count=%d",
+                    attempt,
+                    _DOCS_WRITE_MAX_RETRIES,
+                    delay_sec,
+                    document_id,
+                    len(requests_payload),
+                )
+                time.sleep(delay_sec)
 
     def insert_table_at_end(self, document_id: str, rows: int, columns: int) -> None:
         # Вставляем таблицу в конец основного сегмента документа.

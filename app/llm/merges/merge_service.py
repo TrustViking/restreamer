@@ -11,12 +11,10 @@ from app.core.models import (
     PlannedVideo,
 )
 from app.llm.llm_client import openai_request_merge
-from app.llm.merges.merge_executor import MergeExecutor, _attempt_merge_once
+from app.llm.merges.merge_executor import MergeExecutor
 from app.llm.merges.merge_formatting import ParagraphEnforcementResult
 from app.llm.merges.merge_orchestrator import MergeOrchestrator
 from app.llm.merges.merge_run_summary import MergeRunSummary
-from app.llm.merges.merge_single_source import SingleSourceTranslator, _main_stage_field_source
-from app.llm.merges.merge_validation import _extract_description_validation_reason_codes
 
 LOGGER = _get_logger_impl(__name__)
 
@@ -50,62 +48,6 @@ def _enforce_expanded_single_step_paragraph_overflow_policy(
     return MergeExecutor._enforce_single_step_overflow_policy(
         description_text=description_text,
         max_body_paragraphs=max_body_paragraphs,
-    )
-
-
-def attempt_openai_single_source_translate_with_audit(
-    *,
-    language: str,
-    videos: List[PlannedVideo],
-    config: AppConfig,
-    attempt_label: str,
-    summarize_error: Callable[[Exception], str],
-    no_description_text: str,
-    merge_run_summary: Optional[MergeRunSummary] = None,
-    branch_label: str = "unknown",
-    date_key: str = "unknown",
-    slot_key: str = "unknown",
-) -> LanguageMergeAttempt:
-    return attempt_llm_single_source_translate_with_audit(
-        language=language,
-        videos=videos,
-        config=config,
-        attempt_label=attempt_label,
-        summarize_error=summarize_error,
-        no_description_text=no_description_text,
-        merge_run_summary=merge_run_summary,
-        branch_label=branch_label,
-        date_key=date_key,
-        slot_key=slot_key,
-    )
-
-
-def attempt_llm_single_source_translate_with_audit(
-    *,
-    language: str,
-    videos: List[PlannedVideo],
-    config: AppConfig,
-    attempt_label: str,
-    summarize_error: Callable[[Exception], str],
-    no_description_text: str,
-    merge_run_summary: Optional[MergeRunSummary] = None,
-    branch_label: str = "unknown",
-    date_key: str = "unknown",
-    slot_key: str = "unknown",
-) -> LanguageMergeAttempt:
-    del merge_run_summary
-    translator: SingleSourceTranslator = SingleSourceTranslator(
-        config=config,
-        branch_label=branch_label,
-        date_key=date_key,
-        slot_key=slot_key,
-    )
-    return translator.run(
-        language=language,
-        videos=videos,
-        attempt_label=attempt_label,
-        summarize_error=summarize_error,
-        no_description_text=no_description_text,
     )
 
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from typing import Optional
+from unittest.mock import MagicMock, patch
 
+from app.core.models import VideoMetadata
 from app.core.url_utils import (
     is_social_platform_host,
     normalize_official_link_display,
@@ -9,6 +11,7 @@ from app.core.url_utils import (
 )
 from app.publish.sanitizers.url_selector import (
     AuthoritativeUrlSelector,
+    _determine_recommended_video_language,
     _is_complete_source_url,
     _sanitize_source_url,
     _sanitize_url,
@@ -172,3 +175,70 @@ class TestExtractSemanticTokens:
         assert "about" not in tokens
         assert "this" not in tokens
         assert "today" not in tokens
+
+
+@patch("app.publish.sanitizers.url_selector.YtDlpYouTubeMetadataFetcher")
+def test_determine_language_all_signals_agree_uk(mock_fetcher_cls: MagicMock) -> None:
+    mock_metadata = VideoMetadata(
+        url="https://youtu.be/test123test",
+        title="Український огляд нанопластику",
+        description="Це відео про нанопластик і його вплив на здоров'я людей",
+        thumbnail_url="https://i.ytimg.com/vi/test123test/hqdefault.jpg",
+        youtube_language="uk",
+        channel_language="uk",
+    )
+    mock_fetcher_cls.return_value.fetch.return_value = mock_metadata
+    result = _determine_recommended_video_language("https://youtu.be/test123test")
+    assert result == "uk"
+
+
+@patch("app.publish.sanitizers.url_selector.YtDlpYouTubeMetadataFetcher")
+def test_determine_language_signals_disagree_reconciles_to_en(mock_fetcher_cls: MagicMock) -> None:
+    mock_metadata = VideoMetadata(
+        url="https://youtu.be/test123test",
+        title="Nanoplastic overview and policy impacts",
+        description="This is about nanoplastic and long-term health effects.",
+        thumbnail_url="https://i.ytimg.com/vi/test123test/hqdefault.jpg",
+        youtube_language="en",
+        channel_language="uk",
+    )
+    mock_fetcher_cls.return_value.fetch.return_value = mock_metadata
+    result = _determine_recommended_video_language("https://youtu.be/test123test")
+    assert result == "en"
+
+
+@patch("app.publish.sanitizers.url_selector.YtDlpYouTubeMetadataFetcher")
+def test_determine_language_en_video_discarded_for_uk_target(mock_fetcher_cls: MagicMock) -> None:
+    mock_metadata = VideoMetadata(
+        url="https://youtu.be/SOWIeKU-90Y",
+        title="The invisible threat of nanoplastic",
+        description="This video explains the invisible threat of nanoplastic.",
+        thumbnail_url="https://i.ytimg.com/vi/SOWIeKU-90Y/hqdefault.jpg",
+        youtube_language="en",
+        channel_language="en",
+    )
+    mock_fetcher_cls.return_value.fetch.return_value = mock_metadata
+    result = _determine_recommended_video_language("https://youtu.be/SOWIeKU-90Y")
+    assert result == "en"
+
+
+@patch("app.publish.sanitizers.url_selector.YtDlpYouTubeMetadataFetcher")
+def test_determine_language_fetch_failure_returns_none(mock_fetcher_cls: MagicMock) -> None:
+    mock_fetcher_cls.return_value.fetch.side_effect = Exception("Network error")
+    result = _determine_recommended_video_language("https://youtu.be/test123test")
+    assert result is None
+
+
+@patch("app.publish.sanitizers.url_selector.YtDlpYouTubeMetadataFetcher")
+def test_determine_language_no_metadata_returns_none(mock_fetcher_cls: MagicMock) -> None:
+    mock_metadata = VideoMetadata(
+        url="https://youtu.be/test123test",
+        title="",
+        description="",
+        thumbnail_url="https://i.ytimg.com/vi/test123test/hqdefault.jpg",
+        youtube_language=None,
+        channel_language=None,
+    )
+    mock_fetcher_cls.return_value.fetch.return_value = mock_metadata
+    result = _determine_recommended_video_language("https://youtu.be/test123test")
+    assert result is None

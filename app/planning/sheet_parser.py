@@ -77,25 +77,3 @@ def extract_end_column_letters_from_sheet_range(range_name: str) -> Optional[str
     if match is None:
         return None
     return match.group(1).upper()
-
-
-def sheet_range_includes_merge_column(range_name: str) -> bool:
-    end_column_letters: Optional[str] = extract_end_column_letters_from_sheet_range(
-        range_name
-    )
-    end_column_index: Optional[int] = column_letters_to_index(end_column_letters or "")
-    merge_column_index: Optional[int] = column_letters_to_index("E")
-    if end_column_index is None or merge_column_index is None:
-        return True
-    return end_column_index >= merge_column_index
-
-
-def expand_sheet_range_to_af(range_name: str) -> str:
-    cleaned_range: str = str(range_name or "").strip()
-    if not cleaned_range:
-        return "A:F"
-    if "!" in cleaned_range:
-        sheet_prefix: str = cleaned_range.split("!", 1)[0].strip()
-        if sheet_prefix:
-            return f"{sheet_prefix}!A:F"
-    return "A:F"

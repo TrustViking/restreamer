@@ -125,8 +125,8 @@ class AuditModeRunnerTests(unittest.TestCase):
         )
         with patch.object(
             runner._branch_executor,
-            "_group_date_videos_by_slot_time",
-            return_value={"0900": [SimpleNamespace()], "1000": [SimpleNamespace()]},
+            "_group_date_videos_by_time_and_language",
+            return_value={("0900", "uk"): [SimpleNamespace()], ("1000", "en"): [SimpleNamespace()]},
         ), patch(
             "app.pipeline.branch_executor.process_slot",
             side_effect=[fatal_error, MagicMock()],

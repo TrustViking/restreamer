@@ -75,10 +75,6 @@ class PublishGateBlockingTests(unittest.TestCase):
             telegram=SimpleNamespace(
                 use_audit=True,
                 symbol_pin="📌",
-                flag_uk="🇺🇦",
-                flag_en="🇬🇧",
-                flag_ru="🇷🇺",
-                flag_other="🏳️",
                 flag_repeat_count=1,
             ),
             templates=SimpleNamespace(

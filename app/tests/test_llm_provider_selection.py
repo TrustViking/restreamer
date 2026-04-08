@@ -25,7 +25,7 @@ app:
     enabled: false
     drive_folder_id: "folder"
     drive_preview_folder_id: "preview"
-    drive_preview_path_template: "{streamertg}/{preview}/{language}/{date}"
+    drive_preview_path_template: "{restreamer}/{preview}/{language}/{date}"
     doc_share_mode: anyone_writer
     sheets_id: "sheet-id"
     sheets_range: "A:F"
@@ -42,21 +42,17 @@ app:
     use_audit: false
     symbol_separator: "-"
     separator_repeat_count: 2
+    symbol_separator_start: "."
+    separator_start_repeat_count: 3
     symbol_broadcast: "B"
     symbol_alert: "A"
     symbol_form: "F"
     symbol_description: "D"
     symbol_pin: "P"
     symbol_done: "Y"
-    flag_uk: "UK"
-    flag_en: "EN"
-    flag_ru: "RU"
-    flag_other: "OT"
     flag_repeat_count: 1
-    language_name_uk: "Ukr"
-    language_name_en: "Eng"
-    language_name_ru: "Rus"
-    language_name_other: "Other"
+    send_delay_seconds: 1.0
+    max_retries: 3
   files:
     preview_filename_max_stem: 120
 """.strip()
@@ -71,6 +67,9 @@ app:
             "TELEGRAM_BOT_TOKEN": "token",
             "TELEGRAM_CHAT_ID": "chat",
             "GPT_API_KEY": "openai-secret",
+            "GOOGLE_DRIVE_FOLDER_ID": "drive-folder-id",
+            "GOOGLE_DRIVE_PREVIEW_FOLDER_ID": "drive-preview-folder-id",
+            "GOOGLE_SHEETS_ID": "sheet-id",
             "OPENAI_MODEL": "gpt-5.1",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -87,6 +86,9 @@ app:
             "TELEGRAM_BOT_TOKEN": "token",
             "TELEGRAM_CHAT_ID": "chat",
             "GPT_API_KEY": "openai-secret",
+            "GOOGLE_DRIVE_FOLDER_ID": "drive-folder-id",
+            "GOOGLE_DRIVE_PREVIEW_FOLDER_ID": "drive-preview-folder-id",
+            "GOOGLE_SHEETS_ID": "sheet-id",
             "OPENAI_MODEL": "gpt-5.2",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -102,10 +104,49 @@ app:
             "TELEGRAM_BOT_TOKEN": "token",
             "TELEGRAM_CHAT_ID": "chat",
             "GPT_API_KEY": "openai-secret",
+            "GOOGLE_DRIVE_FOLDER_ID": "drive-folder-id",
+            "GOOGLE_DRIVE_PREVIEW_FOLDER_ID": "drive-preview-folder-id",
+            "GOOGLE_SHEETS_ID": "sheet-id",
         }
         with patch.dict(os.environ, env, clear=True):
             config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
         self.assertEqual("gpt-5.1", config.llm.model)
+
+    def test_telegram_send_delay_env_override_has_priority_over_yaml(self) -> None:
+        runtime_config_path: str = self._write_runtime_config()
+        self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
+        env = {
+            "APP_CONFIG_PATH": runtime_config_path,
+            "TELEGRAM_BOT_TOKEN": "token",
+            "TELEGRAM_CHAT_ID": "chat",
+            "GPT_API_KEY": "openai-secret",
+            "GOOGLE_DRIVE_FOLDER_ID": "drive-folder-id",
+            "GOOGLE_DRIVE_PREVIEW_FOLDER_ID": "drive-preview-folder-id",
+            "GOOGLE_SHEETS_ID": "sheet-id",
+            "TELEGRAM_SEND_DELAY_SECONDS": "2.5",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
+        self.assertEqual(2.5, config.telegram.send_delay_seconds)
+        self.assertEqual(3, config.telegram.max_retries)
+
+    def test_telegram_max_retries_env_override_has_priority_over_yaml(self) -> None:
+        runtime_config_path: str = self._write_runtime_config()
+        self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
+        env = {
+            "APP_CONFIG_PATH": runtime_config_path,
+            "TELEGRAM_BOT_TOKEN": "token",
+            "TELEGRAM_CHAT_ID": "chat",
+            "GPT_API_KEY": "openai-secret",
+            "GOOGLE_DRIVE_FOLDER_ID": "drive-folder-id",
+            "GOOGLE_DRIVE_PREVIEW_FOLDER_ID": "drive-preview-folder-id",
+            "GOOGLE_SHEETS_ID": "sheet-id",
+            "TELEGRAM_MAX_RETRIES": "5",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
+        self.assertEqual(1.0, config.telegram.send_delay_seconds)
+        self.assertEqual(5, config.telegram.max_retries)
 
     def test_provider_factory_returns_openai_provider_for_active_model(self) -> None:
         provider = get_llm_provider(
@@ -128,4 +169,3 @@ app:
 
 if __name__ == "__main__":
     unittest.main()
-

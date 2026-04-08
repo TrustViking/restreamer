@@ -19,6 +19,9 @@ class VideoMetadata:
     channel_language: Optional[str] = None
     duration_seconds: Optional[int] = None
     canonical_url: Optional[str] = None
+    audio_languages: tuple[str, ...] = ()
+    subtitle_languages: tuple[str, ...] = ()
+    auto_caption_languages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -34,8 +37,6 @@ class SheetRow:
     link: str
     date_raw: str
     time_raw: str
-    merge_raw: str
-    merge_languages: List[str]
     links_column_index: int
 
 
@@ -47,7 +48,6 @@ class RowVideoCharacteristics:
     date: str
     time: str
     detected_source_language: str
-    merge_languages: List[str]
     base_block_language: str
 
 
@@ -89,8 +89,6 @@ class PreparedVideo:
     metadata: VideoMetadata
     thumbnail: NormalizedImage
     local_thumbnail_path: Optional[Path]
-    merge_raw: str
-    merge_languages: List[str]
 
 
 @dataclass(frozen=True)

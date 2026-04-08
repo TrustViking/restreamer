@@ -6,10 +6,15 @@ from typing import List, Optional, Sequence
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppConfig
+from app.core.language_display import language_full_name
+from app.core.description_cleaner import (
+    _clean_description_for_analysis_report,
+    clean_description_for_analysis,
+)
 from app.core.text_utils import normalize_multiline_text
 from app.resources.resource_loader import load_text_resource
 from app.core.models import PlannedVideo
-from app.llm.merges.merge_constants import SEMANTIC_TOKEN_PATTERN, URL_PATTERN
+from app.llm.merges.merge_constants import SEMANTIC_TOKEN_PATTERN
 from app.llm.merges.merge_retry import (
     ExpandedRetryProfile,
     _format_template_placeholders,
@@ -18,10 +23,7 @@ from app.llm.merges.merge_retry import (
     _template_json_object,
 )
 from app.llm.merges.merge_text_utils import (
-    _extract_description_paragraphs_raw,
     _extract_named_entities,
-    _is_official_links_heading_line,
-    _looks_like_service_tail_paragraph,
 )
 
 LOGGER = _get_logger_impl(__name__)
@@ -48,47 +50,12 @@ class MergeContractMode:
 
 def _language_name_for_merge_prompt(
     language: str,
-    llm_language_names: dict[str, str],
 ) -> str:
-    default_names: dict[str, str] = {
-        "uk": "Ukrainian",
-        "en": "English",
-        "ru": "Russian",
-        "other": "the original language of sources",
-    }
-    payload: dict[str, str] = llm_language_names
-    if isinstance(payload, dict):
-        return str(payload.get(language, payload.get("other", default_names["other"])))
-    return default_names.get(language, default_names["other"])
+    return language_full_name(language)
 
 def _normalize_source_description_text(text: str) -> str:
     normalized: str = normalize_multiline_text(text)
     return re.sub(r"\n{3,}", "\n\n", normalized)
-
-def _strip_source_urls_from_text(text: str) -> tuple[str, int]:
-    removed_urls: int = 0
-
-    def _replace(match: re.Match[str]) -> str:
-        nonlocal removed_urls
-        removed_urls += 1
-        return ""
-
-    cleaned_text: str = URL_PATTERN.sub(_replace, str(text or ""))
-    cleaned_text = re.sub(r"\s{2,}", " ", cleaned_text)
-    return (cleaned_text.strip(" ,;:-"), removed_urls)
-
-def _strip_source_hashtags_from_text(text: str) -> tuple[str, int]:
-    hashtag_pattern: re.Pattern[str] = re.compile(r"(?<!\w)#[^\s#]+", flags=re.UNICODE)
-    removed_hashtags: int = 0
-
-    def _replace(match: re.Match[str]) -> str:
-        nonlocal removed_hashtags
-        removed_hashtags += 1
-        return ""
-
-    cleaned_text: str = hashtag_pattern.sub(_replace, str(text or ""))
-    cleaned_text = re.sub(r"\s{2,}", " ", cleaned_text)
-    return (cleaned_text.strip(" ,;:-"), removed_hashtags)
 
 def _clean_source_description_for_llm(text: str) -> PreparedMergeSourceDescription:
     normalized_text: str = _normalize_source_description_text(text)
@@ -102,49 +69,15 @@ def _clean_source_description_for_llm(text: str) -> PreparedMergeSourceDescripti
             hashtags_removed=0,
             service_paragraphs_dropped=0,
         )
-
-    cleaned_paragraphs: List[str] = []
-    urls_removed: int = 0
-    hashtags_removed: int = 0
-    service_paragraphs_dropped: int = 0
-
-    for paragraph in _extract_description_paragraphs_raw(normalized_text):
-        cleaned_lines: List[str] = []
-        for raw_line in str(paragraph or "").split("\n"):
-            line: str = str(raw_line or "").strip()
-            if not line:
-                continue
-            cleaned_line, line_urls_removed = _strip_source_urls_from_text(line)
-            cleaned_line, line_hashtags_removed = _strip_source_hashtags_from_text(
-                cleaned_line
-            )
-            urls_removed += line_urls_removed
-            hashtags_removed += line_hashtags_removed
-            cleaned_line = re.sub(r"\s{2,}", " ", cleaned_line).strip(" ,;:-")
-            if not cleaned_line or _is_official_links_heading_line(cleaned_line):
-                continue
-            cleaned_lines.append(cleaned_line)
-
-        cleaned_paragraph: str = "\n".join(cleaned_lines).strip()
-        if not cleaned_paragraph:
-            service_paragraphs_dropped += 1
-            continue
-        cleaned_paragraphs.append(cleaned_paragraph)
-
-    while cleaned_paragraphs and _looks_like_service_tail_paragraph(cleaned_paragraphs[-1]):
-        cleaned_paragraphs.pop()
-        service_paragraphs_dropped += 1
-
-    cleaned_text: str = "\n\n".join(
-        paragraph for paragraph in cleaned_paragraphs if paragraph.strip()
-    ).strip()
+    cleaned_text: str = clean_description_for_analysis(normalized_text)
+    report = _clean_description_for_analysis_report(normalized_text)
     return PreparedMergeSourceDescription(
         text=cleaned_text,
         raw_chars=raw_chars,
         cleaned_chars=len(cleaned_text),
-        urls_removed=urls_removed,
-        hashtags_removed=hashtags_removed,
-        service_paragraphs_dropped=service_paragraphs_dropped,
+        urls_removed=report.urls_removed,
+        hashtags_removed=report.hashtags_removed,
+        service_paragraphs_dropped=report.service_paragraphs_dropped,
     )
 
 def _source_texts_for_merge_quality(videos: Sequence[PlannedVideo]) -> tuple[str, ...]:
@@ -166,10 +99,7 @@ def build_llm_merge_prompt_text(
 ) -> str:
     if len(videos) < 2:
         raise ValueError("Expected at least 2 videos for merged generation.")
-    language_name: str = _language_name_for_merge_prompt(
-        language,
-        getattr(config.templates, "llm_language_names", {}),
-    )
+    language_name: str = _language_name_for_merge_prompt(language)
     source_blocks: List[str] = []
     cleaned_source_texts: List[str] = []
     raw_source_chars_total: int = 0
@@ -456,16 +386,3 @@ def _select_merge_contract_mode(
         max_body_paragraphs=4,
         contract_block=compact_contract_block,
     )
-
-def _single_source_translate_prompt(
-    *,
-    source_language: str,
-    target_language: str,
-    source_description: str,
-) -> str:
-    template: str = load_text_resource("prompt_single_source_translate.txt")
-    return template.format(
-        source_language=source_language,
-        target_language=target_language,
-        source_description=source_description.strip(),
-    ).strip()

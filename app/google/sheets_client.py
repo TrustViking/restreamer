@@ -49,14 +49,14 @@ class GoogleSheetsClient:
             if "Unable to parse range" not in error_text:
                 raise
             LOGGER.warning(
-                "Range %s is invalid for spreadsheet %s; fallback to A:C on first sheet.",
+                "Range %s is invalid for spreadsheet %s; fallback to A:D on first sheet.",
                 range_name,
                 spreadsheet_id,
             )
             response = (
                 self._sheets_service.spreadsheets()
                 .values()
-                .get(spreadsheetId=spreadsheet_id, range="A:C")
+                .get(spreadsheetId=spreadsheet_id, range="A:D")
                 .execute()
             )
         values: List[List[str]] = cast(List[List[str]], response.get("values", []))
@@ -79,78 +79,12 @@ class GoogleSheetsClient:
             normalized_header=normalized_header,
             aliases=("time", "время", "hour"),
         )
-        merge_index: Optional[int] = None
-        merge_aliases_specific: Tuple[str, ...] = (
-            "Merge (ua/en/ru)",
-            "Translate/Overwrite (ua/en/ru)",
-        )
-        merge_aliases_generic: Tuple[str, ...] = (
-            "Merge",
-            "Translate/Overwrite",
-            "Translate",
-            "Overwrite",
-            "Перевод",
-            "Переклад",
-            "Замена",
-            "Перезапись",
-        )
-        merge_aliases_specific_normalized: Tuple[str, ...] = tuple(
-            _normalize_header_name(alias) for alias in merge_aliases_specific
-        )
-        merge_aliases_generic_normalized: Tuple[str, ...] = tuple(
-            _normalize_header_name(alias) for alias in merge_aliases_generic
-        )
-
-        for idx, name in enumerate(normalized_header):
-            if name in merge_aliases_specific_normalized:
-                merge_index = idx
-                break
-        if merge_index is None:
-            for idx, name in enumerate(normalized_header):
-                if any(
-                    alias and alias in name
-                    for alias in merge_aliases_specific_normalized
-                ):
-                    merge_index = idx
-                    break
-        if merge_index is None:
-            for idx, name in enumerate(normalized_header):
-                if name in merge_aliases_generic_normalized:
-                    merge_index = idx
-                    break
-        if merge_index is None:
-            for idx, name in enumerate(normalized_header):
-                if any(
-                    alias and alias in name
-                    for alias in merge_aliases_generic_normalized
-                ):
-                    merge_index = idx
-                    break
-
-        merge_header_text: Optional[str] = (
-            header[merge_index]
-            if merge_index is not None and merge_index < len(header)
-            else None
-        )
         LOGGER.info(
-            "Sheets header detected: links_index=%s date_index=%s time_index=%s merge_index=%s merge_header=%r",
+            "Sheets header detected: links_index=%s date_index=%s time_index=%s",
             links_index,
             date_index,
             time_index,
-            merge_index,
-            merge_header_text,
         )
-        if merge_index is None:
-            possible_translate_headers: List[str] = [
-                original_name
-                for original_name, normalized_name in zip(header, normalized_header)
-                if "translate" in normalized_name or "overwrite" in normalized_name
-            ]
-            if possible_translate_headers:
-                LOGGER.warning(
-                    "Merge column not detected. Found possible translate/overwrite column in headers: %r",
-                    possible_translate_headers,
-                )
         if links_index is None or date_index is None or time_index is None:
             raise RuntimeError(
                 "Google Sheets header не распознан. "
@@ -160,40 +94,12 @@ class GoogleSheetsClient:
 
         rows: List[SheetRow] = []
         for row_number, row_values in enumerate(values[1:], start=2):
-            merge_raw: str = (
-                _value_from_row(row_values=row_values, index=merge_index)
-                if merge_index is not None
-                else ""
-            )
-            merge_languages: List[str] = _parse_merge_languages(merge_raw)
-            if merge_raw.strip():
-                LOGGER.info(
-                    "Row %d: merge column parsed raw=%r tokens=%s",
-                    row_number,
-                    merge_raw,
-                    merge_languages,
-                )
-                valid_tokens: set[str] = {"ua", "uk", "en", "ru"}
-                raw_tokens: List[str] = [
-                    item.strip()
-                    for item in re.split(r"\s*[;,|]\s*", merge_raw)
-                    if item.strip()
-                ]
-                for token in raw_tokens:
-                    if token.lower() not in valid_tokens:
-                        LOGGER.warning(
-                            "Row %d: invalid Merge token %r ignored",
-                            row_number,
-                            token,
-                        )
             rows.append(
                 SheetRow(
                     row_number=row_number,
                     link=_value_from_row(row_values=row_values, index=links_index),
                     date_raw=_value_from_row(row_values=row_values, index=date_index),
                     time_raw=_value_from_row(row_values=row_values, index=time_index),
-                    merge_raw=merge_raw,
-                    merge_languages=merge_languages,
                     links_column_index=links_index,
                 )
             )
@@ -238,22 +144,3 @@ def _find_header_index(
         if any(alias in name for alias in normalized_aliases if alias):
             return index
     return None
-
-
-def _parse_merge_languages(value: str) -> List[str]:
-    token_map: Dict[str, str] = {
-        "ua": "uk",
-        "uk": "uk",
-        "en": "en",
-        "ru": "ru",
-    }
-    stable_order: Tuple[str, ...] = ("uk", "en", "ru")
-    selected: set[str] = set()
-    for raw_token in re.split(r"\s*[;,|]\s*", str(value or "")):
-        token: str = raw_token.strip().lower()
-        if not token:
-            continue
-        mapped: Optional[str] = token_map.get(token)
-        if mapped:
-            selected.add(mapped)
-    return [language for language in stable_order if language in selected]

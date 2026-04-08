@@ -27,10 +27,6 @@ class TestResourceLoader:
         text: str = load_text_resource("prompt_merge_contract_compact.txt")
         assert "{compact_bullet_min}" in text
 
-    def test_prompt_single_source_loads(self) -> None:
-        text: str = load_text_resource("prompt_single_source_translate.txt")
-        assert "{source_language}" in text
-
 
 class TestPromptResources:
     def test_prompt_merge_title_description_loads(self) -> None:
@@ -71,7 +67,6 @@ class TestPromptResources:
             "prompt_merge_contract_compact.txt",
             "prompt_merge_contract_expanded.txt",
             "prompt_merge_contract_narrative.txt",
-            "prompt_single_source_translate.txt",
             "prompt_merge_title_description.txt",
             "prompt_merge_structural_rules.txt",
             "prompt_startup_ping.txt",

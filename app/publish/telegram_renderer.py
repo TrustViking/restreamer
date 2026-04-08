@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+import re
+from typing import Any, Dict, List, Optional
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppConfig, AppTemplates
-from app.core.env_flags import (
-    strip_chapter_timestamps,
-    strip_chapter_timestamps_enabled_from_env,
-)
+from app.core.language_display import language_display_name, language_to_flag_emoji
 from app.core.models import (
     LanguageMergeAttempt,
     MergedLanguageContent,
@@ -16,14 +14,39 @@ from app.core.models import (
     VideoMetadata,
 )
 from app.planning import planned_video_block_language
-from app.publish.doc_helpers import _no_description_text as _publish_no_description_text
 from app.publish.post_llm_sanitation import (
     build_sanitized_merged_publication_payload,
     log_safe_merge_attempt_fallback,
     should_suppress_raw_merge_attempt_publish,
 )
+from app.publish.shared_helpers import (
+    fallback_source_description_text as _fallback_source_description_text,
+    is_merge_payload_blocked as _is_merge_payload_blocked,
+    no_description_text as _publish_no_description_text,
+    numbered_lines as _numbered_lines,
+    numbered_original_titles as _numbered_original_titles,
+)
 
 LOGGER = _get_logger_impl(__name__)
+
+
+def _escape_html(text: str) -> str:
+    """Escape HTML special characters for Telegram parse_mode=HTML."""
+    return (
+        text
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+_BOLD_MARKER_PATTERN: re.Pattern[str] = re.compile(r"\*([^*]+)\*")
+
+
+def telegram_safe_html(text: str) -> str:
+    """Escape HTML entities and convert *text* to <b>text</b> for Telegram HTML mode."""
+    escaped: str = _escape_html(text)
+    return _BOLD_MARKER_PATTERN.sub(r"<b>\1</b>", escaped)
 
 
 def _render_template(template: str, values: Dict[str, Any]) -> str:
@@ -35,46 +58,6 @@ def _render_template(template: str, values: Dict[str, Any]) -> str:
 
 def _telegram_safe_time(value: str) -> str:
     return value.replace(":", ":\u2060")
-
-
-def _numbered_lines(values: Sequence[str]) -> str:
-    cleaned_values: List[str] = [
-        str(item or "").strip() for item in values if str(item or "").strip()
-    ]
-    if not cleaned_values:
-        return "1) ..."
-    if len(cleaned_values) == 1:
-        return cleaned_values[0]
-    return "\n".join(
-        [f"{index}) {item}" for index, item in enumerate(cleaned_values, start=1)]
-    )
-
-
-def _fallback_source_description_text(
-    video: PlannedVideo,
-    templates: Optional[AppTemplates],
-) -> str:
-    description_text: str = video.metadata.description.strip() or _publish_no_description_text(
-        templates
-    )
-    if strip_chapter_timestamps_enabled_from_env():
-        description_text = strip_chapter_timestamps(description_text)
-    return description_text
-
-
-def _numbered_original_titles(videos: List[PlannedVideo]) -> str:
-    source_titles: List[str] = [video.metadata.title for video in videos]
-    return _numbered_lines(source_titles)
-
-
-def _is_merge_payload_blocked(payload: MergedPublicationPayload) -> bool:
-    has_publish_stage_duplicate: bool = bool(
-        getattr(payload, "has_publish_stage_duplicate", False)
-    )
-    has_publish_stage_opener_cta: bool = bool(
-        getattr(payload, "has_publish_stage_opener_cta", False)
-    )
-    return has_publish_stage_duplicate or has_publish_stage_opener_cta
 
 
 def _build_merged_publication_payload(
@@ -186,30 +169,18 @@ def build_descriptions_summary(
     return "\n".join(lines).rstrip()
 
 
-def _telegram_language_flag(language: str, config: AppConfig) -> str:
-    flag_by_language: Dict[str, str] = {
-        "uk": config.telegram.flag_uk,
-        "en": config.telegram.flag_en,
-        "ru": config.telegram.flag_ru,
-        "other": config.telegram.flag_other,
-    }
-    return flag_by_language.get(language, config.telegram.flag_other)
+def _telegram_language_flag(language: str) -> str:
+    return language_to_flag_emoji(language)
 
 
 def _telegram_language_flags(language: str, config: AppConfig) -> str:
-    return _telegram_language_flag(language, config) * max(
+    return _telegram_language_flag(language) * max(
         1, int(config.telegram.flag_repeat_count)
     )
 
 
-def _telegram_language_name(language: str, config: AppConfig) -> str:
-    name_by_language: Dict[str, str] = {
-        "uk": config.telegram.language_name_uk,
-        "en": config.telegram.language_name_en,
-        "ru": config.telegram.language_name_ru,
-        "other": config.telegram.language_name_other,
-    }
-    return name_by_language.get(language, config.telegram.language_name_other)
+def _telegram_language_name(language: str) -> str:
+    return language_display_name(language)
 
 
 def build_telegram_header_text(
@@ -227,10 +198,10 @@ def build_telegram_header_text(
             "symbol_alert": config.telegram.symbol_alert,
             "date": context["date"],
             "symbol_form": config.telegram.symbol_form,
-            "form_url": context["form_url"],
-            "contacts": context["contacts"],
+            "form_url": _escape_html(context["form_url"]),
+            "contacts": _escape_html(context["contacts"]),
             "symbol_description": config.telegram.symbol_description,
-            "generated_doc_url": generated_doc_url,
+            "generated_doc_url": _escape_html(generated_doc_url),
         },
     )
 
@@ -251,8 +222,8 @@ def build_telegram_language_block(
             ),
             "symbol_pin": config.telegram.symbol_pin,
             "language_flags": _telegram_language_flags(language, config),
-            "title": video.metadata.title,
-            "description": description_text,
+            "title": telegram_safe_html(video.metadata.title),
+            "description": telegram_safe_html(description_text),
         },
     )
 
@@ -290,8 +261,8 @@ def build_telegram_language_merged_block(
             "time_kiev": _telegram_safe_time(times_text),
             "symbol_pin": config.telegram.symbol_pin,
             "language_flags": _telegram_language_flags(language, config),
-            "title": merged_payload.title_text.strip(),
-            "description": (
+            "title": telegram_safe_html(merged_payload.title_text.strip()),
+            "description": telegram_safe_html(
                 merged_payload.description_text.strip()
                 or _publish_no_description_text(templates)
             ),
@@ -322,8 +293,10 @@ def build_telegram_language_nomerge_block(
             "time_kiev": _telegram_safe_time(times_text),
             "symbol_pin": config.telegram.symbol_pin,
             "language_flags": _telegram_language_flags(language, config),
-            "title": titles_text or "1) ...",
-            "description": descriptions_text or _publish_no_description_text(templates),
+            "title": telegram_safe_html(titles_text or "1) ..."),
+            "description": telegram_safe_html(
+                descriptions_text or _publish_no_description_text(templates)
+            ),
         },
     )
 
@@ -341,15 +314,17 @@ def build_telegram_language_digest_block(
         config.templates.telegram_language_digest_header,
         {
             "language_flags": _telegram_language_flags(language, config),
-            "language_name": _telegram_language_name(language, config),
+            "language_name": _telegram_language_name(language),
             "date": context["date"],
             "time_kiev": _telegram_safe_time(times_text),
         },
     )
     lines: List[str] = [digest_header, ""]
     for video in videos:
-        lines.append(f"{config.telegram.symbol_done} {video.metadata.title}")
-        lines.append(video.normalized_link)
+        lines.append(
+            f"{config.telegram.symbol_done} {telegram_safe_html(video.metadata.title)}"
+        )
+        lines.append(telegram_safe_html(video.normalized_link))
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -360,7 +335,7 @@ def build_telegram_key_form_reminder(
 ) -> str:
     return _render_template(
         config.templates.telegram_key_form_reminder,
-        {"form_url": context["form_url"]},
+        {"form_url": _escape_html(context["form_url"])},
     )
 
 
@@ -387,12 +362,12 @@ def build_single_mode_message(
     return _render_template(
         config.templates.common_single_mode_message,
         {
-            "title": metadata.title,
-            "language": language,
-            "description": (
+            "title": telegram_safe_html(metadata.title),
+            "language": telegram_safe_html(language),
+            "description": telegram_safe_html(
                 metadata.description or _publish_no_description_text(templates)
             ),
-            "url": metadata.url,
+            "url": _escape_html(metadata.url),
         },
     )
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from app.core.constants import LOGGER_NAME_DEFAULT, LOGGER_NAME_ENV_VAR
+from app.paths._root import PROJECT_ROOT
 
 LEGACY_LOGGER_NAME_ENV_VAR: str = "STREAMERTG_LOGGER_NAME"
 LOG_FILE_ENV_VAR: str = "RESTREAMER_LOG_FILE"
@@ -61,16 +62,13 @@ def resolve_logger_name_meta() -> Tuple[str, str, bool]:
 
 def resolve_log_dir() -> Path:
     env_log_dir_raw: str = str(os.getenv("LOG_DIR", "") or "").strip()
-    script_dir: Path = Path(__file__).resolve().parents[2]
+    project_root: Path = PROJECT_ROOT
     if env_log_dir_raw:
         candidate_path: Path = Path(env_log_dir_raw)
         if not candidate_path.is_absolute():
-            candidate_path = (script_dir / candidate_path).resolve()
+            candidate_path = (project_root / candidate_path).resolve()
         return candidate_path
-    windows_default: Path = Path(r"D:\_projects\restreamer\logs")
-    if windows_default.exists():
-        return windows_default
-    return script_dir / "logs"
+    return project_root / "logs"
 
 
 def resolve_log_file_path() -> Path:
@@ -82,18 +80,55 @@ def resolve_log_file_path() -> Path:
         return candidate_path
 
     log_dir_path: Path = resolve_log_dir()
-    log_filename: str = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_restreamer.log"
+    log_filename: str = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{LOGGER_NAME_DEFAULT}.log"
     return log_dir_path / log_filename
+
+
+def _resolve_log_file_pair_from_detailed_path(
+    detailed_log_file_path: Path,
+) -> Tuple[Path, Path]:
+    suffix: str = detailed_log_file_path.suffix or ".log"
+    stem: str = detailed_log_file_path.stem
+    screen_log_file_path: Path = detailed_log_file_path.with_name(
+        f"{stem}_screen{suffix}"
+    )
+    return detailed_log_file_path, screen_log_file_path
+
+
+def resolve_log_file_paths(*, entrypoint_label: str = LOGGER_NAME_DEFAULT) -> Tuple[Path, Path]:
+    env_log_file_raw: str = str(os.getenv(LOG_FILE_ENV_VAR, "") or "").strip()
+    if env_log_file_raw:
+        candidate_path: Path = Path(env_log_file_raw)
+        if not candidate_path.is_absolute():
+            candidate_path = (resolve_log_dir() / candidate_path).resolve()
+        return _resolve_log_file_pair_from_detailed_path(candidate_path)
+
+    log_dir_path: Path = resolve_log_dir()
+    timestamp: str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    detailed_log_file_path: Path = (
+        log_dir_path / f"{timestamp}_{entrypoint_label}_detailed.log"
+    )
+    screen_log_file_path: Path = (
+        log_dir_path / f"{timestamp}_{entrypoint_label}_screen.log"
+    )
+    return detailed_log_file_path, screen_log_file_path
 
 
 def setup_logging(debug: bool) -> None:
     base_logger_name: str = resolve_base_logger_name()
-    app_level: int = logging.DEBUG if debug else logging.INFO
 
-    log_file_path: Path = resolve_log_file_path()
-    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    detailed_log_file_path: Path
+    screen_log_file_path: Path
+    detailed_log_file_path, screen_log_file_path = resolve_log_file_paths(
+        entrypoint_label=base_logger_name
+    )
+    detailed_log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    screen_log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    formatter: logging.Formatter = logging.Formatter(
+    stream_formatter: logging.Formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(message)s"
+    )
+    file_formatter: logging.Formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     )
     root_logger: logging.Logger = logging.getLogger()
@@ -102,29 +137,38 @@ def setup_logging(debug: bool) -> None:
         root_logger.removeHandler(handler)
 
     base_logger: logging.Logger = logging.getLogger(base_logger_name)
-    base_logger.setLevel(app_level)
+    base_logger.setLevel(logging.DEBUG)
     base_logger.propagate = False
     for handler in list(base_logger.handlers):
         base_logger.removeHandler(handler)
 
     stream_handler: logging.StreamHandler = logging.StreamHandler(stream=sys.stdout)
-    stream_handler.setLevel(app_level)
-    stream_handler.setFormatter(formatter)
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(stream_formatter)
     base_logger.addHandler(stream_handler)
 
     file_handler: logging.FileHandler = logging.FileHandler(
-        filename=str(log_file_path),
+        filename=str(detailed_log_file_path),
         mode="a",
         encoding="utf-8",
     )
-    file_handler.setLevel(app_level)
-    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(file_formatter)
     base_logger.addHandler(file_handler)
 
+    screen_file_handler: logging.FileHandler = logging.FileHandler(
+        filename=str(screen_log_file_path),
+        mode="a",
+        encoding="utf-8",
+    )
+    screen_file_handler.setLevel(logging.INFO)
+    screen_file_handler.setFormatter(stream_formatter)
+    base_logger.addHandler(screen_file_handler)
+
     base_logger.info(
-        "Logging initialized level=%s file=%s",
-        logging.getLevelName(app_level),
-        str(log_file_path),
+        "Logging initialized stream_level=INFO detailed_file_level=DEBUG screen_file_level=INFO detailed_file=%s screen_file=%s",
+        str(detailed_log_file_path),
+        str(screen_log_file_path),
     )
 
     logging.getLogger("requests_oauthlib").setLevel(logging.WARNING)

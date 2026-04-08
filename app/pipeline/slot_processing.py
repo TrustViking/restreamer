@@ -14,19 +14,17 @@ from app.core.models import (
     LanguageMergeAttempt,
     MergedLanguageContent,
     PlannedVideo,
-    RowVideoCharacteristics,
 )
 from app.core.text_utils import normalize_multiline_text
 from app.ingest.youtube_metadata import normalize_youtube_video_url
 from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.llm.merges.merge_service import (
     attempt_llm_merge_with_audit,
-    attempt_llm_single_source_translate_with_audit,
     enforce_openai_merged_paragraphs,
 )
 from app.llm.models.model_identity import resolve_effective_llm_model
-from app.planning import language_index, planned_video_block_language
-from app.publish.doc_helpers import _no_description_text as _publish_no_description_text
+from app.planning import language_sort_key, planned_video_block_language
+from app.publish.shared_helpers import no_description_text as _publish_no_description_text
 from app.publish.header_context import build_header_context
 from app.observability.runtime_analytics import (
     log_stage_timing,
@@ -52,6 +50,8 @@ class SlotProcessResult:
     fallback_merge_blocks: int = 0
     merge_artifact_status: MergeArtifactStatus = "none"
     fallback_merge_targets: Tuple[str, ...] = ()
+    merge_skipped_languages: Tuple[str, ...] = ()
+    language: str = "unknown"
 
 
 def resolve_merge_artifact_status(
@@ -123,7 +123,6 @@ def _log_merge_input_summary(
     language: str,
     language_items_for_merge: List[PlannedVideo],
     desc_max_chars_limit: int,
-    single_source_run_allowed: bool,
     merge_expected: bool,
     merge_skip_reason: str,
 ) -> None:
@@ -138,7 +137,7 @@ def _log_merge_input_summary(
     source_desc_chars_after_trim: int = sum(len(description) for description in stripped_descriptions)
     non_empty_descriptions: int = sum(1 for description in descriptions if description)
     logger.info(
-        "merge_input_summary branch=%s date_key=%s slot_key=%s lang=%s source_count=%d non_empty_descriptions=%d titles_non_empty=%d source_desc_chars_total=%d source_desc_chars_passed_to_llm=%d hard_truncation=%s configured_desc_max_chars_limit=%d single_source_run_allowed=%s merge_expected=%s merge_skip_reason=%s",
+        "merge_input_summary branch=%s date_key=%s slot_key=%s lang=%s source_count=%d non_empty_descriptions=%d titles_non_empty=%d source_desc_chars_total=%d source_desc_chars_passed_to_llm=%d hard_truncation=%s configured_desc_max_chars_limit=%d merge_expected=%s merge_skip_reason=%s",
         branch_label,
         date_key,
         slot_key,
@@ -150,7 +149,6 @@ def _log_merge_input_summary(
         source_desc_chars_after_trim,
         "disabled",
         desc_max_chars_limit,
-        "yes" if single_source_run_allowed else "no",
         "yes" if merge_expected else "no",
         merge_skip_reason or "not_applicable",
     )
@@ -169,7 +167,17 @@ def process_slot(
     branch_label: str,
 ) -> SlotProcessResult:
     slot_started_at: float = time.perf_counter()
-    slot_key: str = f"{date_key}_{slot_time_key}"
+    language_groups: Dict[str, List[PlannedVideo]] = {}
+    raw_video: PlannedVideo
+    for raw_video in videos:
+        block_language: str = planned_video_block_language(raw_video)
+        language_groups.setdefault(block_language, []).append(raw_video)
+    ordered_slot_languages: List[str] = sorted(
+        language_groups.keys(),
+        key=language_sort_key,
+    )
+    slot_language: str = ordered_slot_languages[0] if ordered_slot_languages else "unknown"
+    slot_key: str = f"{date_key}_{slot_time_key}_{slot_language}"
     logger.info(
         "[%s] slot_process_start date_key=%s slot_key=%s video_count=%d",
         branch_label,
@@ -180,40 +188,33 @@ def process_slot(
     day_videos: List[PlannedVideo] = sorted(
         videos,
         key=lambda item: (
-            language_index(planned_video_block_language(item)),
             item.scheduled_at_kiev.time(),
             item.row_number,
         ),
     )
     slot_lang_counts: Dict[str, int] = {
-        language: sum(
-            1 for item in day_videos if planned_video_block_language(item) == language
-        )
-        for language in ("uk", "en", "ru", "other")
+        language: len(language_groups.get(language, ()))
+        for language in ordered_slot_languages
     }
+    counts_payload: str = ", ".join(
+        f"{language}:{slot_lang_counts[language]}" for language in ordered_slot_languages
+    )
+    if len(ordered_slot_languages) > 1:
+        logger.warning(
+            "[%s] slot_language_mismatch slot_key=%s languages=%s",
+            branch_label,
+            slot_key,
+            ordered_slot_languages,
+        )
     logger.info(
-        "[%s] Processing slot=%s date=%s time=%s counts_by_language=uk:%d en:%d ru:%d other:%d",
+        "[%s] Processing slot=%s date=%s time=%s counts_by_language=%s",
         branch_label,
         slot_key,
         date_key,
         slot_time_key,
-        slot_lang_counts["uk"],
-        slot_lang_counts["en"],
-        slot_lang_counts["ru"],
-        slot_lang_counts["other"],
+        counts_payload or "none",
     )
 
-    language_groups: Dict[str, List[PlannedVideo]] = {
-        "uk": [],
-        "en": [],
-        "ru": [],
-        "other": [],
-    }
-    for language in ("uk", "en", "ru", "other"):
-        language_items: List[PlannedVideo] = [
-            item for item in day_videos if planned_video_block_language(item) == language
-        ]
-        language_groups[language].extend(language_items)
     merged_content_by_language: Dict[str, MergedLanguageContent] = {}
     merge_audit_by_language: Dict[str, LanguageMergeAttempt] = {}
     real_merge_blocks: int = 0
@@ -221,37 +222,17 @@ def process_slot(
     fallback_merge_blocks: int = 0
     fallback_merge_targets: List[str] = []
     if llm_merge_enabled:
-        for language in ("uk", "en", "ru", "other"):
+        merge_skipped_languages_list: List[str] = []
+        for language in ordered_slot_languages:
             language_items_for_merge: List[PlannedVideo] = sorted(
-                language_groups[language],
+                language_groups.get(language, []),
                 key=lambda item: (item.scheduled_at_kiev.time(), item.row_number),
             )
             non_empty_descriptions_count: int = sum(
                 1 for item in language_items_for_merge if item.metadata.description.strip()
             )
             run_classic_merge: bool = non_empty_descriptions_count >= 2
-            run_single_source_translate: bool = False
-            if (
-                config.llm.run_if_single_source
-                and non_empty_descriptions_count == 1
-                and len(language_items_for_merge) == 1
-            ):
-                single_item: PlannedVideo = language_items_for_merge[0]
-                row_meta: Optional[RowVideoCharacteristics] = single_item.row_characteristics
-                if (
-                    row_meta is not None
-                    and bool(row_meta.merge_languages)
-                    and row_meta.detected_source_language != language
-                ):
-                    run_single_source_translate = True
-                    logger.info(
-                        "[%s] Single-source LLM translate enabled: src_lang=%s -> target_lang=%s row=%d",
-                        branch_label,
-                        row_meta.detected_source_language,
-                        language,
-                        row_meta.row_index,
-                    )
-            merge_expected: bool = run_classic_merge or run_single_source_translate
+            merge_expected: bool = run_classic_merge
             merge_skip_reason: str = "not_applicable"
             if not merge_expected:
                 merge_skip_reason = (
@@ -267,11 +248,10 @@ def process_slot(
                 language=language,
                 language_items_for_merge=language_items_for_merge,
                 desc_max_chars_limit=config.llm.source_desc_max_chars,
-                single_source_run_allowed=config.llm.run_if_single_source,
                 merge_expected=merge_expected,
                 merge_skip_reason=merge_skip_reason,
             )
-            if not run_classic_merge and not run_single_source_translate:
+            if not run_classic_merge:
                 logger.info(
                     "[%s] LLM merge skipped for language=%s: non-empty descriptions=%d reason=%s.",
                     branch_label,
@@ -279,6 +259,11 @@ def process_slot(
                     non_empty_descriptions_count,
                     merge_skip_reason,
                 )
+                if (
+                    language_items_for_merge
+                    and merge_skip_reason == "insufficient_descriptions"
+                ):
+                    merge_skipped_languages_list.append(language)
                 continue
             merge_before_snapshot: Tuple[int, int, int, int, int, int] = _merge_summary_snapshot(
                 merge_run_summary
@@ -314,33 +299,19 @@ def process_slot(
                     block_generation_mode=BLOCK_GENERATION_MODE_FALLBACK_AFTER_MERGE_FAILURE,
                 )
             else:
-                if run_single_source_translate:
-                    merge_attempt = attempt_llm_single_source_translate_with_audit(
-                        language=language,
-                        videos=language_items_for_merge,
-                        config=config,
-                        attempt_label=f"OPENAI_TRANSLATE_{language.upper()}",
-                        summarize_error=summarize_error,
-                        no_description_text=_publish_no_description_text(config.templates),
-                        merge_run_summary=merge_run_summary,
-                        branch_label=branch_label,
-                        date_key=date_key,
-                        slot_key=slot_key,
-                    )
-                else:
-                    merge_attempt = attempt_llm_merge_with_audit(
-                        language=language,
-                        videos=language_items_for_merge,
-                        config=config,
-                        attempt_label=f"OPENAI_MERGE_{language.upper()}",
-                        summarize_error=summarize_error,
-                        normalize_youtube_url=normalize_youtube_video_url,
-                        no_description_text=_publish_no_description_text(config.templates),
-                        merge_run_summary=merge_run_summary,
-                        branch_label=branch_label,
-                        date_key=date_key,
-                        slot_key=slot_key,
-                    )
+                merge_attempt = attempt_llm_merge_with_audit(
+                    language=language,
+                    videos=language_items_for_merge,
+                    config=config,
+                    attempt_label=f"OPENAI_MERGE_{language.upper()}",
+                    summarize_error=summarize_error,
+                    normalize_youtube_url=normalize_youtube_video_url,
+                    no_description_text=_publish_no_description_text(config.templates),
+                    merge_run_summary=merge_run_summary,
+                    branch_label=branch_label,
+                    date_key=date_key,
+                    slot_key=slot_key,
+                )
             if (not quota_stop_preexisting) and merge_run_summary.provider_quota_exhausted:
                 logger.error(
                     "merge_branch_aborted_quota_exhausted branch=%s date_key=%s slot_key=%s language=%s",
@@ -424,9 +395,9 @@ def process_slot(
                 after_snapshot=merge_after_snapshot,
             )
     else:
-        for language in ("uk", "en", "ru", "other"):
+        for language in ordered_slot_languages:
             language_items_for_merge = sorted(
-                language_groups[language],
+                language_groups.get(language, []),
                 key=lambda item: (item.scheduled_at_kiev.time(), item.row_number),
             )
             _log_merge_input_summary(
@@ -437,7 +408,6 @@ def process_slot(
                 language=language,
                 language_items_for_merge=language_items_for_merge,
                 desc_max_chars_limit=config.llm.source_desc_max_chars,
-                single_source_run_allowed=config.llm.run_if_single_source,
                 merge_expected=False,
                 merge_skip_reason=(
                     "processing_mode_nomerge"
@@ -451,8 +421,8 @@ def process_slot(
                 branch_label,
                 slot_key,
             )
-            for language in ("uk", "en", "ru", "other"):
-                if language_groups[language]:
+            for language in ordered_slot_languages:
+                if language_groups.get(language):
                     logger.info(
                         "branch_field_sources branch_type=%s date_key=%s slot_key=%s language=%s title_source=%s hook_source=%s hashtags_source=%s body_source=%s",
                         branch_label,
@@ -525,5 +495,7 @@ def process_slot(
         fallback_merge_blocks=fallback_merge_blocks,
         merge_artifact_status=merge_artifact_status,
         fallback_merge_targets=tuple(fallback_merge_targets),
+        merge_skipped_languages=tuple(merge_skipped_languages_list) if llm_merge_enabled else (),
+        language=slot_language,
     )
 

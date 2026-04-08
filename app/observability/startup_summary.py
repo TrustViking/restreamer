@@ -81,9 +81,6 @@ def _log_startup_banner(
     startup_context: StartupContext,
     llm_summary: Optional[LlmSummarySnapshot],
 ) -> None:
-    env_stg_merge_semantics: str = (
-        os.getenv("STG_MERGE_SEMANTICS", "").strip() or "<unset>"
-    )
     config_processing_mode_for_banner: str = (
         startup_context.config_processing_mode_raw
         if startup_context.config_processing_mode_raw
@@ -104,7 +101,6 @@ def _log_startup_banner(
         startup_context.args_dry_run,
     )
     logger.info("config_processing_mode=%s", config_processing_mode_for_banner)
-    logger.info("env.STG_MERGE_SEMANTICS=%s", env_stg_merge_semantics)
     logger.info("resolved_processing_mode=%s", startup_context.processing_mode)
     logger.info(
         "resolved_audit_mode=%s branches=%s",
@@ -219,7 +215,7 @@ def log_config_summary(
         config.google.sheets_range,
     )
     logger.info(
-        "run_id=%s Config summary: config_processing_mode=%s resolved_processing_mode=%s resolved_audit_mode=%s now_tz_mode=%s llm_provider=%s llm_model_effective=%s llm_model_configured=%s llm_provider_model=%s llm_usage_reporting_mode=%s openai_timeout_sec=%.1f openai_max_output_tokens=%d llm_source_desc_max_chars=%d llm_run_if_single_source=%s openai_pre_delay_sec=%.1f",
+        "run_id=%s Config summary: config_processing_mode=%s resolved_processing_mode=%s resolved_audit_mode=%s now_tz_mode=%s llm_provider=%s llm_model_effective=%s llm_model_configured=%s llm_provider_model=%s llm_usage_reporting_mode=%s openai_timeout_sec=%.1f openai_max_output_tokens=%d llm_source_desc_max_chars=%d openai_pre_delay_sec=%.1f",
         run_context.run_id,
         config.processing.mode,
         run_context.processing_mode,
@@ -233,7 +229,6 @@ def log_config_summary(
         config.llm.timeout_sec,
         config.llm.max_output_tokens,
         config.llm.source_desc_max_chars,
-        config.llm.run_if_single_source,
         config.llm.pre_delay_sec,
     )
     logger.info(

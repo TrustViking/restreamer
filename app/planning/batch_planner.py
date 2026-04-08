@@ -24,6 +24,7 @@ from app.pipeline.runtime_services import BatchServices
 from app.planning import (
     column_index_to_letters,
     deduplicate_planned_videos_within_slot_language,
+    language_sort_key,
     handle_normalized_link_writeback,
     log_link_forensic_event,
     parse_sheet_datetime,
@@ -169,8 +170,6 @@ def build_prepared_videos(
                     metadata=metadata,
                     thumbnail=normalized_thumbnail,
                     local_thumbnail_path=None,
-                    merge_raw=row.merge_raw,
-                    merge_languages=list(row.merge_languages),
                 )
             )
         except Exception as error:
@@ -334,7 +333,6 @@ def derive_planned_videos(
     logger: logging.Logger,
     prepared_videos: List[PreparedVideo],
     processing_mode: str,
-    merge_semantics: str,
 ) -> List[PlannedVideo]:
     logger.info(
         "Planning stage: prepared_items=%d processing_mode=%s",
@@ -348,40 +346,7 @@ def derive_planned_videos(
             processing_mode=processing_mode,
             logger=logger,
         )
-        if processing_mode == "nomerge":
-            processed.append(base_video)
-            continue
-        if prepared.merge_languages and merge_semantics == "override":
-            base_block_language: str = planned_video_block_language(base_video)
-            if base_block_language in prepared.merge_languages:
-                processed.append(base_video)
-            for merge_language in prepared.merge_languages:
-                if merge_language == base_block_language:
-                    continue
-                processed.append(
-                    dataclasses.replace(
-                        base_video,
-                        forced_block_language=merge_language,
-                    )
-                )
-            continue
         processed.append(base_video)
-        base_block_language = planned_video_block_language(base_video)
-        for merge_language in prepared.merge_languages:
-            if merge_language == base_block_language:
-                logger.warning(
-                    "Row %d: merge token %r matches base block %r; skipping clone",
-                    prepared.row_number,
-                    merge_language,
-                    base_block_language,
-                )
-                continue
-            processed.append(
-                dataclasses.replace(
-                    base_video,
-                    forced_block_language=merge_language,
-                )
-            )
     processed = deduplicate_planned_videos_within_slot_language(processed)
     processed_by_slot: Dict[str, List[PlannedVideo]] = {}
     for item in processed:
@@ -389,23 +354,21 @@ def derive_planned_videos(
     for slot_key in sorted(processed_by_slot.keys()):
         slot_items: List[PlannedVideo] = processed_by_slot[slot_key]
         date_key_for_slot: str = slot_items[0].date_key
-        slot_lang_counts: Dict[str, int] = {
-            language: sum(
-                1
-                for slot_item in slot_items
-                if planned_video_block_language(slot_item) == language
-            )
-            for language in ("uk", "en", "ru", "other")
-        }
+        slot_lang_counts: Dict[str, int] = {}
+        slot_item: PlannedVideo
+        for slot_item in slot_items:
+            language: str = planned_video_block_language(slot_item)
+            slot_lang_counts[language] = slot_lang_counts.get(language, 0) + 1
+        ordered_languages: List[str] = sorted(slot_lang_counts.keys(), key=language_sort_key)
+        counts_payload: str = ", ".join(
+            f"{language}:{slot_lang_counts[language]}" for language in ordered_languages
+        )
         logger.info(
-            "After dedup: mode=%s date=%s slot=%s counts_by_language=uk:%d en:%d ru:%d other:%d",
+            "After dedup: mode=%s date=%s slot=%s counts_by_language=%s",
             processing_mode,
             date_key_for_slot,
             slot_key,
-            slot_lang_counts["uk"],
-            slot_lang_counts["en"],
-            slot_lang_counts["ru"],
-            slot_lang_counts["other"],
+            counts_payload or "none",
         )
     return processed
 
@@ -416,6 +379,7 @@ def _build_base_planned_video(
     processing_mode: str,
     logger: logging.Logger,
 ) -> PlannedVideo:
+    del processing_mode, logger
     base_video: PlannedVideo = PlannedVideo(
         row_number=prepared.row_number,
         original_link=prepared.original_link,
@@ -429,17 +393,6 @@ def _build_base_planned_video(
         local_thumbnail_path=prepared.local_thumbnail_path,
     )
     base_block_lang: str = planned_video_block_language(base_video)
-    row_merge_languages: List[str] = (
-        list(prepared.merge_languages) if processing_mode == "merge" else []
-    )
-    if processing_mode == "nomerge" and (
-        bool(prepared.merge_languages) or bool(str(prepared.merge_raw or "").strip())
-    ):
-        logger.info(
-            'Row %d: merge column ignored due to processing_mode=nomerge (merge_langs_raw="%s")',
-            prepared.row_number,
-            prepared.merge_raw,
-        )
     row_characteristics: RowVideoCharacteristics = RowVideoCharacteristics(
         row_index=prepared.row_number,
         raw_link=prepared.original_link,
@@ -447,18 +400,8 @@ def _build_base_planned_video(
         date=prepared.date_raw,
         time=prepared.time_raw,
         detected_source_language=prepared.language,
-        merge_languages=row_merge_languages,
         base_block_language=base_block_lang,
     )
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "Row %d prepared metadata: normalized_link=%r detected_source_language=%s merge_languages=%s base_block_language=%s",
-            prepared.row_number,
-            row_characteristics.normalized_link,
-            row_characteristics.detected_source_language,
-            row_characteristics.merge_languages,
-            row_characteristics.base_block_language,
-        )
     return dataclasses.replace(
         base_video,
         row_characteristics=row_characteristics,

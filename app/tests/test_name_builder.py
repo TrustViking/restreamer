@@ -6,6 +6,17 @@ from datetime import datetime
 from app.paths.name_builder import NamePathBuilder
 
 
+def _make_name_builder() -> NamePathBuilder:
+    return NamePathBuilder(
+        local_image_dir_template="./image/{language}/{date}",
+        local_doc_dir_template="./docs/{date}",
+        preview_name_template="{index}_{language}_{title}",
+        doc_title_template="{date}_{processing_mode}_{title_fragment}{llm_models_segment}_{creation_stamp}",
+
+        max_filename_stem=120,
+    )
+
+
 class NamePathBuilderTests(unittest.TestCase):
     def test_merge_doc_title_includes_model_names_and_docx_path_keeps_segment(self) -> None:
         builder = NamePathBuilder(
@@ -13,7 +24,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
             doc_title_template="{date}_{processing_mode}_Ежедневные стримы - Everyday streams{llm_models_segment}_{creation_stamp}",
-            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
+    
             max_filename_stem=120,
         )
         doc_title = builder.build_doc_title(
@@ -39,7 +50,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
             doc_title_template="{date}_{processing_mode}_Ежедневные стримы - Everyday streams{llm_models_segment}_{creation_stamp}",
-            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
+    
             max_filename_stem=120,
         )
         docx_path = builder.build_docx_path(
@@ -58,7 +69,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
             doc_title_template="{date}_{processing_mode}_{title_fragment}{llm_models_segment}_{creation_stamp}",
-            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
+    
             max_filename_stem=120,
         )
         docx_path = builder.build_docx_path(
@@ -79,7 +90,7 @@ class NamePathBuilderTests(unittest.TestCase):
             local_doc_dir_template="./docs/{date}",
             preview_name_template="{index}_{language}_{title}",
             doc_title_template="{date}_{processing_mode}_{title_fragment}{llm_models_segment}_{creation_stamp}",
-            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
+    
             max_filename_stem=120,
         )
         docx_path = builder.build_docx_path(
@@ -95,14 +106,7 @@ class NamePathBuilderTests(unittest.TestCase):
         self.assertNotIn("__", docx_path.name)
 
     def test_merge_reject_debug_json_path_uses_doc_artifact_base_dir_and_stable_slug(self) -> None:
-        builder = NamePathBuilder(
-            local_image_dir_template="./image/{language}/{date}",
-            local_doc_dir_template="./docs/{date}",
-            preview_name_template="{index}_{language}_{title}",
-            doc_title_template="{date}_{processing_mode}_{title_fragment}{llm_models_segment}_{creation_stamp}",
-            language_codes={"uk": "UA", "en": "EN", "ru": "RU"},
-            max_filename_stem=120,
-        )
+        builder = _make_name_builder()
         json_path = builder.build_merge_reject_debug_json_path(
             date_key="190326",
             slot_key="190326_1800",
@@ -119,6 +123,49 @@ class NamePathBuilderTests(unittest.TestCase):
             "190326_merge_190326_1800_en_sources4_merge_rejected.json",
             json_path.name,
         )
+
+    def test_merge_reject_debug_json_path_without_run_id(self) -> None:
+        """Without run_id the filename is the same as before (backward compat)."""
+        builder = _make_name_builder()
+        path_a = builder.build_merge_reject_debug_json_path(
+            date_key="060426",
+            slot_key="060426_1800_ru",
+            language="ru",
+            processing_mode="merge",
+            source_count=2,
+        )
+        path_b = builder.build_merge_reject_debug_json_path(
+            date_key="060426",
+            slot_key="060426_1800_ru",
+            language="ru",
+            processing_mode="merge",
+            source_count=2,
+        )
+        self.assertEqual(path_a, path_b)
+        self.assertNotIn("run_id", str(path_a))
+
+    def test_merge_reject_debug_json_path_with_run_id(self) -> None:
+        """With run_id the suffix appears and different run_ids give different paths."""
+        builder = _make_name_builder()
+        path_a = builder.build_merge_reject_debug_json_path(
+            date_key="060426",
+            slot_key="060426_1800_ru",
+            language="ru",
+            processing_mode="merge",
+            source_count=2,
+            run_id="20260404_130357_ef1a3d",
+        )
+        path_b = builder.build_merge_reject_debug_json_path(
+            date_key="060426",
+            slot_key="060426_1800_ru",
+            language="ru",
+            processing_mode="merge",
+            source_count=2,
+            run_id="20260404_163743_fa5eb7",
+        )
+        self.assertNotEqual(path_a, path_b)
+        self.assertIn("20260404_130357_ef1a3d", str(path_a))
+        self.assertIn("20260404_163743_fa5eb7", str(path_b))
 
 
 if __name__ == "__main__":

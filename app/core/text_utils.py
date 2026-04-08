@@ -110,3 +110,32 @@ def has_duplicate_paragraphs(
 
 def normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def utf16_len(text: str) -> int:
+    """Return the length of *text* in UTF-16 code units.
+
+    Google Docs API indices are counted in UTF-16 code units, not Python
+    (Unicode code-point) units.  Characters outside the Basic Multilingual
+    Plane (e.g. emoji, flag sequences) occupy two UTF-16 code units each
+    (a surrogate pair) but count as one ``len()`` unit in Python.
+
+    Use this function instead of ``len()`` whenever computing
+    ``startIndex`` / ``endIndex`` values for Google Docs API requests.
+    """
+    return len(text.encode("utf-16-le")) // 2
+
+
+def format_date_key_for_display(date_key: str) -> str:
+    """Convert internal date_key like '270426' to display format '27.04.2026'.
+
+    Returns date_key unchanged if parsing fails.
+    """
+    from datetime import datetime
+    raw: str = str(date_key or "").strip()
+    if not raw:
+        return raw
+    try:
+        return datetime.strptime(raw, "%d%m%y").strftime("%d.%m.%Y")
+    except ValueError:
+        return raw

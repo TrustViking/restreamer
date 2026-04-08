@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 from app.bootstrap.logging_config import get_logger
+from app.core.text_utils import utf16_len
 from app.core.models import VideoMetadata
 
 
@@ -140,11 +141,15 @@ class DocsRequestBuilder:
         font_family: str = DEFAULT_FONT_FAMILY,
         font_size_pt: float = DEFAULT_FONT_SIZE_PT,
     ) -> List[Dict[str, Any]]:
+        # Insert full text (including trailing newline), but style only content.
+        # Excluding trailing '\n' from style range avoids paragraph-boundary run splits.
+        style_text: str = text.rstrip("\n")
+        style_end: int = index + utf16_len(style_text) if style_text else index + utf16_len(text)
         return [
             cls.build_insert_text_request(index=index, text=text),
             cls.build_text_style_request(
                 start=index,
-                end=index + len(text),
+                end=style_end,
                 bold=bold,
                 font_family=font_family,
                 font_size_pt=font_size_pt,
@@ -218,7 +223,7 @@ class DocsRequestBuilder:
         requests_payload.append(
             cls.build_format_request(
                 start_index=url_start_index,
-                end_index=url_start_index + len(url_text),
+                end_index=url_start_index + utf16_len(url_text),
                 font_family=font_family,
                 font_size_pt=font_size_pt,
             )
@@ -241,7 +246,7 @@ class DocsRequestBuilder:
         requests_payload.append(
             cls.build_format_request(
                 start_index=description_start_index,
-                end_index=description_start_index + len(description_full_text),
+                end_index=description_start_index + utf16_len(description_full_text),
                 font_family=font_family,
                 font_size_pt=font_size_pt,
             )
@@ -261,7 +266,7 @@ class DocsRequestBuilder:
         requests_payload.append(
             cls.build_format_request(
                 start_index=title_start_index,
-                end_index=title_start_index + len(title_text),
+                end_index=title_start_index + utf16_len(title_text),
                 font_family=font_family,
                 font_size_pt=font_size_pt,
             )

@@ -3,14 +3,16 @@ from __future__ import annotations
 import argparse
 import logging
 import secrets
+import sys
 import time
 from datetime import datetime
-from typing import Sequence
+from typing import Any, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
 from app.bootstrap.cli import build_cli_parser
+from app.bootstrap.cleanup import run_daily_cleanup
 from app.bootstrap.logging_config import (
     get_logger,
     resolve_logger_name_meta,
@@ -64,9 +66,17 @@ from app.paths import ProjectPaths, get_project_paths
 from app.paths.name_builder import NamePathBuilder
 from app.pipeline.batch_runner import BatchRunner
 from app.telegram.bot_client import TelegramBotClient
+from app.telegram_bot.group_registry import handle_group_migration
 
 
-LOGGER: logging.Logger = get_logger("restreamer")
+LOGGER: logging.Logger = get_logger(__name__)
+
+
+def _normalize_chat_id(raw_chat_id: object | None) -> str | None:
+    normalized_chat_id: str = str(raw_chat_id or "").strip()
+    if not normalized_chat_id:
+        return None
+    return normalized_chat_id
 
 
 def _load_config_from_env(*, logger: logging.Logger) -> AppConfig:
@@ -80,10 +90,11 @@ def _load_zoneinfo(name: str) -> ZoneInfo:
     try:
         return ZoneInfo(name)
     except ZoneInfoNotFoundError as error:
+        python_executable: str = str(sys.executable or "").strip() or "python"
         raise RuntimeError(
             "Timezone database is unavailable for this Python environment. "
             "Install tzdata in the active venv: "
-            r"'.venv_restreamer\Scripts\python.exe -m pip install tzdata'. "
+            f"'{python_executable} -m pip install tzdata'. "
             f"Missing zone: {name}"
         ) from error
 
@@ -149,8 +160,18 @@ def _log_llm_usage_reports(
     )
 
 class RestreamerApplication:
-    def __init__(self, *, logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        logger: logging.Logger | None = None,
+        telegram_chat_id_override: str | None = None,
+        progress_callback: Any = None,
+    ) -> None:
         self._logger: logging.Logger = logger or LOGGER
+        self._telegram_chat_id_override: str | None = _normalize_chat_id(
+            telegram_chat_id_override,
+        )
+        self._progress_callback: Any = progress_callback
 
     def run(self, argv: Sequence[str]) -> int:
         project_paths: ProjectPaths = get_project_paths()
@@ -166,6 +187,13 @@ class RestreamerApplication:
         self._configure_runtime(debug_enabled=debug_enabled)
 
         config: AppConfig = _load_config_from_env(logger=self._logger)
+        run_daily_cleanup(
+            logger=self._logger,
+            project_root=project_paths.project_root,
+            max_age_days=config.cleanup.max_age_days,
+            local_image_dir_template=config.paths.local_image_dir_template,
+            local_doc_dir_template=config.paths.local_doc_dir_template,
+        )
         llm_summary: LlmSummarySnapshot = build_llm_summary_snapshot(config)
         sheets_link_writeback_enabled: bool = sheets_link_writeback_enabled_from_env()
         strip_chapter_timestamps_enabled: bool = (
@@ -256,16 +284,46 @@ class RestreamerApplication:
     def _build_batch_runner(self, *, config: AppConfig) -> BatchRunner:
         metadata_fetcher: YtDlpYouTubeMetadataFetcher = YtDlpYouTubeMetadataFetcher()
         http_client: HttpClient = HttpClient()
+        effective_chat_id: str = (
+            self._telegram_chat_id_override
+            if self._telegram_chat_id_override is not None
+            else str(config.telegram.chat_id)
+        )
+        chat_id_source: str = (
+            "telegram_event"
+            if self._telegram_chat_id_override is not None
+            else "config.telegram.chat_id"
+        )
+        self._logger.info(
+            "telegram_publish_target_resolved chat_id=%s source=%s",
+            effective_chat_id,
+            chat_id_source,
+        )
         telegram_client: TelegramBotClient = TelegramBotClient(
             bot_token=config.telegram.bot_token,
-            chat_id=config.telegram.chat_id,
+            chat_id=effective_chat_id,
+            send_delay_seconds=config.telegram.send_delay_seconds,
+            max_retries=config.telegram.max_retries,
         )
+        self._logger.info(
+            "telegram_client_config send_delay_seconds=%.2f max_retries=%d",
+            config.telegram.send_delay_seconds,
+            config.telegram.max_retries,
+        )
+
+        def _on_chat_migrated(old_id: str, new_id: str) -> None:
+            handle_group_migration(
+                logger=self._logger,
+                old_chat_id=old_id,
+                new_chat_id=new_id,
+            )
+
+        telegram_client.set_migration_callback(_on_chat_migrated)
         name_builder: NamePathBuilder = NamePathBuilder(
             local_image_dir_template=config.paths.local_image_dir_template,
             local_doc_dir_template=config.paths.local_doc_dir_template,
             preview_name_template=config.templates.files_preview_name_template,
             doc_title_template=config.templates.files_doc_title_template,
-            language_codes=config.templates.files_language_codes,
             max_filename_stem=config.paths.preview_filename_max_stem,
         )
         return BatchRunner(
@@ -278,6 +336,7 @@ class RestreamerApplication:
             kiev_tz=_load_zoneinfo(config.timezones.kiev),
             cet_tz=_load_zoneinfo(config.timezones.cet),
             resolve_logger_name_meta=resolve_logger_name_meta,
+            progress_callback=self._progress_callback,
         )
 
     def _run_batch(

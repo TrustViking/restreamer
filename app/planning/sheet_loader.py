@@ -8,17 +8,11 @@ from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig
 from app.config.validators import now_filter_timezone
-from app.core.env_flags import (
-    sheets_autoexpand_range_from_env,
-    sheets_link_writeback_enabled_from_env,
-)
+from app.core.env_flags import sheets_link_writeback_enabled_from_env
 from app.core.models import LinkNormalizationCandidate, SheetRow
 from app.pipeline.runtime_services import BatchServices
 from app.planning import (
-    expand_sheet_range_to_af,
-    merge_semantics_from_env,
     sheet_name_from_range,
-    sheet_range_includes_merge_column,
 )
 
 
@@ -29,7 +23,6 @@ class BatchSheetState:
     sheets_link_writeback_enabled: bool
     link_normalization_candidates: List[LinkNormalizationCandidate]
     now_for_filter: datetime
-    merge_semantics: str
 
 
 def load_sheet_state(
@@ -42,17 +35,6 @@ def load_sheet_state(
 ) -> BatchSheetState:
     configured_range: str = config.google.sheets_range
     effective_range: str = configured_range
-    if not sheet_range_includes_merge_column(configured_range):
-        logger.warning(
-            "Sheets range %r does not include Merge column (E); merge settings will be ignored. Use A:F.",
-            configured_range,
-        )
-        if sheets_autoexpand_range_from_env():
-            effective_range = expand_sheet_range_to_af(configured_range)
-            logger.warning(
-                "STG_SHEETS_AUTOEXPAND_RANGE=1 -> using expanded range %r",
-                effective_range,
-            )
     logger.info(
         "run_id=%s Reading Google Sheets: spreadsheet=%s range=%s",
         run_id,
@@ -74,14 +56,11 @@ def load_sheet_state(
         config.processing.now_tz_mode,
         now_for_filter.isoformat(),
     )
-    merge_semantics: str = merge_semantics_from_env()
-    logger.info("merge_semantics=%s", merge_semantics)
     return BatchSheetState(
         rows=rows,
         sheet_name_for_writeback=sheet_name_from_range(effective_range),
         sheets_link_writeback_enabled=sheets_link_writeback_enabled_from_env(),
         link_normalization_candidates=[],
         now_for_filter=now_for_filter,
-        merge_semantics=merge_semantics,
     )
 

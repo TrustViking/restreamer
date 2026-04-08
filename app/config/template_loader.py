@@ -119,10 +119,6 @@ def load_templates_from_path(path: Path) -> AppTemplates:
     google_doc_bold_line_prefixes_raw: Any = must_get_template_object(
         payload, "google_doc.bold_line_prefixes"
     )
-    google_doc_language_headings_raw: Any = must_get_template_object(
-        payload, "google_doc.language_headings"
-    )
-    llm_language_names_raw: Any = must_get_template_object(payload, "llm.language_names")
     llm_merge_contracts_raw: Any = _get_optional_template_object(
         payload,
         "llm.merge_contracts",
@@ -133,22 +129,12 @@ def load_templates_from_path(path: Path) -> AppTemplates:
         "llm.merge_retry_reinforcements",
         default_value={},
     )
-    files_language_codes_raw: Any = must_get_template_object(
-        payload, "files.language_codes"
-    )
 
     google_doc_table_labels: dict[str, list[str]] = _normalize_table_labels(
         google_doc_table_labels_raw
     )
     google_doc_bold_line_prefixes: list[str] = _normalize_string_list(
         google_doc_bold_line_prefixes_raw
-    )
-    google_doc_language_headings: dict[str, str] = _normalize_string_mapping(
-        google_doc_language_headings_raw
-    )
-    llm_language_names: dict[str, str] = _normalize_string_mapping(llm_language_names_raw)
-    files_language_codes: dict[str, str] = _normalize_string_mapping(
-        files_language_codes_raw
     )
 
     if not isinstance(llm_merge_contracts_raw, dict):
@@ -171,10 +157,6 @@ def load_templates_from_path(path: Path) -> AppTemplates:
         google_doc_bold_line_prefixes_json: str = json.dumps(
             google_doc_bold_line_prefixes_raw, ensure_ascii=False
         )
-        google_doc_language_headings_json: str = json.dumps(
-            google_doc_language_headings_raw, ensure_ascii=False
-        )
-        llm_language_names_json: str = json.dumps(llm_language_names_raw, ensure_ascii=False)
         llm_merge_contracts_json: str = json.dumps(
             llm_merge_contracts_raw,
             ensure_ascii=False,
@@ -182,9 +164,6 @@ def load_templates_from_path(path: Path) -> AppTemplates:
         llm_merge_retry_reinforcements_json: str = json.dumps(
             llm_merge_retry_reinforcements_raw,
             ensure_ascii=False,
-        )
-        files_language_codes_json: str = json.dumps(
-            files_language_codes_raw, ensure_ascii=False
         )
     except Exception as error:
         raise RuntimeError(f"Templates JSON conversion failed: {error}") from error
@@ -195,8 +174,6 @@ def load_templates_from_path(path: Path) -> AppTemplates:
         google_doc_table_labels=google_doc_table_labels,
         google_doc_bold_line_prefixes_json=google_doc_bold_line_prefixes_json,
         google_doc_bold_line_prefixes=google_doc_bold_line_prefixes,
-        google_doc_language_headings_json=google_doc_language_headings_json,
-        google_doc_language_headings=google_doc_language_headings,
         telegram_header=must_get_template_value(payload, "telegram.header"),
         telegram_language_block=must_get_template_value(payload, "telegram.language_block"),
         telegram_language_merged_block=must_get_template_value(
@@ -216,8 +193,6 @@ def load_templates_from_path(path: Path) -> AppTemplates:
             payload, "llm.merge_title_description_prompt"
         ),
         llm_startup_ping_prompt=must_get_template_value(payload, "llm.startup_ping_prompt"),
-        llm_language_names_json=llm_language_names_json,
-        llm_language_names=llm_language_names,
         llm_merge_structural_rules=_get_optional_template_value(
             payload,
             "llm.merge_structural_rules",
@@ -231,8 +206,6 @@ def load_templates_from_path(path: Path) -> AppTemplates:
             payload, "files.preview_name_template"
         ),
         files_doc_title_template=must_get_template_value(payload, "files.doc_title_template"),
-        files_language_codes_json=files_language_codes_json,
-        files_language_codes=files_language_codes,
         common_no_description_text=must_get_template_value(
             payload, "common.no_description_text"
         ),

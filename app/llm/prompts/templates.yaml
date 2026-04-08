@@ -19,22 +19,12 @@ google_doc:
     uk: ["НАЗВА", "ОПИС", "ПРЕВ'Ю"]
     en: ["TITLE", "DESCRIPTION", "PREVIEW"]
     ru: ["НАЗВАНИЕ", "ОПИСАНИЕ", "ПРЕВЬЮ"]
-    other: ["TITLE", "DESCRIPTION", "PREVIEW"]
   bold_line_prefixes:
     - "Ежедневные стримы / Everyday streams"
     - "❇️ Эфир"
     - "❇️ Форма для ключей"
     - "При технических проблемах / In case of technical problems"
     - "❇️ Опис / Description / Описание"
-    - "UA - "
-    - "ENG - "
-    - "RU - "
-    - "OTHER - "
-  language_headings:
-    uk: "UA"
-    en: "ENG"
-    ru: "RU"
-    other: "OTHER"
 
 telegram:
   header: |
@@ -78,11 +68,6 @@ telegram:
     {language_flags}{language_name} на {date} в {time_kiev} по Киеву
 
 llm:
-  language_names:
-    uk: "Ukrainian"
-    en: "English"
-    ru: "Russian"
-    other: "the original language of sources"
   startup_ping_prompt: |
     You are a health-check responder for the LLM API.
     If you can read this prompt, return strict JSON only.
@@ -326,11 +311,6 @@ llm:
 files:
   doc_title_template: "{date}_{processing_mode}_Ежедневные стримы - Everyday streams{llm_models_segment}_{creation_stamp}"
   preview_name_template: "{index}_{language}_{title}"
-  language_codes:
-    uk: "UA"
-    en: "EN"
-    ru: "RU"
-    other: "OT"
 
 common:
   no_description_text: "(no description)"

@@ -77,11 +77,13 @@ def normalize_merge_description(
     description: str,
     language: str,
     source_texts: Sequence[str],
+    title: str = "",
 ) -> MergeQualityNormalizationResult:
     normalized_input: str = _normalize_text(description)
     if not normalized_input:
         diagnostics = build_diagnostics(
             description_text="",
+            title=title,
             language=language,
             block_spacing_ok=True,
             accent_overflow=False,
@@ -173,6 +175,7 @@ def normalize_merge_description(
 
     diagnostics = build_diagnostics(
         description_text=normalized_description,
+        title=title,
         language=language,
         block_spacing_ok=block_spacing_ok,
         accent_overflow=accent_overflow,
