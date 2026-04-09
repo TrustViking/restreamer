@@ -169,3 +169,15 @@ class MergedPublicationPayload:
     title_text: str
     description_text: str
     block_generation_mode: str = BLOCK_GENERATION_MODE_REAL_MERGE
+
+
+@dataclass(frozen=True)
+class SanitizedPublishBlock:
+    """Cached result of full publish sanitation for one language block.
+    Computed once after merge, consumed by both doc and telegram publishers."""
+
+    language: str
+    title_text: str
+    description_text: str
+    block_generation_mode: str = BLOCK_GENERATION_MODE_REAL_MERGE
+    is_blocked: bool = False

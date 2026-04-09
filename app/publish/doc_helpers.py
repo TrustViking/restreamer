@@ -11,6 +11,7 @@ from app.core.models import (
     MergedLanguageContent,
     MergedPublicationPayload,
     PlannedVideo,
+    SanitizedPublishBlock,
 )
 from app.planning import planned_video_block_language
 from app.publish.post_llm_sanitation import (
@@ -266,6 +267,7 @@ def _build_language_table_rows(
     time_display: Optional[str] = None,
     templates: Optional[AppTemplates] = None,
     artifact_status: str = "none",
+    sanitized_block: Optional[SanitizedPublishBlock] = None,
 ) -> List[Tuple[str, bool]]:
     if templates is None:
         raise RuntimeError("Templates are required for language table labels.")
@@ -285,13 +287,30 @@ def _build_language_table_rows(
     if time_display:
         heading = f"{heading} - {time_display}"
     merged_payload: Optional[MergedPublicationPayload] = None
-    if merged_content is not None:
+    if sanitized_block is not None and not sanitized_block.is_blocked:
+        # Use the cached sanitation result - no re-computation
+        merged_payload = MergedPublicationPayload(
+            title_text=sanitized_block.title_text,
+            description_text=sanitized_block.description_text,
+            block_generation_mode=sanitized_block.block_generation_mode,
+        )
+    elif merged_content is not None:
         merged_payload = _build_guarded_merged_payload(
             target="doc",
             videos=videos,
             merged_content=merged_content,
             merge_attempt=merge_attempt,
             use_audit_text=True,
+        )
+    if sanitized_block is not None and not sanitized_block.is_blocked:
+        LOGGER.info(
+            "publish_sanitation_cache_hit lang=%s target=doc",
+            language,
+        )
+    elif merged_content is not None and merged_payload is not None:
+        LOGGER.info(
+            "publish_sanitation_cache_miss lang=%s target=doc reason=fallback_to_live_sanitation",
+            language,
         )
     heading_merged_content: Optional[MergedLanguageContent] = (
         merged_content if merged_payload is not None else None

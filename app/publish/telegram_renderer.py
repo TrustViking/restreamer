@@ -9,12 +9,13 @@ from app.core.language_display import language_display_name, language_to_flag_em
 from app.core.models import (
     LanguageMergeAttempt,
     MergedLanguageContent,
-    MergedPublicationPayload,
     PlannedVideo,
+    SanitizedPublishBlock,
     VideoMetadata,
 )
 from app.planning import planned_video_block_language
 from app.publish.post_llm_sanitation import (
+    MergedPublicationPayload,
     build_sanitized_merged_publication_payload,
     log_safe_merge_attempt_fallback,
     should_suppress_raw_merge_attempt_publish,
@@ -235,18 +236,37 @@ def build_telegram_language_merged_block(
     merge_attempt: Optional[LanguageMergeAttempt],
     config: AppConfig,
     templates: Optional[AppTemplates],
+    sanitized_block: Optional[SanitizedPublishBlock] = None,
 ) -> str:
     if not videos:
         raise ValueError("videos must not be empty for merged telegram block")
     times_text: str = ", ".join(
         sorted({video.scheduled_at_kiev.strftime("%H:%M") for video in videos})
     )
-    merged_payload: Optional[MergedPublicationPayload] = _build_merged_publication_payload(
-        videos=videos,
-        merged_content=merged_content,
-        merge_attempt=merge_attempt,
-        use_audit_text=config.telegram.use_audit,
-    )
+    merged_payload: Optional[MergedPublicationPayload] = None
+    if sanitized_block is not None and not sanitized_block.is_blocked:
+        merged_payload = MergedPublicationPayload(
+            title_text=sanitized_block.title_text,
+            description_text=sanitized_block.description_text,
+            block_generation_mode=sanitized_block.block_generation_mode,
+        )
+    else:
+        merged_payload = _build_merged_publication_payload(
+            videos=videos,
+            merged_content=merged_content,
+            merge_attempt=merge_attempt,
+            use_audit_text=config.telegram.use_audit,
+        )
+    if sanitized_block is not None and not sanitized_block.is_blocked:
+        LOGGER.info(
+            "publish_sanitation_cache_hit lang=%s target=telegram",
+            language,
+        )
+    else:
+        LOGGER.info(
+            "publish_sanitation_cache_miss lang=%s target=telegram reason=fallback_to_live_sanitation",
+            language,
+        )
     if merged_payload is None:
         return build_telegram_language_nomerge_block(
             language=language,
@@ -370,4 +390,3 @@ def build_single_mode_message(
             "url": _escape_html(metadata.url),
         },
     )
-

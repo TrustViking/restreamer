@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, TYPE_CHECKING
 
 from app.config.settings import AppConfig, AppTemplates
 from app.core.language_display import language_to_flag_emoji
-from app.core.models import PlannedVideo
+from app.core.models import PlannedVideo, SanitizedPublishBlock
 from app.planning import language_sort_key
 from app.publish.telegram_renderer import (
     build_telegram_header_text,
@@ -114,6 +114,7 @@ def send_telegram_date_batch(
         grouped_for_digest.setdefault(language, []).extend(items)
         merged_for_language = slot.merged_content_by_language.get(language)
         merge_attempt = slot.merge_audit_by_language.get(language)
+        cached_block: Optional[SanitizedPublishBlock] = slot.sanitized_blocks.get(language)
         logger.info(
             "telegram_send slot_key=%s language=%s item_count=%d processing_mode=%s",
             slot.slot_key,
@@ -129,6 +130,7 @@ def send_telegram_date_batch(
                 merge_attempt=merge_attempt,
                 config=config,
                 templates=templates,
+                sanitized_block=cached_block,
             )
             if batch.dry_run:
                 logger.info(
@@ -291,4 +293,3 @@ def send_telegram_date_batch(
         logger.info("DRY RUN Telegram date separator end:\n%s", date_separator)
     else:
         telegram_client.send_text(date_separator)
-

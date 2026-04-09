@@ -9,6 +9,7 @@ from app.core.models import (
     LanguageMergeAttempt,
     MergedLanguageContent,
     PlannedVideo,
+    SanitizedPublishBlock,
     VideoMetadata,
 )
 from app.google import GoogleDocsClient
@@ -43,6 +44,7 @@ class LanguageTableRowsBuilder(Protocol):
         time_display: Optional[str],
         templates: Optional[AppTemplates],
         artifact_status: str,
+        sanitized_block: Optional[SanitizedPublishBlock] = None,
     ) -> List[Tuple[str, bool]]:
         ...
 
@@ -80,6 +82,7 @@ class DocsTableWriter:
         time_display: Optional[str] = None,
         table_insert_index: Optional[int] = None,
         artifact_status: str = "none",
+        sanitized_block: Optional[SanitizedPublishBlock] = None,
         *,
         templates: AppTemplates,
         build_language_table_rows: LanguageTableRowsBuilder,
@@ -92,6 +95,7 @@ class DocsTableWriter:
             time_display=time_display,
             templates=templates,
             artifact_status=artifact_status,
+            sanitized_block=sanitized_block,
         )
         rows: int = len(row_values)
         columns: int = 1

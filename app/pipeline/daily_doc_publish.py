@@ -15,6 +15,7 @@ from app.core.models import (
     LanguageMergeAttempt,
     MergedLanguageContent,
     PlannedVideo,
+    SanitizedPublishBlock,
 )
 from app.google import GoogleDocsClient, GoogleDriveClient
 from app.llm.models.model_identity import resolve_effective_llm_model
@@ -486,6 +487,7 @@ def publish_daily_document(
                     continue
                 merged_content = slot.merged_content_by_language.get(language)
                 merge_attempt = slot.merge_audit_by_language.get(language)
+                cached_block: Optional[SanitizedPublishBlock] = slot.sanitized_blocks.get(language)
                 _log_merge_block_publish_truth(
                     logger=logger,
                     branch_label=branch_label,
@@ -506,6 +508,7 @@ def publish_daily_document(
                     merge_attempt=merge_attempt,
                     time_display=time_display,
                     artifact_status=slot.merge_artifact_status,
+                    sanitized_block=cached_block,
                 )
                 first_table = False
         except Exception as error:

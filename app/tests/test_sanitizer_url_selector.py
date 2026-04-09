@@ -242,3 +242,80 @@ def test_determine_language_no_metadata_returns_none(mock_fetcher_cls: MagicMock
     mock_fetcher_cls.return_value.fetch.return_value = mock_metadata
     result = _determine_recommended_video_language("https://youtu.be/test123test")
     assert result is None
+
+
+class TestRecommendedMaterialsFallback:
+    """Verify that when zero candidates pass the main threshold,
+    a candidate with source_hits >= 2 is selected via fallback."""
+
+    def test_fallback_selects_multi_source_candidate(self) -> None:
+        """RU-like scenario: 3 candidates, all semantic_overlap=0,
+        one with source_hits=2 should be selected via fallback."""
+
+        def _make_video(desc: str, lang: str = "ru") -> MagicMock:
+            video: MagicMock = MagicMock()
+            video.metadata = MagicMock()
+            video.metadata.description = desc
+            video.metadata.title = "Title"
+            video.metadata.language = lang
+            video.normalized_link = "https://youtu.be/XXXXXXXXXXX"
+            return video
+
+        video1: MagicMock = _make_video(
+            "Content alpha https://youtu.be/AAAAAAAAAAA some text https://youtu.be/CCCCCCCCCCC"
+        )
+        video2: MagicMock = _make_video(
+            "Content beta https://youtu.be/AAAAAAAAAAA other text https://youtu.be/DDDDDDDDDDD"
+        )
+
+        with patch(
+            "app.publish.sanitizers.url_selector._determine_recommended_video_language",
+            return_value="ru",
+        ):
+            selected, raw_found, deduped, repeated = (
+                AuthoritativeUrlSelector.select_recommended_youtube(
+                    source_videos=[video1, video2],
+                    summary_text="unrelated summary without matching tokens",
+                    target_language="ru",
+                    source_count=2,
+                )
+            )
+
+        assert raw_found >= 3
+        assert deduped >= 3
+        assert repeated >= 1
+        assert len(selected) == 1, f"Expected 1 fallback selection, got {len(selected)}"
+        assert "AAAAAAAAAAA" in selected[0], "Should select the multi-source candidate"
+
+    def test_no_fallback_when_main_threshold_passes(self) -> None:
+        """EN-like scenario: candidates have semantic overlap, main threshold works.
+        Fallback should NOT override the main selection."""
+
+        def _make_video(desc: str) -> MagicMock:
+            video: MagicMock = MagicMock()
+            video.metadata = MagicMock()
+            video.metadata.description = desc
+            video.metadata.title = "Storms weather cyclone"
+            video.metadata.language = "en"
+            video.normalized_link = "https://youtu.be/XXXXXXXXXXX"
+            return video
+
+        video1: MagicMock = _make_video(
+            "Storms weather cyclone https://youtu.be/EEEEEEEEEEE discussion"
+        )
+        video2: MagicMock = _make_video(
+            "Storms weather cyclone https://youtu.be/FFFFFFFFFFF analysis"
+        )
+
+        with patch(
+            "app.publish.sanitizers.url_selector._determine_recommended_video_language",
+            return_value="en",
+        ):
+            selected, _, _, _ = AuthoritativeUrlSelector.select_recommended_youtube(
+                source_videos=[video1, video2],
+                summary_text="Storms weather cyclone severe impact",
+                target_language="en",
+                source_count=2,
+            )
+
+        assert len(selected) >= 1

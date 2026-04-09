@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -14,6 +14,7 @@ from app.core.models import (
     LanguageMergeAttempt,
     MergedLanguageContent,
     PlannedVideo,
+    SanitizedPublishBlock,
 )
 from app.core.text_utils import normalize_multiline_text
 from app.ingest.youtube_metadata import normalize_youtube_video_url
@@ -24,6 +25,10 @@ from app.llm.merges.merge_service import (
 )
 from app.llm.models.model_identity import resolve_effective_llm_model
 from app.planning import language_sort_key, planned_video_block_language
+from app.publish.post_llm_sanitation import (
+    MergedPublicationPayload,
+    build_sanitized_merged_publication_payload,
+)
 from app.publish.shared_helpers import no_description_text as _publish_no_description_text
 from app.publish.header_context import build_header_context
 from app.observability.runtime_analytics import (
@@ -51,6 +56,7 @@ class SlotProcessResult:
     merge_artifact_status: MergeArtifactStatus = "none"
     fallback_merge_targets: Tuple[str, ...] = ()
     merge_skipped_languages: Tuple[str, ...] = ()
+    sanitized_blocks: Dict[str, SanitizedPublishBlock] = field(default_factory=dict)
     language: str = "unknown"
 
 
@@ -447,6 +453,45 @@ def process_slot(
         contacts=config.google.contacts,
         cet_tz=cet_tz,
     )
+    sanitized_blocks: Dict[str, SanitizedPublishBlock] = {}
+    for lang, merged_content_value in merged_content_by_language.items():
+        lang_videos: List[PlannedVideo] = sorted(
+            language_groups.get(lang, []),
+            key=lambda item: (item.scheduled_at_kiev.time(), item.row_number),
+        )
+        merge_attempt_for_lang: Optional[LanguageMergeAttempt] = merge_audit_by_language.get(lang)
+        try:
+            payload: MergedPublicationPayload = build_sanitized_merged_publication_payload(
+                language=lang,
+                merged_content=merged_content_value,
+                merge_attempt=merge_attempt_for_lang,
+                use_audit_text=True,
+                source_videos=lang_videos,
+            )
+            is_blocked: bool = bool(
+                getattr(payload, "has_publish_stage_duplicate", False)
+                or getattr(payload, "has_publish_stage_opener_cta", False)
+            )
+            sanitized_blocks[lang] = SanitizedPublishBlock(
+                language=lang,
+                title_text=payload.title_text,
+                description_text=payload.description_text,
+                block_generation_mode=payload.block_generation_mode,
+                is_blocked=is_blocked,
+            )
+            logger.info(
+                "sanitized_block_cached language=%s is_blocked=%s title_chars=%d description_chars=%d",
+                lang,
+                "yes" if is_blocked else "no",
+                len(payload.title_text),
+                len(payload.description_text),
+            )
+        except Exception as sanitation_error:
+            logger.warning(
+                "sanitized_block_failed language=%s error=%s",
+                lang,
+                sanitation_error,
+            )
     logger.info(
         "[%s] slot_process_finish date_key=%s slot_key=%s video_count=%d merged_languages=%s",
         branch_label,
@@ -496,6 +541,7 @@ def process_slot(
         merge_artifact_status=merge_artifact_status,
         fallback_merge_targets=tuple(fallback_merge_targets),
         merge_skipped_languages=tuple(merge_skipped_languages_list) if llm_merge_enabled else (),
+        sanitized_blocks=sanitized_blocks,
         language=slot_language,
     )
 

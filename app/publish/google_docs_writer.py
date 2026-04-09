@@ -8,6 +8,7 @@ from app.core.models import (
     LanguageMergeAttempt,
     MergedLanguageContent,
     PlannedVideo,
+    SanitizedPublishBlock,
     VideoMetadata,
 )
 from app.google import GoogleDocsClient
@@ -177,6 +178,7 @@ class GoogleDocsReportWriter:
         time_display: Optional[str] = None,
         table_insert_index: Optional[int] = None,
         artifact_status: str = "none",
+        sanitized_block: Optional[SanitizedPublishBlock] = None,
     ) -> None:
         self._table_writer.write_language_table(
             document_id=document_id,
@@ -189,6 +191,7 @@ class GoogleDocsReportWriter:
             artifact_status=artifact_status,
             templates=self._templates,
             build_language_table_rows=_build_language_table_rows,
+            sanitized_block=sanitized_block,
         )
 
     def write_video_table(

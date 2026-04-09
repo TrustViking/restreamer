@@ -329,6 +329,17 @@ class AuthoritativeUrlSelector:
             selected_urls.append(candidate.url)
             if len(selected_urls) >= 2:
                 break
+        if not selected_urls:
+            for candidate in language_safe_candidates:
+                if candidate.source_hits >= 2:
+                    selected_urls.append(candidate.url)
+                    LOGGER.info(
+                        "recommended_materials_fallback_applied url=%s source_hits=%d semantic_overlap=%d reason=no_candidates_passed_threshold",
+                        candidate.url,
+                        candidate.source_hits,
+                        candidate.semantic_overlap_count,
+                    )
+                    break
         LOGGER.info(
             "recommended_materials_candidates_built summary_tokens=%d raw_youtube_urls_found=%d deduped_candidates=%d repeated_in_multiple_sources=%d selected=%d selection_mode=deterministic_source_hits_then_semantic_overlap",
             len(summary_tokens),
