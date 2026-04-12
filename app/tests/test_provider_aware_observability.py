@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import unittest
 from contextlib import ExitStack
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -16,10 +15,7 @@ from app.application.application import (
 )
 from app.application import application as application_module
 from app.llm.llm_client import reset_run_local_openai_usage
-from app.observability.openai_usage import (
-    log_openai_limits_and_usage,
-    log_run_local_openai_usage,
-)
+from app.observability.openai_usage import log_run_local_openai_usage
 from app.bootstrap.run_context import RunContext, StartupContext
 from app.observability.runtime_analytics import log_run_context
 from app.observability.startup_health import run_startup_health_checks
@@ -32,21 +28,18 @@ class ProviderAwareUsageHooksTests(unittest.TestCase):
         logger = logging.getLogger("provider-aware-openai-usage")
         with patch("app.application.application.reset_run_local_openai_usage") as reset_mock, patch(
             "app.application.application.log_run_local_openai_usage"
-        ) as local_usage_mock, patch(
-            "app.application.application.log_openai_limits_and_usage"
-        ) as org_usage_mock, self.assertLogs(
+        ) as local_usage_mock, self.assertLogs(
             logger, level="INFO"
         ) as captured:
             llm_summary = SimpleNamespace(
                 provider="openai",
                 model="gpt-5.2",
-                usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                usage_reporting_mode="openai_run_local",
             )
             _apply_llm_usage_reset(logger=logger, llm_summary=llm_summary)
             _log_llm_usage_reports(logger=logger, llm_summary=llm_summary)
         self.assertEqual(1, reset_mock.call_count)
         self.assertEqual(1, local_usage_mock.call_count)
-        self.assertEqual(1, org_usage_mock.call_count)
         text: str = "\n".join(captured.output)
         self.assertIn("llm_usage_reset_applied provider=openai", text)
         self.assertIn("llm_usage_report_start provider=openai effective_model=gpt-5.2", text)
@@ -56,21 +49,18 @@ class ProviderAwareUsageHooksTests(unittest.TestCase):
         logger = logging.getLogger("provider-aware-claude-usage")
         with patch("app.application.application.reset_run_local_openai_usage") as reset_mock, patch(
             "app.application.application.log_run_local_openai_usage"
-        ) as local_usage_mock, patch(
-            "app.application.application.log_openai_limits_and_usage"
-        ) as org_usage_mock, self.assertLogs(
+        ) as local_usage_mock, self.assertLogs(
             logger, level="INFO"
         ) as captured:
             llm_summary = SimpleNamespace(
                 provider="claude",
                 model="claude-opus-4-6",
-                usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                usage_reporting_mode="openai_run_local",
             )
             _apply_llm_usage_reset(logger=logger, llm_summary=llm_summary)
             _log_llm_usage_reports(logger=logger, llm_summary=llm_summary)
         self.assertEqual(0, reset_mock.call_count)
         self.assertEqual(1, local_usage_mock.call_count)
-        self.assertEqual(1, org_usage_mock.call_count)
         text: str = "\n".join(captured.output)
         self.assertIn("llm_usage_reset_skipped provider=claude reason=provider_not_openai", text)
         self.assertIn("llm_usage_report_start provider=claude effective_model=claude-opus-4-6", text)
@@ -89,32 +79,6 @@ class ProviderAwareUsageHooksTests(unittest.TestCase):
         self.assertIn("scope=run_local", text)
         self.assertIn("source_of_truth_for_run=yes", text)
         self.assertIn("effective_model=gpt-5.2", text)
-
-    def test_org_usage_log_is_marked_non_authoritative_for_current_run_model(self) -> None:
-        logger = logging.getLogger("provider-aware-org-usage")
-        with patch(
-            "app.observability.openai_usage.fetch_usage_and_costs_summary",
-            return_value={
-                "total_input_tokens": 10,
-                "total_output_tokens": 5,
-                "total_requests": 2,
-                "per_model": {"gpt-5.1": {"input": 10, "output": 5, "requests": 2, "tokens": 15}},
-                "spent_usd_month": 1.25,
-            },
-        ), patch.dict(os.environ, {"OPENAI_ADMIN_KEY": "admin-key", "STG_TZ": "UTC"}, clear=False), self.assertLogs(
-            logger,
-            level="INFO",
-        ) as captured:
-            log_openai_limits_and_usage(
-                logger,
-                summarize_error=lambda error: str(error),
-                effective_model="gpt-5.2",
-            )
-        text: str = "\n".join(captured.output)
-        self.assertIn("OPENAI ORG USAGE SNAPSHOT", text)
-        self.assertIn("source_of_truth_for_run=no", text)
-        self.assertIn("current_run_effective_model=gpt-5.2", text)
-
 
 class ProviderAwareSummaryTests(unittest.TestCase):
     def _run_context(
@@ -155,6 +119,8 @@ class ProviderAwareSummaryTests(unittest.TestCase):
             config_processing_mode_raw="audit",
             paths=ProjectPaths(
                 project_root=Path("."),
+                logs_dir=Path("logs"),
+                state_dir=Path("state"),
                 entrypoint_path=Path("restreamer.py"),
                 runtime_config_path=Path("app_config.yaml"),
                 runtime_config_example_path=Path("app_config.example.yaml"),
@@ -203,12 +169,12 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 SimpleNamespace(
                     provider="openai",
                     model="gpt-5.1",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    usage_reporting_mode="openai_run_local",
                 ),
                 self._run_context(
                     provider="openai",
                     model="gpt-5.1",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    usage_reporting_mode="openai_run_local",
                 ),
             )
             log_run_context(
@@ -216,14 +182,14 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 self._run_context(
                     provider="openai",
                     model="gpt-5.1",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    usage_reporting_mode="openai_run_local",
                 ),
             )
         text: str = "\n".join(captured.output)
         self.assertIn("llm_provider=openai", text)
         self.assertIn("llm_model_effective=gpt-5.1", text)
         self.assertIn("llm_model_configured=gpt-5.1", text)
-        self.assertIn("llm_usage_reporting_mode=openai_run_local+openai_org_snapshot", text)
+        self.assertIn("llm_usage_reporting_mode=openai_run_local", text)
 
     def test_non_openai_provider_summary_fields_show_current_values(self) -> None:
         logger = logging.getLogger("provider-aware-claude-summary")
@@ -235,12 +201,12 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 SimpleNamespace(
                     provider="claude",
                     model="claude-opus-4-6",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    usage_reporting_mode="openai_run_local",
                 ),
                 self._run_context(
                     provider="claude",
                     model="claude-opus-4-6",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    usage_reporting_mode="openai_run_local",
                 ),
             )
             log_startup_summary(
@@ -249,14 +215,14 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 SimpleNamespace(
                     provider="claude",
                     model="claude-opus-4-6",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    usage_reporting_mode="openai_run_local",
                 ),
             )
         text: str = "\n".join(captured.output)
         self.assertIn("llm_provider=claude", text)
         self.assertIn("llm_model_effective=claude-opus-4-6", text)
         self.assertIn("llm_model_configured=claude-opus-4-6", text)
-        self.assertIn("llm_usage_reporting_mode=openai_run_local+openai_org_snapshot", text)
+        self.assertIn("llm_usage_reporting_mode=openai_run_local", text)
         self.assertIn("resolved_audit_mode=audit branches=nomerge,merge", text)
 
     def test_startup_health_logs_current_merge_policy(self) -> None:
@@ -297,7 +263,7 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 llm_summary=SimpleNamespace(
                     provider="claude",
                     model="claude-opus-4-6",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    usage_reporting_mode="openai_run_local",
                 ),
                 services=services,
                 telegram_client=telegram_client,
@@ -308,7 +274,7 @@ class ProviderAwareSummaryTests(unittest.TestCase):
             )
         text: str = "\n".join(captured.output)
         self.assertIn("LLM policy: provider=claude effective_model=claude-opus-4-6", text)
-        self.assertIn("usage_reporting_mode=openai_run_local+openai_org_snapshot", text)
+        self.assertIn("usage_reporting_mode=openai_run_local", text)
         self.assertIn("LLM selection: audit branch execution=merge", text)
         self.assertIn(
             "LLM usage reporting note: scope=organization_aggregate source_of_truth_for_run=no current_run_effective_model=claude-opus-4-6",
@@ -320,6 +286,7 @@ class EntrypointRegressionTests(unittest.TestCase):
     def _config(self) -> SimpleNamespace:
         return SimpleNamespace(
             processing=SimpleNamespace(mode="audit"),
+            cleanup=SimpleNamespace(max_age_days=7),
             google=SimpleNamespace(
                 doc_share_mode="anyone_writer",
                 enabled=False,
@@ -328,7 +295,10 @@ class EntrypointRegressionTests(unittest.TestCase):
             ),
             telegram=SimpleNamespace(enabled=False),
             llm=SimpleNamespace(provider="openai"),
-            paths=SimpleNamespace(local_doc_dir_template="D:\\docs\\{date}"),
+            paths=SimpleNamespace(
+                local_doc_dir_template="D:\\docs\\{date}",
+                local_image_dir_template="D:\\images\\{date}",
+            ),
             timezones=SimpleNamespace(kiev="Europe/Kyiv", cet="Europe/Berlin"),
         )
 
@@ -336,7 +306,7 @@ class EntrypointRegressionTests(unittest.TestCase):
         return SimpleNamespace(
             provider="openai",
             model="gpt-5.1",
-            usage_reporting_mode="openai_run_local+openai_org_snapshot",
+            usage_reporting_mode="openai_run_local",
         )
 
     def _run_main(self) -> tuple[int, MagicMock, MagicMock, MagicMock]:

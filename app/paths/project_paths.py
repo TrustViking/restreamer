@@ -11,6 +11,8 @@ from app.paths._root import PROJECT_ROOT
 @dataclass(frozen=True)
 class ProjectPaths:
     project_root: Path
+    logs_dir: Path
+    state_dir: Path
     entrypoint_path: Path
     runtime_config_path: Path
     runtime_config_example_path: Path
@@ -54,6 +56,8 @@ def get_project_paths() -> ProjectPaths:
 
     return ProjectPaths(
         project_root=project_root,
+        logs_dir=project_root / "logs",
+        state_dir=project_root / "state",
         entrypoint_path=entrypoint_path,
         runtime_config_path=runtime_config_path,
         runtime_config_example_path=runtime_config_example_path,

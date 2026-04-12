@@ -13,6 +13,7 @@ from app.core.models import (
     VideoMetadata,
 )
 from app.google import GoogleDocsClient
+from app.publish.inline_formatting import parse_inline_bold, strip_bold_markers
 from app.publish.shared_helpers import no_description_text as _no_description_text
 
 from .docs_request_builder import DocsRequestBuilder
@@ -127,17 +128,21 @@ class DocsTableWriter:
             table_snapshot=table_snapshot,
         )
 
+        clean_row_values: List[Tuple[str, bool]] = [
+            (strip_bold_markers(text), bold) for text, bold in row_values
+        ]
+
         self._apply_language_table_visual_style(
             document_id=document_id,
             rows=rows,
             columns=columns,
-            row_values=row_values,
+            row_values=clean_row_values,
         )
         self._apply_language_table_content_style(
             document_id=document_id,
             rows=rows,
             columns=columns,
-            row_values=row_values,
+            row_values=clean_row_values,
         )
         self._preview_inserter.insert_previews(
             document_id=document_id,
@@ -368,14 +373,17 @@ class DocsTableWriter:
         active_snapshot: TableSnapshot = table_snapshot
         for row_index in range(rows - 1, -1, -1):
             text, is_bold = row_values[row_index]
+            clean_text: str = strip_bold_markers(text)
+            segments: List[Tuple[str, bool]] = parse_inline_bold(text)
             active_snapshot = self._insert_language_table_row_text(
                 document_id=document_id,
                 language=language,
                 row_index=row_index,
                 rows=rows,
                 columns=columns,
-                text=text,
+                text=clean_text,
                 is_bold=is_bold,
+                bold_segments=segments,
                 rows_filled_before=rows_filled,
                 table_snapshot=active_snapshot,
             )
@@ -391,6 +399,7 @@ class DocsTableWriter:
         columns: int,
         text: str,
         is_bold: bool,
+        bold_segments: Optional[List[Tuple[str, bool]]],
         rows_filled_before: int,
         table_snapshot: TableSnapshot,
     ) -> TableSnapshot:
@@ -429,14 +438,27 @@ class DocsTableWriter:
                     "yes" if use_plus_one else "no",
                     rows_filled_before,
                 )
-                self._docs_client.batch_update(
-                    document_id=document_id,
-                    requests_payload=self._request_builder.build_insert_and_style_requests(
-                        index=effective_index,
-                        text=text_to_insert,
-                        bold=is_bold,
-                    ),
-                )
+                if bold_segments is not None and any(
+                    seg_bold for _, seg_bold in bold_segments
+                ):
+                    self._docs_client.batch_update(
+                        document_id=document_id,
+                        requests_payload=self._request_builder.build_insert_and_style_rich_requests(
+                            index=effective_index,
+                            text=text_to_insert.rstrip("\n"),
+                            base_bold=is_bold,
+                            segments=bold_segments,
+                        ),
+                    )
+                else:
+                    self._docs_client.batch_update(
+                        document_id=document_id,
+                        requests_payload=self._request_builder.build_insert_and_style_requests(
+                            index=effective_index,
+                            text=text_to_insert,
+                            bold=is_bold,
+                        ),
+                    )
                 LOGGER.debug(
                     "language_table_fill_succeeded doc_id=%s lang=%s table_index=%d row_index=%d column_index=%d attempt=%s insert_index=%d rows_filled_after=%d",
                     document_id,

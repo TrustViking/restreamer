@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Optional
 
 _MARKER_FILENAME: str = ".last_cleanup"
-_PROTECTED_LOG_FILENAMES: frozenset[str] = frozenset({"bot_known_groups.json"})
 
 
 def _should_run_cleanup(marker_path: Path) -> bool:
@@ -28,6 +27,28 @@ def _touch_marker(marker_path: Path) -> None:
         f"Last cleanup: {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
         encoding="utf-8",
     )
+
+
+def _migrate_legacy_cleanup_marker(*, project_root: Path, logger: logging.Logger) -> Path:
+    marker_path: Path = project_root / "state" / _MARKER_FILENAME
+    legacy_marker_path: Path = project_root / "logs" / _MARKER_FILENAME
+    if legacy_marker_path.exists() and not marker_path.exists():
+        try:
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_marker_path.replace(marker_path)
+            logger.debug(
+                "cleanup: migrated legacy marker from %s to %s",
+                legacy_marker_path,
+                marker_path,
+            )
+        except OSError as error:
+            logger.debug(
+                "cleanup: failed to migrate legacy marker from %s to %s: %s",
+                legacy_marker_path,
+                marker_path,
+                error,
+            )
+    return marker_path
 
 
 def _resolve_template_base(template: str, *, project_root: Path) -> Optional[Path]:
@@ -102,7 +123,10 @@ def run_daily_cleanup(
     local_doc_dir_template: Optional[str],
 ) -> None:
     """Run cleanup of stale files, at most once per 24 hours."""
-    marker_path: Path = project_root / "logs" / _MARKER_FILENAME
+    marker_path: Path = _migrate_legacy_cleanup_marker(
+        project_root=project_root,
+        logger=logger,
+    )
     if not _should_run_cleanup(marker_path):
         logger.debug("cleanup: skipped (already ran within 24h)")
         return
@@ -116,7 +140,6 @@ def run_daily_cleanup(
         logs_dir,
         max_age_seconds=max_age_seconds,
         logger=logger,
-        protected_filenames=_PROTECTED_LOG_FILENAMES,
     )
 
     doc_base: Optional[Path] = _resolve_template_base(

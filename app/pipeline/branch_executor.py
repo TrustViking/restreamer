@@ -42,6 +42,7 @@ from app.telegram.bot_client import TelegramBotClient
 from .daily_doc_publish import publish_daily_document
 from .daily_telegram_publish import publish_daily_telegram
 from .debug_artifacts import DebugArtifactWriter
+from .operator_notifier import OperatorNotifier
 from .runtime_services import BatchServices
 from .slot_processing import SlotProcessResult, process_slot, resolve_merge_artifact_status
 
@@ -156,30 +157,16 @@ class BranchExecutor:
         kiev_tz: ZoneInfo,
         cet_tz: ZoneInfo,
         debug_artifact_writer: DebugArtifactWriter,
+        notifier: OperatorNotifier,
     ) -> None:
-        self._logger = logger
-        self._config = config
-        self._telegram_client = telegram_client
-        self._name_builder = name_builder
-        self._kiev_tz = kiev_tz
-        self._cet_tz = cet_tz
-        self._debug_artifact_writer = debug_artifact_writer
-
-    def _send_runtime_stage_message(
-        self,
-        *,
-        text: str,
-        dry_run: bool,
-    ) -> None:
-        if dry_run:
-            self._logger.info("DRY RUN stage message:\n%s", text)
-            return
-        if not self._config.telegram.enabled:
-            return
-        try:
-            self._telegram_client.send_text(text)
-        except Exception as error:
-            self._logger.warning("stage_message_send_failed error=%s", error)
+        self._logger: logging.Logger = logger
+        self._config: AppConfig = config
+        self._telegram_client: TelegramBotClient = telegram_client
+        self._name_builder: NamePathBuilder = name_builder
+        self._kiev_tz: ZoneInfo = kiev_tz
+        self._cet_tz: ZoneInfo = cet_tz
+        self._debug_artifact_writer: DebugArtifactWriter = debug_artifact_writer
+        self._notifier: OperatorNotifier = notifier
 
     def execute(
         self,
@@ -196,18 +183,16 @@ class BranchExecutor:
     ) -> None:
         slot_processing_started_at: float = time.perf_counter()
         slots_by_time_and_language: Dict[Tuple[str, str], List[PlannedVideo]] = (
-            self._group_date_videos_by_time_and_language(
-            date_videos=date_videos
-        )
+            self._group_date_videos_by_time_and_language(date_videos=date_videos)
         )
         if stage_count > 1 and stage_index > 1:
-            self._send_runtime_stage_message(
+            self._notifier.emit(
                 text=f"⏭ Переход к этапу {branch.name}",
-                dry_run=dry_run,
+                to_telegram=not dry_run,
             )
-        self._send_runtime_stage_message(
+        self._notifier.emit(
             text=f"▶️ Этап {stage_index}/{stage_count}: {branch.name}, дата {format_date_key_for_display(date_key)}",
-            dry_run=dry_run,
+            to_telegram=not dry_run,
         )
         self._logger.info(
             "[%s] Date branch started: %s slots=%d items=%d",
@@ -241,7 +226,21 @@ class BranchExecutor:
             slots_by_time_and_language.keys(),
             key=lambda key: (key[0], language_sort_key(key[1])),
         )
-        for slot_time_key, slot_language in ordered_slot_keys:
+        slot_total: int = len(ordered_slot_keys)
+        for slot_index, (slot_time_key, slot_language) in enumerate(
+            ordered_slot_keys,
+            start=1,
+        ):
+            slot_video_count: int = len(
+                slots_by_time_and_language[(slot_time_key, slot_language)]
+            )
+            self._notifier.emit(
+                (
+                    f"⏳ Слот {slot_index}/{slot_total} "
+                    f"{slot_time_key} {slot_language}: обработка {slot_video_count} видео"
+                ),
+                to_telegram=not dry_run,
+            )
             try:
                 processed_slot_result = process_slot(
                     logger=self._logger,
@@ -274,6 +273,13 @@ class BranchExecutor:
                         model_name=merge_attempt.model_name,
                     )
             slot_results.append(processed_slot_result)
+            self._notifier.emit(
+                (
+                    f"✅ Слот {slot_index}/{slot_total} "
+                    f"{slot_time_key} {slot_language}: готов"
+                ),
+                to_telegram=not dry_run,
+            )
         slot_processing_ms: int = int(round((time.perf_counter() - slot_processing_started_at) * 1000.0))
         record_stage_duration(stage_name="slot_processing", elapsed_ms=slot_processing_ms)
         log_stage_timing(
@@ -372,22 +378,16 @@ class BranchExecutor:
             elif publish_decision.decision_reason == "no_data":
                 merge_status_text = f"ℹ️ Этап merge, дата {format_date_key_for_display(date_key)}: нет данных для объединения."
         if publish_decision.send_info_message and publish_decision.info_message_text:
-            if not dry_run and self._telegram_client is not None:
-                try:
-                    self._telegram_client.send_text(publish_decision.info_message_text)
-                    self._logger.info(
-                        "[%s] merge_info_message_sent date_key=%s reason=%s",
-                        branch.name,
-                        date_key,
-                        publish_decision.decision_reason,
-                    )
-                except Exception as info_send_error:
-                    self._logger.warning(
-                        "[%s] merge_info_message_failed date_key=%s error=%s",
-                        branch.name,
-                        date_key,
-                        info_send_error,
-                    )
+            self._notifier.emit(
+                publish_decision.info_message_text,
+                to_telegram=not dry_run,
+            )
+            self._logger.info(
+                "[%s] merge_info_message_emitted date_key=%s reason=%s",
+                branch.name,
+                date_key,
+                publish_decision.decision_reason,
+            )
         if not publish_decision.create_doc:
             self._logger.info(
                 "[%s] merge_doc_skipped date_key=%s reason=%s",
@@ -399,9 +399,9 @@ class BranchExecutor:
             log_telegram_publish_summary(logger=self._logger, sent=0, failed=0, skipped=1)
             record_telegram_skipped(count=1, date_key=date_key, branch_label=branch.name)
             if merge_status_text:
-                self._send_runtime_stage_message(
+                self._notifier.emit(
                     text=merge_status_text,
-                    dry_run=dry_run,
+                    to_telegram=not dry_run,
                 )
             record_branch_completed(branch_label=branch.name)
             return
@@ -448,6 +448,10 @@ class BranchExecutor:
         )
         record_docs_created(count=docs_created_count, date_key=date_key, branch_label=branch.name)
         log_docs_publish_summary(logger=self._logger, created=docs_created_count, failed=0)
+        if dry_run:
+            self._notifier.emit("✅ Док подготовлен (dry run)", to_telegram=not dry_run)
+        elif doc_publish_result.google_doc_created:
+            self._notifier.emit("✅ Док создан", to_telegram=not dry_run)
         if not publish_decision.publish_telegram:
             self._logger.info(
                 "[%s] merge_telegram_skipped date_key=%s reason=%s",
@@ -467,9 +471,9 @@ class BranchExecutor:
                 branch_label=branch.name,
             )
             if merge_status_text:
-                self._send_runtime_stage_message(
+                self._notifier.emit(
                     text=merge_status_text,
-                    dry_run=dry_run,
+                    to_telegram=not dry_run,
                 )
             record_branch_completed(branch_label=branch.name)
             return
@@ -517,10 +521,14 @@ class BranchExecutor:
             failed=telegram_result.failed_count,
             skipped=telegram_result.skipped_count,
         )
+        self._notifier.emit(
+            f"✅ Telegram-пакет: отправлено {telegram_result.sent_count}",
+            to_telegram=not dry_run,
+        )
         if merge_status_text:
-            self._send_runtime_stage_message(
+            self._notifier.emit(
                 text=merge_status_text,
-                dry_run=dry_run,
+                to_telegram=not dry_run,
             )
         record_branch_completed(branch_label=branch.name)
 

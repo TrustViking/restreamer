@@ -80,8 +80,8 @@ downloads/
 data/
 docs/
 image/
-handoff/
 tg/
+state/
 
 ########################################
 # IDE / OS / local workspace stuff

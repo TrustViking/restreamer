@@ -17,8 +17,9 @@ from app.bootstrap.cleanup import (
 
 @pytest.fixture
 def cleanup_root(tmp_path: Path) -> Path:
-    """Create a temporary project root with logs/, docs/, image/ dirs."""
+    """Create a temporary project root with logs/, state/, docs/, image/ dirs."""
     (tmp_path / "logs").mkdir()
+    (tmp_path / "state").mkdir()
     (tmp_path / "docs").mkdir()
     (tmp_path / "image").mkdir()
     return tmp_path
@@ -68,7 +69,7 @@ class TestResolveTemplateBase:
 class TestRunDailyCleanup:
     def test_fresh_marker_skips_cleanup(self, cleanup_root: Path) -> None:
         stale: Path = _create_stale_file(cleanup_root / "logs" / "old.log", age_hours=100.0)
-        marker: Path = cleanup_root / "logs" / ".last_cleanup"
+        marker: Path = cleanup_root / "state" / ".last_cleanup"
         marker.write_text("recent", encoding="utf-8")
         run_daily_cleanup(
             logger=logging.getLogger("test"),
@@ -113,7 +114,7 @@ class TestRunDailyCleanup:
         assert not stale_img.exists(), "Stale image should be removed"
 
     def test_marker_created_after_cleanup(self, cleanup_root: Path) -> None:
-        marker: Path = cleanup_root / "logs" / ".last_cleanup"
+        marker: Path = cleanup_root / "state" / ".last_cleanup"
         assert not marker.exists()
         run_daily_cleanup(
             logger=logging.getLogger("test"),

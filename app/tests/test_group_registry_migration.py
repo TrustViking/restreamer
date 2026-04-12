@@ -4,9 +4,14 @@ import json
 import logging
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.telegram_bot.group_registry import _load_registry_payload, handle_group_migration
+from app.telegram_bot.group_registry import (
+    _load_registry_payload,
+    handle_group_migration,
+    load_known_groups,
+)
 
 
 def test_migration_removes_old_and_keeps_new() -> None:
@@ -47,3 +52,44 @@ def test_migration_removes_old_and_keeps_new() -> None:
             assert "-1003867270959" in payload["groups"]
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def test_legacy_registry_file_is_migrated_from_logs_to_state() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        project_root: Path = Path(temp_dir)
+        logs_dir: Path = project_root / "logs"
+        state_dir: Path = project_root / "state"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        legacy_path: Path = logs_dir / "bot_known_groups.json"
+        legacy_payload: dict[str, object] = {
+            "admin_ids": [123],
+            "user_ids": [456],
+            "groups": {
+                "-1003867270959": {
+                    "chat_id": "-1003867270959",
+                    "chat_type": "supergroup",
+                    "chat_title": "Streamertg",
+                    "chat_username": "@stream",
+                }
+            },
+        }
+        legacy_path.write_text(
+            json.dumps(legacy_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        expected_path: Path = state_dir / "bot_known_groups.json"
+        fake_paths = SimpleNamespace(
+            project_root=project_root,
+            logs_dir=logs_dir,
+            state_dir=state_dir,
+        )
+
+        with patch("app.telegram_bot.group_registry.get_project_paths", return_value=fake_paths):
+            groups = load_known_groups(logger=logging.getLogger("test_group_registry_load"))
+
+        assert not legacy_path.exists()
+        assert expected_path.exists()
+        payload = _load_registry_payload(expected_path)
+        assert payload["groups"]["-1003867270959"]["chat_title"] == "Streamertg"
+        assert len(groups) == 1
+        assert groups[0].chat_id == "-1003867270959"

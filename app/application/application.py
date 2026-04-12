@@ -5,8 +5,8 @@ import logging
 import secrets
 import sys
 import time
+from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import Any, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -45,10 +45,7 @@ from app.observability.final_summary import (
     FinalRunSummaryContext,
     emit_final_run_summary,
 )
-from app.observability.openai_usage import (
-    log_openai_limits_and_usage,
-    log_run_local_openai_usage,
-)
+from app.observability.openai_usage import log_run_local_openai_usage
 from app.observability.runtime_analytics import (
     log_run_context,
     log_run_started,
@@ -65,6 +62,7 @@ from app.observability.startup_summary import (
 from app.paths import ProjectPaths, get_project_paths
 from app.paths.name_builder import NamePathBuilder
 from app.pipeline.batch_runner import BatchRunner
+from app.pipeline.operator_notifier import OperatorNotifier
 from app.telegram.bot_client import TelegramBotClient
 from app.telegram_bot.group_registry import handle_group_migration
 
@@ -145,14 +143,6 @@ def _log_llm_usage_reports(
         log_run_local_openai_usage(logger, effective_model=effective_model)
     except Exception:
         logger.exception("Run-local OpenAI usage report failed")
-    try:
-        log_openai_limits_and_usage(
-            logger,
-            summarize_error=summarize_error,
-            effective_model=effective_model,
-        )
-    except Exception:
-        logger.exception("OpenAI usage report failed")
     logger.info(
         "llm_usage_report_completed provider=%s effective_model=%s status=completed",
         provider_name,
@@ -165,13 +155,13 @@ class RestreamerApplication:
         *,
         logger: logging.Logger | None = None,
         telegram_chat_id_override: str | None = None,
-        progress_callback: Any = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         self._logger: logging.Logger = logger or LOGGER
         self._telegram_chat_id_override: str | None = _normalize_chat_id(
             telegram_chat_id_override,
         )
-        self._progress_callback: Any = progress_callback
+        self._progress_callback: Callable[[str], None] | None = progress_callback
 
     def run(self, argv: Sequence[str]) -> int:
         project_paths: ProjectPaths = get_project_paths()
@@ -326,6 +316,12 @@ class RestreamerApplication:
             doc_title_template=config.templates.files_doc_title_template,
             max_filename_stem=config.paths.preview_filename_max_stem,
         )
+        telegram_sink: Callable[[str], None] | None = None
+        if self._progress_callback is not None:
+            telegram_sink = self._progress_callback
+        elif config.telegram.enabled:
+            telegram_sink = telegram_client.send_text
+        notifier: OperatorNotifier = OperatorNotifier(telegram_sink=telegram_sink)
         return BatchRunner(
             logger=self._logger,
             config=config,
@@ -336,7 +332,7 @@ class RestreamerApplication:
             kiev_tz=_load_zoneinfo(config.timezones.kiev),
             cet_tz=_load_zoneinfo(config.timezones.cet),
             resolve_logger_name_meta=resolve_logger_name_meta,
-            progress_callback=self._progress_callback,
+            notifier=notifier,
         )
 
     def _run_batch(

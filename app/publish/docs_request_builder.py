@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Tuple
 from app.bootstrap.logging_config import get_logger
 from app.core.text_utils import utf16_len
 from app.core.models import VideoMetadata
+from app.publish.inline_formatting import parse_inline_bold, strip_bold_markers, has_bold_markers
 
 
 LOGGER = get_logger(__name__)
@@ -155,6 +156,57 @@ class DocsRequestBuilder:
                 font_size_pt=font_size_pt,
             ),
         ]
+
+    @classmethod
+    def build_insert_and_style_rich_requests(
+        cls,
+        index: int,
+        text: str,
+        *,
+        base_bold: bool,
+        segments: List[Tuple[str, bool]],
+        font_family: str = DEFAULT_FONT_FAMILY,
+        font_size_pt: float = DEFAULT_FONT_SIZE_PT,
+    ) -> List[Dict[str, Any]]:
+        """Insert text and apply per-segment bold styling.
+
+        ``segments`` is a list of (text, is_bold) from parse_inline_bold().
+        ``base_bold`` is the row-level bold flag from row_values.
+        Each segment is styled with bold = base_bold OR segment.is_bold.
+        The full ``text`` (with markers already stripped) is inserted as one
+        insertText request. Then each segment gets its own updateTextStyle.
+        """
+        normalized_text: str = text
+        normalized_segments: List[Tuple[str, bool]] = segments
+        if has_bold_markers(text):
+            normalized_text = strip_bold_markers(text)
+            normalized_segments = parse_inline_bold(text)
+
+        text_with_newline: str = (
+            normalized_text + "\n"
+            if not normalized_text.endswith("\n")
+            else normalized_text
+        )
+        requests: List[Dict[str, Any]] = [
+            cls.build_insert_text_request(index=index, text=text_with_newline),
+        ]
+        cursor: int = index
+        for segment_text, segment_bold in normalized_segments:
+            if not segment_text:
+                continue
+            effective_bold: bool = base_bold or segment_bold
+            segment_len: int = utf16_len(segment_text)
+            requests.append(
+                cls.build_text_style_request(
+                    start=cursor,
+                    end=cursor + segment_len,
+                    bold=effective_bold,
+                    font_family=font_family,
+                    font_size_pt=font_size_pt,
+                )
+            )
+            cursor += segment_len
+        return requests
 
     @classmethod
     def build_format_request(

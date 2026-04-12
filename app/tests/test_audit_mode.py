@@ -14,6 +14,7 @@ from app.core.models import PlannedVideo, VideoMetadata
 from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.llm.models.model_compatibility import LlmModelConfigurationError
 from app.pipeline.batch_runner import AuditBranch, BatchRunner
+from app.pipeline.operator_notifier import OperatorNotifier
 from app.pipeline.slot_processing import process_slot
 
 
@@ -48,6 +49,7 @@ class AuditModeRunnerTests(unittest.TestCase):
             kiev_tz=MagicMock(),
             cet_tz=MagicMock(),
             resolve_logger_name_meta=MagicMock(return_value=("logger", "test", False)),
+            notifier=OperatorNotifier(telegram_sink=None),
         )
 
     def test_audit_runs_nomerge_then_merge(self) -> None:
@@ -102,7 +104,7 @@ class AuditModeRunnerTests(unittest.TestCase):
                 llm_summary=SimpleNamespace(
                     provider="openai",
                     model="gpt-5.1",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    usage_reporting_mode="openai_run_local",
                 ),
             )
 

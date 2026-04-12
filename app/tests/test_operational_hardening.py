@@ -239,7 +239,7 @@ class OperationalHardeningTests(unittest.TestCase):
                 llm_summary=SimpleNamespace(
                     provider="openai",
                     model="gpt-5.1",
-                    usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                    usage_reporting_mode="openai_run_local",
                 ),
                 services=services,
                 telegram_client=telegram_client,
@@ -309,7 +309,7 @@ class OperationalHardeningTests(unittest.TestCase):
                     llm_summary=SimpleNamespace(
                         provider="openai",
                         model="gpt-5.4",
-                        usage_reporting_mode="openai_run_local+openai_org_snapshot",
+                        usage_reporting_mode="openai_run_local",
                     ),
                     services=services,
                     telegram_client=telegram_client,

@@ -14,6 +14,7 @@ from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.pipeline.batch_runner import AuditBranch, BatchRunner
 from app.pipeline.daily_doc_publish import DailyDocumentPublishResult
 from app.pipeline.daily_telegram_publish import DailyTelegramPublishResult
+from app.pipeline.operator_notifier import OperatorNotifier
 from app.pipeline.slot_processing import SlotProcessResult, resolve_merge_artifact_status
 
 
@@ -33,6 +34,7 @@ class MergeArtifactGateTests(unittest.TestCase):
             kiev_tz=ZoneInfo("Europe/Kiev"),
             cet_tz=ZoneInfo("Europe/Berlin"),
             resolve_logger_name_meta=MagicMock(),
+            notifier=OperatorNotifier(telegram_sink=None),
         )
 
     def _slot_result(

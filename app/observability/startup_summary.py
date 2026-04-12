@@ -48,7 +48,7 @@ def build_llm_summary_snapshot(config: AppConfig) -> LlmSummarySnapshot:
         configured_model=model_identity.configured_model,
         provider_model=model_identity.provider_model,
         effective_model=model_identity.effective_model,
-        usage_reporting_mode="openai_run_local+openai_org_snapshot",
+        usage_reporting_mode="openai_run_local",
     )
 
 

@@ -23,6 +23,8 @@ class ProjectPathsTests(unittest.TestCase):
         paths = get_project_paths()
 
         self.assertEqual(paths.entrypoint_path.parent, paths.project_root)
+        self.assertEqual(paths.logs_dir, paths.project_root / "logs")
+        self.assertEqual(paths.state_dir, paths.project_root / "state")
         self.assertEqual(
             paths.runtime_config_path.relative_to(paths.project_root),
             Path("app") / "config" / "runtime" / "app_config.yaml",

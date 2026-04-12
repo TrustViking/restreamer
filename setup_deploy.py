@@ -115,7 +115,7 @@ def ensure_directory(path: Path) -> CheckResult:
 
 
 def ensure_required_directories(project_root: Path) -> list[CheckResult]:
-    directory_names: list[str] = ["secrets", "logs", "docs"]
+    directory_names: list[str] = ["secrets", "logs", "state", "docs"]
     if getattr(sys, "frozen", False):
         directory_names.append("config")
     results: list[CheckResult] = []
