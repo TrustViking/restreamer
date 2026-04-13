@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig
@@ -26,11 +27,7 @@ from app.observability.runtime_analytics import (
     record_sheet_loaded,
     record_stage_duration,
 )
-from app.observability.startup_health import (
-    LoggerNameMetaResolver,
-    log_section,
-    run_startup_health_checks,
-)
+from app.observability.startup_health import log_section, run_startup_health_checks
 from app.observability.startup_summary import LlmSummarySnapshot
 from app.paths.name_builder import NamePathBuilder
 from app.planning import log_link_normalization_report
@@ -59,7 +56,7 @@ class AuditBranch:
 class PreparedRunContext:
     services: BatchServices
     sheet_state: BatchSheetState
-    prepared_videos: list[PreparedVideo]
+    prepared_videos: List[PreparedVideo]
     llm_merge_available: bool
 
 
@@ -75,21 +72,21 @@ class BatchRunner:
         name_builder: NamePathBuilder,
         kiev_tz: ZoneInfo,
         cet_tz: ZoneInfo,
-        resolve_logger_name_meta: LoggerNameMetaResolver,
+        resolve_logger_name_meta: Any,
         notifier: OperatorNotifier,
     ) -> None:
-        self._logger: logging.Logger = logger
-        self._config: AppConfig = config
-        self._metadata_fetcher: YouTubeMetadataFetcher = metadata_fetcher
-        self._http_client: HttpClient = http_client
-        self._telegram_client: TelegramBotClient = telegram_client
-        self._name_builder: NamePathBuilder = name_builder
-        self._kiev_tz: ZoneInfo = kiev_tz
-        self._cet_tz: ZoneInfo = cet_tz
-        self._resolve_logger_name_meta: LoggerNameMetaResolver = resolve_logger_name_meta
+        self._logger = logger
+        self._config = config
+        self._metadata_fetcher = metadata_fetcher
+        self._http_client = http_client
+        self._telegram_client = telegram_client
+        self._name_builder = name_builder
+        self._kiev_tz = kiev_tz
+        self._cet_tz = cet_tz
+        self._resolve_logger_name_meta = resolve_logger_name_meta
         self._notifier: OperatorNotifier = notifier
-        self._last_merge_run_summary: MergeRunSummary | None = None
-        self._debug_writer: DebugArtifactWriter = DebugArtifactWriter(
+        self._last_merge_run_summary: Optional[MergeRunSummary] = None
+        self._debug_writer = DebugArtifactWriter(
             logger=logger,
             name_builder=name_builder,
         )
@@ -105,7 +102,7 @@ class BatchRunner:
         )
 
     @property
-    def last_merge_run_summary(self) -> MergeRunSummary | None:
+    def last_merge_run_summary(self) -> Optional[MergeRunSummary]:
         return self._last_merge_run_summary
 
     def log_last_merge_run_summary(self) -> None:
@@ -119,9 +116,9 @@ class BatchRunner:
     def _group_processed_videos_by_date(
         self,
         *,
-        processed: list[PlannedVideo],
-    ) -> dict[str, list[PlannedVideo]]:
-        videos_by_date: dict[str, list[PlannedVideo]] = {}
+        processed: List[PlannedVideo],
+    ) -> Dict[str, List[PlannedVideo]]:
+        videos_by_date: Dict[str, List[PlannedVideo]] = {}
         for item in processed:
             videos_by_date.setdefault(item.date_key, []).append(item)
         return videos_by_date
@@ -131,7 +128,7 @@ class BatchRunner:
         *,
         audit_mode: str,
         llm_merge_available: bool,
-    ) -> list[AuditBranch]:
+    ) -> List[AuditBranch]:
         if audit_mode == "audit":
             return [
                 AuditBranch(name=BRANCH_NOMERGE, processing_mode="nomerge", llm_merge_enabled=False),
@@ -155,7 +152,7 @@ class BatchRunner:
 
         merge_run_summary: MergeRunSummary = MergeRunSummary()
         self._last_merge_run_summary = merge_run_summary
-        branch_failures: list[str] = []
+        branch_failures: List[str] = []
         branches_for_log: str = ",".join(self._resolve_branch_labels_for_log(audit_mode=audit_mode))
         self._logger.info(
             "audit_start audit_mode=%s branches=%s run_id=%s dry_run=%s",
@@ -189,19 +186,17 @@ class BatchRunner:
                 )
                 return
 
-            branches: list[AuditBranch] = self._resolve_audit_branches(
+            branches: List[AuditBranch] = self._resolve_audit_branches(
                 audit_mode=audit_mode,
                 llm_merge_available=prepared_context.llm_merge_available,
             )
-            processed_by_branch: dict[str, dict[str, list[PlannedVideo]]] = (
-                self._build_processed_by_branch(
-                    branches=branches,
-                    prepared_videos=prepared_context.prepared_videos,
-                )
+            processed_by_branch: Dict[str, Dict[str, List[PlannedVideo]]] = self._build_processed_by_branch(
+                branches=branches,
+                prepared_videos=prepared_context.prepared_videos,
             )
 
             self._log_section("Process Slots")
-            self._notifier.emit("✅ Обработка слотов...", to_telegram=not dry_run)
+            self._notifier.emit("⏳ Обработка слотов...", to_telegram=not dry_run)
             self._execute_branch_dates(
                 services=services,
                 branches=branches,
@@ -243,14 +238,8 @@ class BatchRunner:
                 run_id,
             )
 
-    def _resolve_branch_labels_for_log(self, *, audit_mode: str) -> list[str]:
-        return [
-            branch.name
-            for branch in self._resolve_audit_branches(
-                audit_mode=audit_mode,
-                llm_merge_available=True,
-            )
-        ]
+    def _resolve_branch_labels_for_log(self, *, audit_mode: str) -> List[str]:
+        return [branch.name for branch in self._resolve_audit_branches(audit_mode=audit_mode, llm_merge_available=True)]
 
     def _prepare_run_context(
         self,
@@ -303,7 +292,7 @@ class BatchRunner:
 
         self._log_section("Shared Preparation")
         shared_preparation_started_at: float = time.perf_counter()
-        prepared_videos: list[PreparedVideo] = build_prepared_videos(
+        prepared_videos: List[PreparedVideo] = build_prepared_videos(
             logger=self._logger,
             config=self._config,
             services=services,
@@ -354,10 +343,10 @@ class BatchRunner:
     def _build_processed_by_branch(
         self,
         *,
-        branches: list[AuditBranch],
-        prepared_videos: list[PreparedVideo],
-    ) -> dict[str, dict[str, list[PlannedVideo]]]:
-        processed_by_branch: dict[str, dict[str, list[PlannedVideo]]] = {}
+        branches: List[AuditBranch],
+        prepared_videos: List[PreparedVideo],
+    ) -> Dict[str, Dict[str, List[PlannedVideo]]]:
+        processed_by_branch: Dict[str, Dict[str, List[PlannedVideo]]] = {}
         planning_started_at: float = time.perf_counter()
         for branch in branches:
             self._logger.info(
@@ -382,25 +371,18 @@ class BatchRunner:
         self,
         *,
         services: BatchServices,
-        branches: list[AuditBranch],
-        processed_by_branch: dict[str, dict[str, list[PlannedVideo]]],
+        branches: List[AuditBranch],
+        processed_by_branch: Dict[str, Dict[str, List[PlannedVideo]]],
         dry_run: bool,
         merge_run_summary: MergeRunSummary,
         audit_mode: str,
-        branch_failures: list[str],
+        branch_failures: List[str],
         run_id: str = "",
     ) -> None:
-        date_keys: list[str] = sorted(
-            {
-                date_key
-                for branch_videos in processed_by_branch.values()
-                for date_key in branch_videos.keys()
-            }
-        )
+        date_keys: List[str] = sorted({date_key for branch_videos in processed_by_branch.values() for date_key in branch_videos.keys()})
         stage_count: int = len(branches)
         for date_key in date_keys:
-            failures_before: int = len(branch_failures)
-            merge_failures_before: int = merge_run_summary.final_failure
+            failures_before: int = merge_run_summary.final_failure if merge_run_summary is not None else 0
             for stage_index, branch in enumerate(branches, start=1):
                 self._execute_single_branch_date(
                     services=services,
@@ -415,20 +397,17 @@ class BatchRunner:
                     stage_index=stage_index,
                     stage_count=stage_count,
                 )
-            has_date_failures: bool = (
-                len(branch_failures) > failures_before
-                or merge_run_summary.final_failure > merge_failures_before
-            )
-            if has_date_failures:
-                date_done_message: str = (
-                    f"⚠️ Дата {format_date_key_for_display(date_key)} завершена частично"
+            failures_after: int = merge_run_summary.final_failure if merge_run_summary is not None else 0
+            if failures_after > failures_before:
+                self._notifier.emit(
+                    f"⚠️ Дата {format_date_key_for_display(date_key)} завершена частично",
+                    to_telegram=not dry_run,
                 )
             else:
-                date_done_message = f"✅ Дата {format_date_key_for_display(date_key)} завершена"
-            self._notifier.emit(
-                date_done_message,
-                to_telegram=not dry_run,
-            )
+                self._notifier.emit(
+                    f"✅ Дата {format_date_key_for_display(date_key)} завершена",
+                    to_telegram=not dry_run,
+                )
 
     def _execute_single_branch_date(
         self,
@@ -436,19 +415,16 @@ class BatchRunner:
         services: BatchServices,
         branch: AuditBranch,
         date_key: str,
-        processed_by_branch: dict[str, dict[str, list[PlannedVideo]]],
+        processed_by_branch: Dict[str, Dict[str, List[PlannedVideo]]],
         dry_run: bool,
         merge_run_summary: MergeRunSummary,
         audit_mode: str,
-        branch_failures: list[str],
+        branch_failures: List[str],
         run_id: str = "",
         stage_index: int,
         stage_count: int,
     ) -> None:
-        date_videos_all: list[PlannedVideo] = processed_by_branch.get(
-            branch.name,
-            {},
-        ).get(date_key, [])
+        date_videos_all: List[PlannedVideo] = processed_by_branch.get(branch.name, {}).get(date_key, [])
         if not date_videos_all:
             self._logger.info("audit_branch_skip branch=%s date_key=%s reason=empty_branch_items", branch.name, date_key)
             return

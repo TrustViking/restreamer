@@ -7,9 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import restreamer
+import promo
 from app.application.application import (
-    RestreamerApplication,
+    PipelineApplication,
     _apply_llm_usage_reset,
     _log_llm_usage_reports,
 )
@@ -119,9 +119,7 @@ class ProviderAwareSummaryTests(unittest.TestCase):
             config_processing_mode_raw="audit",
             paths=ProjectPaths(
                 project_root=Path("."),
-                logs_dir=Path("logs"),
-                state_dir=Path("state"),
-                entrypoint_path=Path("restreamer.py"),
+                entrypoint_path=Path("promo.py"),
                 runtime_config_path=Path("app_config.yaml"),
                 runtime_config_example_path=Path("app_config.example.yaml"),
                 templates_path=Path("templates.yaml"),
@@ -129,6 +127,7 @@ class ProviderAwareSummaryTests(unittest.TestCase):
                 secrets_env_path=Path(".env"),
                 oauth_token_path=Path("token.json"),
                 oauth_credentials_path=Path("oauth.json"),
+                service_account_path=Path("service_account.json"),
                 bundled_config_path=Path("app_config.yaml"),
                 bundled_templates_path=Path("templates.yaml"),
             ),
@@ -325,7 +324,7 @@ class EntrypointRegressionTests(unittest.TestCase):
                     "get_project_paths",
                     return_value=SimpleNamespace(
                         project_root=Path("."),
-                        entrypoint_path=Path("restreamer.py"),
+                        entrypoint_path=Path("promo.py"),
                         runtime_config_path=Path("app/config/runtime/app_config.yaml"),
                         templates_path=Path("templates.yaml"),
                         secrets_env_path=Path("secrets/.env"),
@@ -394,7 +393,7 @@ class EntrypointRegressionTests(unittest.TestCase):
             )
             stack.enter_context(
                 patch.object(
-                    RestreamerApplication,
+                    PipelineApplication,
                     "_build_batch_runner",
                     return_value=batch_runner,
                 )
@@ -405,7 +404,7 @@ class EntrypointRegressionTests(unittest.TestCase):
             stack.enter_context(patch.object(application_module, "log_stage_timing"))
             stack.enter_context(patch.object(application_module, "emit_final_run_summary"))
             stack.enter_context(patch.object(application_module, "_log_exit_code"))
-            exit_code = restreamer.main([])
+            exit_code = promo.main([])
 
         return exit_code, build_llm_summary_mock, sheets_flag_mock, strip_flag_mock
 

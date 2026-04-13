@@ -150,7 +150,7 @@ class MergeContractRetryTests(MergeContractServiceBase):
             reason_codes=("overly_generic_body", "weak_source_coverage"),
         )
         with patch(
-            "app.llm.merges.merge_service._extract_description_validation_reason_codes"
+            "app.llm.merges.merge_validation._extract_description_validation_reason_codes"
         ) as parse_mock:
             reason_codes = _reason_codes_from_error(failure)
             primary_reason = _reason_code_from_error(failure)

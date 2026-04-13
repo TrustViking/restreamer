@@ -246,6 +246,7 @@ class TelegramBotClient:
                 retry_after,
                 attempt,
                 self._max_retries,
+                extra={"warning_category": "informational"},
             )
             time.sleep(retry_after)
         if last_response is not None:

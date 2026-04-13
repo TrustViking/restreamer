@@ -14,6 +14,12 @@ from app.paths import get_project_paths
 
 
 class ActiveModelConfigTests(unittest.TestCase):
+    def _logger(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        )
+
     def _write_runtime_config(self) -> str:
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", encoding="utf-8", delete=False) as handle:
             handle.write(
@@ -25,7 +31,7 @@ app:
     enabled: false
     drive_folder_id: "folder"
     drive_preview_folder_id: "preview"
-    drive_preview_path_template: "{restreamer}/{preview}/{language}/{date}"
+    drive_preview_path_template: "preview/{date}/{language}"
     doc_share_mode: anyone_writer
     sheets_id: "sheet-id"
     sheets_range: "A:F"
@@ -73,7 +79,7 @@ app:
             "OPENAI_MODEL": "gpt-5.1",
         }
         with patch.dict(os.environ, env, clear=True):
-            config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
+            config = load_config_from_env(logger=self._logger())
         entrypoint_dir = get_project_paths().entrypoint_path.parent.resolve()
         self.assertEqual(str(entrypoint_dir / Path("image") / "{language}" / "{date}"), config.paths.local_image_dir_template)
         self.assertEqual(str(entrypoint_dir / Path("docs") / "{date}"), config.paths.local_doc_dir_template)
@@ -92,7 +98,7 @@ app:
             "OPENAI_MODEL": "gpt-5.2",
         }
         with patch.dict(os.environ, env, clear=True):
-            config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
+            config = load_config_from_env(logger=self._logger())
         self.assertEqual("openai", config.llm.provider)
         self.assertEqual("gpt-5.2", config.llm.model)
 
@@ -109,7 +115,7 @@ app:
             "GOOGLE_SHEETS_ID": "sheet-id",
         }
         with patch.dict(os.environ, env, clear=True):
-            config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
+            config = load_config_from_env(logger=self._logger())
         self.assertEqual("gpt-5.1", config.llm.model)
 
     def test_telegram_send_delay_env_override_has_priority_over_yaml(self) -> None:
@@ -126,7 +132,7 @@ app:
             "TELEGRAM_SEND_DELAY_SECONDS": "2.5",
         }
         with patch.dict(os.environ, env, clear=True):
-            config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
+            config = load_config_from_env(logger=self._logger())
         self.assertEqual(2.5, config.telegram.send_delay_seconds)
         self.assertEqual(3, config.telegram.max_retries)
 
@@ -144,7 +150,7 @@ app:
             "TELEGRAM_MAX_RETRIES": "5",
         }
         with patch.dict(os.environ, env, clear=True):
-            config = load_config_from_env(logger=SimpleNamespace(warning=lambda *args, **kwargs: None))
+            config = load_config_from_env(logger=self._logger())
         self.assertEqual(1.0, config.telegram.send_delay_seconds)
         self.assertEqual(5, config.telegram.max_retries)
 

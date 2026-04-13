@@ -115,7 +115,7 @@ def ensure_directory(path: Path) -> CheckResult:
 
 
 def ensure_required_directories(project_root: Path) -> list[CheckResult]:
-    directory_names: list[str] = ["secrets", "logs", "state", "docs"]
+    directory_names: list[str] = ["secrets", "logs", "docs"]
     if getattr(sys, "frozen", False):
         directory_names.append("config")
     results: list[CheckResult] = []
@@ -208,7 +208,6 @@ def validate_required_env_vars(env_values: Mapping[str, str]) -> list[CheckResul
         "TELEGRAM_ADMIN_USER_IDS",
         "GPT_API_KEY",
         "GOOGLE_DRIVE_FOLDER_ID",
-        "GOOGLE_DRIVE_PREVIEW_FOLDER_ID",
         "GOOGLE_SHEETS_ID",
     ]
     missing_names: list[str] = []
@@ -540,7 +539,7 @@ def run_preflight(*, include_network_checks: bool) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
-        description="streamertg deploy preflight checker"
+        description="deploy preflight checker"
     )
     parser.add_argument(
         "--net",

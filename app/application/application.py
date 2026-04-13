@@ -5,12 +5,13 @@ import logging
 import secrets
 import sys
 import time
-from collections.abc import Callable, Sequence
 from datetime import datetime
+from typing import Any, Callable, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
+from app.bootstrap.ensure_dirs import ensure_config_files, ensure_portable_dirs
 from app.bootstrap.cli import build_cli_parser
 from app.bootstrap.cleanup import run_daily_cleanup
 from app.bootstrap.logging_config import (
@@ -149,22 +150,24 @@ def _log_llm_usage_reports(
         effective_model,
     )
 
-class RestreamerApplication:
+class PipelineApplication:
     def __init__(
         self,
         *,
         logger: logging.Logger | None = None,
         telegram_chat_id_override: str | None = None,
-        progress_callback: Callable[[str], None] | None = None,
+        progress_callback: Any = None,
     ) -> None:
         self._logger: logging.Logger = logger or LOGGER
         self._telegram_chat_id_override: str | None = _normalize_chat_id(
             telegram_chat_id_override,
         )
-        self._progress_callback: Callable[[str], None] | None = progress_callback
+        self._progress_callback: Any = progress_callback
 
     def run(self, argv: Sequence[str]) -> int:
         project_paths: ProjectPaths = get_project_paths()
+        ensure_portable_dirs(project_paths=project_paths, logger=self._logger)
+        ensure_config_files(project_paths=project_paths, logger=self._logger)
         load_dotenv(dotenv_path=project_paths.secrets_env_path)
         argv_list: list[str] = list(argv)
         run_id: str = self._build_run_id()
@@ -319,7 +322,7 @@ class RestreamerApplication:
         telegram_sink: Callable[[str], None] | None = None
         if self._progress_callback is not None:
             telegram_sink = self._progress_callback
-        elif config.telegram.enabled:
+        elif telegram_client is not None and config.telegram.enabled:
             telegram_sink = telegram_client.send_text
         notifier: OperatorNotifier = OperatorNotifier(telegram_sink=telegram_sink)
         return BatchRunner(

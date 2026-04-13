@@ -1,38 +1,24 @@
-# Template config: copy this file to app/config/runtime/app_config.yaml and fill real values.
-# app/config/runtime/app_config.example.yaml should stay free of environment-specific secrets/ids.
-# Environment toggles (.env):
-# RESTREAMER_LOGGER_NAME=restreamer
-# TELEGRAM_BOT_TOKEN=
-# TELEGRAM_CHAT_ID=
-# GPT_API_KEY=sk-proj-
-# OPENAI_ADMIN_KEY=sk-admin-
-# OPENAI_PROJECT_ID=proj_
-# GOOGLE_SERVICE_ACCOUNT_PATH=
-# GOOGLE_AUTH_MODE=oauth
-# GOOGLE_OAUTH_CREDENTIALS_PATH=secrets/credentials.json
-# GOOGLE_OAUTH_TOKEN_PATH=secrets/token.json
-# GOOGLE_DRIVE_FOLDER_ID=
-# GOOGLE_DRIVE_PREVIEW_FOLDER_ID=
-# GOOGLE_SHEETS_ID=
-# LOG_DIR=logs
-# APP_CONFIG_PATH=app/config/runtime/app_config.yaml
-# STG_SHEETS_LINK_WRITEBACK=True
-# STG_STRIP_CHAPTER_TIMESTAMPS=True
-# OPENAI_MODEL=gpt-5.1
-# STG_OPENAI_TIMEOUT_SEC=600
-# STG_OPENAI_MAX_OUTPUT_TOKENS=3000
-# STG_OPENAI_PRE_DELAY_SEC=5
-# STG_CLEANUP_MAX_AGE_DAYS=3
-# OPENAI_USAGE_MODELS=gpt-5.1
-# OPENAI_USAGE_TIMEOUT_SEC=30
-# OPENAI_USAGE_VERBOSE_LOG=1
+# app config template
+# Copy to config/app_config.yaml (portable exe) or app/config/runtime/app_config.yaml (dev).
+# Secrets go in secrets/.env — see .env.example.
+# Env vars override YAML values where noted.
 app:
   processing:
     mode: audit
 
+  llm:
+    model: "gpt-5.2"              # env override: OPENAI_MODEL
+    timeout_sec: 120              # env override: STG_OPENAI_TIMEOUT_SEC
+    max_output_tokens: 1000       # env override: STG_OPENAI_MAX_OUTPUT_TOKENS
+    pre_delay_sec: 5.0            # env override: STG_OPENAI_PRE_DELAY_SEC
+
+  cleanup:
+    max_age_days: 3               # env override: STG_CLEANUP_MAX_AGE_DAYS
+
   google:
     enabled: true
-    drive_preview_path_template: "{restreamer}/{preview}/{language}/{date}"
+    auth_mode: "oauth"            # "oauth" or "service_account"; env override: GOOGLE_AUTH_MODE
+    drive_preview_path_template: "preview/{date}/{language}"
     doc_share_mode: anyone_writer
     sheets_range: "A:D"
     form_url: "https://forms.gle/REPLACE_ME"

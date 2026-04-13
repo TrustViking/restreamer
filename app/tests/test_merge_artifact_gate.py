@@ -34,7 +34,7 @@ class MergeArtifactGateTests(unittest.TestCase):
             kiev_tz=ZoneInfo("Europe/Kiev"),
             cet_tz=ZoneInfo("Europe/Berlin"),
             resolve_logger_name_meta=MagicMock(),
-            notifier=OperatorNotifier(telegram_sink=None),
+            notifier=OperatorNotifier(),
         )
 
     def _slot_result(

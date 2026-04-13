@@ -56,7 +56,7 @@ class MergeExecutor:
     """Executes a single merge attempt: LLM call -> parse -> validate -> normalize -> recover."""
 
     _STRUCTURED_SCHEMA: dict[str, object] = {
-        "name": "restreamer_merge_summary_v2",
+        "name": "merge_summary_v2",
         "schema": {
             "type": "object",
             "additionalProperties": False,

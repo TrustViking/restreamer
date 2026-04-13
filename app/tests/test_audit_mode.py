@@ -49,7 +49,7 @@ class AuditModeRunnerTests(unittest.TestCase):
             kiev_tz=MagicMock(),
             cet_tz=MagicMock(),
             resolve_logger_name_meta=MagicMock(return_value=("logger", "test", False)),
-            notifier=OperatorNotifier(telegram_sink=None),
+            notifier=OperatorNotifier(),
         )
 
     def test_audit_runs_nomerge_then_merge(self) -> None:

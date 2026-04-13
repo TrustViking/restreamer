@@ -30,7 +30,7 @@ class GoogleDocsClient:
     def ping_access(self) -> str:
         # Safe ping without mutating user documents.
         try:
-            self._docs_service.documents().get(documentId="restreamer-ping").execute()
+            self._docs_service.documents().get(documentId="pipeline-ping").execute()
             return "probe_document_found(unexpected)"
         except HttpError as error:
             status_code: Optional[int] = getattr(

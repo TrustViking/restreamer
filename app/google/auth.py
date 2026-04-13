@@ -43,11 +43,18 @@ class GoogleServicesFactory:
         "https://www.googleapis.com/auth/cloud-platform.read-only",
     )
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        auth_mode: Optional[str] = None,
+        service_account_path: Optional[Path] = None,
+    ) -> None:
         self._cached_credentials: Optional[Any] = None
-        self._auth_mode: str = _load_google_auth_mode_from_env_impl()
+        self._auth_mode: str = auth_mode or _load_google_auth_mode_from_env_impl()
         self._service_account_path: Optional[Path] = (
-            _load_google_service_account_path_impl()
+            service_account_path
+            if service_account_path is not None
+            else _load_google_service_account_path_impl()
         )
         self._oauth_credentials_path: Path = _load_google_oauth_credentials_path_impl()
         self._oauth_token_path: Path = _load_google_oauth_token_path_impl()

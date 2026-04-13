@@ -11,8 +11,6 @@ from app.paths._root import PROJECT_ROOT
 @dataclass(frozen=True)
 class ProjectPaths:
     project_root: Path
-    logs_dir: Path
-    state_dir: Path
     entrypoint_path: Path
     runtime_config_path: Path
     runtime_config_example_path: Path
@@ -21,6 +19,7 @@ class ProjectPaths:
     secrets_env_path: Path
     oauth_token_path: Path
     oauth_credentials_path: Path
+    service_account_path: Path
     bundled_config_path: Path
     bundled_templates_path: Path
 
@@ -28,7 +27,7 @@ class ProjectPaths:
 @lru_cache(maxsize=1)
 def get_project_paths() -> ProjectPaths:
     project_root: Path = PROJECT_ROOT
-    entrypoint_path: Path = project_root / "restreamer.py"
+    entrypoint_path: Path = project_root / "promo.py"
     secrets_dir: Path = project_root / "secrets"
     frozen: bool = bool(getattr(sys, "frozen", False))
 
@@ -56,8 +55,6 @@ def get_project_paths() -> ProjectPaths:
 
     return ProjectPaths(
         project_root=project_root,
-        logs_dir=project_root / "logs",
-        state_dir=project_root / "state",
         entrypoint_path=entrypoint_path,
         runtime_config_path=runtime_config_path,
         runtime_config_example_path=runtime_config_example_path,
@@ -66,6 +63,7 @@ def get_project_paths() -> ProjectPaths:
         secrets_env_path=secrets_dir / ".env",
         oauth_token_path=secrets_dir / "token.json",
         oauth_credentials_path=secrets_dir / "credentials.json",
+        service_account_path=secrets_dir / "service_account.json",
         bundled_config_path=bundled_config_path,
         bundled_templates_path=bundled_templates_path,
     )

@@ -5,12 +5,11 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from aiogram.types import TelegramObject
 
 from app.paths import get_project_paths
-
-_DIAGNOSTIC_LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -22,26 +21,13 @@ class KnownGroup:
 
 
 def _registry_path() -> Path:
-    paths = get_project_paths()
-    current_path: Path = paths.state_dir / "bot_known_groups.json"
-    legacy_path: Path = paths.logs_dir / "bot_known_groups.json"
-    if legacy_path.exists() and not current_path.exists():
-        try:
-            current_path.parent.mkdir(parents=True, exist_ok=True)
-            legacy_path.replace(current_path)
-            _DIAGNOSTIC_LOGGER.debug(
-                "group_registry_legacy_migrated from=%s to=%s",
-                legacy_path,
-                current_path,
-            )
-        except OSError as error:
-            _DIAGNOSTIC_LOGGER.debug(
-                "group_registry_legacy_migration_failed from=%s to=%s error=%s",
-                legacy_path,
-                current_path,
-                error,
-            )
-    return current_path
+    project_root: Path = get_project_paths().project_root
+    legacy_path: Path = project_root / "logs" / "bot_known_groups.json"
+    new_path: Path = project_root / "state" / "bot_known_groups.json"
+    if legacy_path.exists() and not new_path.exists():
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.rename(new_path)
+    return new_path
 
 
 def _normalize_username(raw_username: str) -> str:
@@ -54,9 +40,9 @@ def _normalize_username(raw_username: str) -> str:
 
 
 def _extract_group_from_event(event: TelegramObject) -> KnownGroup | None:
-    chat_obj: object | None = getattr(event, "chat", None)
+    chat_obj: Any = getattr(event, "chat", None)
     if chat_obj is None:
-        message_obj: object | None = getattr(event, "message", None)
+        message_obj: Any = getattr(event, "message", None)
         chat_obj = getattr(message_obj, "chat", None)
     if chat_obj is None:
         return None
@@ -65,7 +51,7 @@ def _extract_group_from_event(event: TelegramObject) -> KnownGroup | None:
     if chat_type not in {"group", "supergroup"}:
         return None
 
-    raw_chat_id: object | None = getattr(chat_obj, "id", None)
+    raw_chat_id: Any = getattr(chat_obj, "id", None)
     chat_id: str = str(raw_chat_id or "").strip()
     if not chat_id:
         return None
@@ -81,7 +67,7 @@ def _extract_group_from_event(event: TelegramObject) -> KnownGroup | None:
     )
 
 
-def _default_registry_payload() -> dict[str, object]:
+def _default_registry_payload() -> dict[str, Any]:
     return {
         "admin_ids": [],
         "user_ids": [],
@@ -89,22 +75,22 @@ def _default_registry_payload() -> dict[str, object]:
     }
 
 
-def _load_registry_payload(path: Path) -> dict[str, object]:
-    payload: dict[str, object] = _default_registry_payload()
+def _load_registry_payload(path: Path) -> dict[str, Any]:
+    payload: dict[str, Any] = _default_registry_payload()
     if not path.exists() or not path.is_file():
         return payload
     try:
         raw_text: str = path.read_text(encoding="utf-8")
-        parsed_payload: object = json.loads(raw_text)
+        parsed_payload: Any = json.loads(raw_text)
     except Exception:
         return payload
     if not isinstance(parsed_payload, dict):
         return payload
 
-    raw_admin_ids: object = parsed_payload.get("admin_ids")
+    raw_admin_ids: Any = parsed_payload.get("admin_ids")
     if isinstance(raw_admin_ids, list):
         normalized_admin_ids: list[int] = []
-        item: object
+        item: Any
         for item in raw_admin_ids:
             try:
                 normalized_admin_ids.append(int(item))
@@ -112,10 +98,10 @@ def _load_registry_payload(path: Path) -> dict[str, object]:
                 continue
         payload["admin_ids"] = sorted(set(normalized_admin_ids))
 
-    raw_user_ids: object = parsed_payload.get("user_ids")
+    raw_user_ids: Any = parsed_payload.get("user_ids")
     if isinstance(raw_user_ids, list):
         normalized_user_ids: list[int] = []
-        user_item: object
+        user_item: Any
         for user_item in raw_user_ids:
             try:
                 normalized_user_ids.append(int(user_item))
@@ -123,11 +109,11 @@ def _load_registry_payload(path: Path) -> dict[str, object]:
                 continue
         payload["user_ids"] = sorted(set(normalized_user_ids))
 
-    raw_groups: object = parsed_payload.get("groups")
+    raw_groups: Any = parsed_payload.get("groups")
     groups_payload: dict[str, dict[str, str]] = {}
     if isinstance(raw_groups, dict):
         chat_id: str
-        chat_payload: object
+        chat_payload: Any
         for chat_id, chat_payload in raw_groups.items():
             if not isinstance(chat_payload, dict):
                 continue
@@ -144,7 +130,7 @@ def _load_registry_payload(path: Path) -> dict[str, object]:
     return payload
 
 
-def _save_registry_payload(path: Path, payload: dict[str, object]) -> None:
+def _save_registry_payload(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded_payload: str = json.dumps(payload, ensure_ascii=False, indent=2)
     path.write_text(encoded_payload + "\n", encoding="utf-8")
@@ -161,7 +147,7 @@ def sync_access_lists(
     user_ids: frozenset[int],
 ) -> None:
     path: Path = _registry_path()
-    payload: dict[str, object] = _load_registry_payload(path)
+    payload: dict[str, Any] = _load_registry_payload(path)
     normalized_admin_ids: list[int] = _normalize_access_ids(admin_ids)
     normalized_user_ids: list[int] = _normalize_access_ids(user_ids)
 
@@ -198,7 +184,7 @@ def register_group_from_event(
 ) -> None:
     group: KnownGroup | None = _extract_group_from_event(event)
     path: Path = _registry_path()
-    payload: dict[str, object] = _load_registry_payload(path)
+    payload: dict[str, Any] = _load_registry_payload(path)
 
     normalized_admin_ids: list[int] = _normalize_access_ids(admin_ids)
     normalized_user_ids: list[int] = _normalize_access_ids(user_ids)
@@ -258,7 +244,7 @@ def handle_group_migration(
 ) -> None:
     """Remove old group chat_id and ensure new supergroup chat_id is registered."""
     path: Path = _registry_path()
-    payload: dict[str, object] = _load_registry_payload(path)
+    payload: dict[str, Any] = _load_registry_payload(path)
     groups_map: dict[str, dict[str, str]] = payload.get("groups", {})
 
     old_normalized: str = str(old_chat_id or "").strip()
@@ -307,7 +293,7 @@ def handle_group_migration(
 
 def load_known_groups(*, logger: logging.Logger) -> list[KnownGroup]:
     path: Path = _registry_path()
-    payload: dict[str, object] = _load_registry_payload(path)
+    payload: dict[str, Any] = _load_registry_payload(path)
     groups_map: dict[str, dict[str, str]] = payload.get("groups", {})
     groups: list[KnownGroup] = []
 

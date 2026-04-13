@@ -7,8 +7,11 @@ from typing import Any, Dict
 
 
 def _resource_dir() -> Path:
-    directory_path: Path = Path(__file__).resolve().parent / "text"
-    return directory_path
+    import sys as _sys
+    if getattr(_sys, "frozen", False):
+        base: Path = Path(_sys._MEIPASS)  # type: ignore[attr-defined]
+        return base / "app" / "resources" / "text"
+    return Path(__file__).resolve().parent / "text"
 
 
 def _resource_path(resource_name: str) -> Path:

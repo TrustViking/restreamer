@@ -3,38 +3,24 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
-from app.core.constants import LOGGER_NAME_DEFAULT, LOGGER_NAME_ENV_VAR
+from app.core.constants import (
+    LOGGER_NAME_DEFAULT,
+    LOGGER_NAME_ENV_VAR,
+)
 from app.paths._root import PROJECT_ROOT
 
-LEGACY_LOGGER_NAME_ENV_VAR: str = "STREAMERTG_LOGGER_NAME"
-LOG_FILE_ENV_VAR: str = "RESTREAMER_LOG_FILE"
+LOG_FILE_ENV_VAR: str = "LOG_FILE"
 CONSOLE_LOGGER_SUFFIX: str = "console"
-_LEGACY_LOGGER_NAME_WARNED: bool = False
 
 
 def resolve_base_logger_name() -> str:
-    global _LEGACY_LOGGER_NAME_WARNED
     preferred: str = os.getenv(LOGGER_NAME_ENV_VAR, "").strip()
     if preferred:
         return preferred
-    legacy: str = os.getenv(LEGACY_LOGGER_NAME_ENV_VAR, "").strip()
-    if legacy:
-        if not _LEGACY_LOGGER_NAME_WARNED:
-            warnings.warn(
-                (
-                    f"{LEGACY_LOGGER_NAME_ENV_VAR} is deprecated and will be removed in a "
-                    f"future release; use {LOGGER_NAME_ENV_VAR} instead."
-                ),
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            _LEGACY_LOGGER_NAME_WARNED = True
-        return legacy
     return LOGGER_NAME_DEFAULT
 
 
@@ -66,17 +52,11 @@ def resolve_logger_name() -> str:
 
 
 def resolve_logger_name_meta() -> Tuple[str, str, bool]:
-    preferred_raw: Optional[str] = os.getenv(LOGGER_NAME_ENV_VAR)
+    preferred_raw: str | None = os.getenv(LOGGER_NAME_ENV_VAR)
     preferred_cleaned: str = (preferred_raw or "").strip()
     if preferred_cleaned:
         return (preferred_cleaned, f"env:{LOGGER_NAME_ENV_VAR}", True)
-
-    legacy_raw: Optional[str] = os.getenv(LEGACY_LOGGER_NAME_ENV_VAR)
-    legacy_cleaned: str = (legacy_raw or "").strip()
-    if legacy_cleaned:
-        return (legacy_cleaned, f"env:{LEGACY_LOGGER_NAME_ENV_VAR}", True)
-
-    env_present: bool = preferred_raw is not None or legacy_raw is not None
+    env_present: bool = preferred_raw is not None
     return (LOGGER_NAME_DEFAULT, "default", env_present)
 
 
@@ -109,10 +89,10 @@ def _resolve_log_file_pair_from_detailed_path(
 ) -> Tuple[Path, Path]:
     suffix: str = detailed_log_file_path.suffix or ".log"
     stem: str = detailed_log_file_path.stem
-    operator_log_file_path: Path = detailed_log_file_path.with_name(
+    screen_log_file_path: Path = detailed_log_file_path.with_name(
         f"{stem}_operator{suffix}"
     )
-    return detailed_log_file_path, operator_log_file_path
+    return detailed_log_file_path, screen_log_file_path
 
 
 def resolve_log_file_paths(*, entrypoint_label: str = LOGGER_NAME_DEFAULT) -> Tuple[Path, Path]:
@@ -128,10 +108,10 @@ def resolve_log_file_paths(*, entrypoint_label: str = LOGGER_NAME_DEFAULT) -> Tu
     detailed_log_file_path: Path = (
         log_dir_path / f"{timestamp}_{entrypoint_label}_detailed.log"
     )
-    operator_log_file_path: Path = (
+    screen_log_file_path: Path = (
         log_dir_path / f"{timestamp}_{entrypoint_label}_operator.log"
     )
-    return detailed_log_file_path, operator_log_file_path
+    return detailed_log_file_path, screen_log_file_path
 
 
 class _ConsoleChannelFilter(logging.Filter):
@@ -153,7 +133,13 @@ class _ConsoleChannelFilter(logging.Filter):
         name: str = record.name
         if name == self._console_exact or name.startswith(self._console_prefix):
             return False
-        return record.levelno >= logging.WARNING
+        if record.levelno < logging.WARNING:
+            return False
+        # Block informational warnings from operator screen - detailed logs keep them.
+        warning_category: str = str(getattr(record, "warning_category", "") or "")
+        if warning_category == "informational":
+            return False
+        return True
 
 
 class _ConsoleOnlyFilter(logging.Filter):
@@ -190,12 +176,12 @@ def setup_logging(debug: bool) -> None:
     base_logger_name: str = resolve_base_logger_name()
 
     detailed_log_file_path: Path
-    operator_log_file_path: Path
-    detailed_log_file_path, operator_log_file_path = resolve_log_file_paths(
+    screen_log_file_path: Path
+    detailed_log_file_path, screen_log_file_path = resolve_log_file_paths(
         entrypoint_label=base_logger_name
     )
     detailed_log_file_path.parent.mkdir(parents=True, exist_ok=True)
-    operator_log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    screen_log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
     stream_formatter: logging.Formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(message)s"
@@ -227,14 +213,14 @@ def setup_logging(debug: bool) -> None:
     file_handler.setFormatter(file_formatter)
     base_logger.addHandler(file_handler)
 
-    operator_file_handler: logging.FileHandler = logging.FileHandler(
-        filename=str(operator_log_file_path),
+    screen_file_handler: logging.FileHandler = logging.FileHandler(
+        filename=str(screen_log_file_path),
         mode="a",
         encoding="utf-8",
     )
-    operator_file_handler.setLevel(logging.INFO)
-    operator_file_handler.setFormatter(stream_formatter)
-    base_logger.addHandler(operator_file_handler)
+    screen_file_handler.setLevel(logging.INFO)
+    screen_file_handler.setFormatter(stream_formatter)
+    base_logger.addHandler(screen_file_handler)
 
     # --- Console channel: operator-facing messages on screen ---
     console_logger_name: str = f"{base_logger_name}.{CONSOLE_LOGGER_SUFFIX}"
@@ -253,7 +239,7 @@ def setup_logging(debug: bool) -> None:
     console_logger.addHandler(console_stream_handler)
 
     console_file_handler: logging.FileHandler = logging.FileHandler(
-        filename=str(operator_log_file_path),
+        filename=str(screen_log_file_path),
         mode="a",
         encoding="utf-8",
     )
@@ -262,23 +248,16 @@ def setup_logging(debug: bool) -> None:
     console_file_handler.addFilter(console_only_filter)
     console_logger.addHandler(console_file_handler)
 
-    # Filter base logger's operator handlers: WARNING+ only, console records blocked
+    # Filter base logger's screen handlers: WARNING+ only, console records blocked
     channel_filter: _ConsoleChannelFilter = _ConsoleChannelFilter(console_logger_name)
     stream_handler.addFilter(channel_filter)
-    operator_file_handler.addFilter(channel_filter)
+    screen_file_handler.addFilter(channel_filter)
 
     base_logger.info(
         "Logging initialized console_channel=enabled detailed_file_level=DEBUG operator_filter=WARNING+ detailed_file=%s operator_file=%s",
         str(detailed_log_file_path),
-        str(operator_log_file_path),
+        str(screen_log_file_path),
     )
-    _, logger_name_source, _ = resolve_logger_name_meta()
-    if logger_name_source == f"env:{LEGACY_LOGGER_NAME_ENV_VAR}":
-        base_logger.warning(
-            "Logger name was resolved from deprecated env var %s; use %s instead.",
-            LEGACY_LOGGER_NAME_ENV_VAR,
-            LOGGER_NAME_ENV_VAR,
-        )
 
     logging.getLogger("requests_oauthlib").setLevel(logging.WARNING)
     logging.getLogger("oauthlib").setLevel(logging.WARNING)
@@ -304,12 +283,12 @@ def setup_bot_logging(*, debug: bool = False) -> None:
     entrypoint_label: str = f"{base_logger_name}_bot"
 
     detailed_log_file_path: Path
-    operator_log_file_path: Path
-    detailed_log_file_path, operator_log_file_path = resolve_log_file_paths(
+    screen_log_file_path: Path
+    detailed_log_file_path, screen_log_file_path = resolve_log_file_paths(
         entrypoint_label=entrypoint_label
     )
     detailed_log_file_path.parent.mkdir(parents=True, exist_ok=True)
-    operator_log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    screen_log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
     stream_formatter: logging.Formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(message)s"
@@ -342,14 +321,14 @@ def setup_bot_logging(*, debug: bool = False) -> None:
     detailed_file_handler.setFormatter(file_formatter)
     root_logger.addHandler(detailed_file_handler)
 
-    operator_file_handler: logging.FileHandler = logging.FileHandler(
-        filename=str(operator_log_file_path),
+    screen_file_handler: logging.FileHandler = logging.FileHandler(
+        filename=str(screen_log_file_path),
         mode="a",
         encoding="utf-8",
     )
-    operator_file_handler.setLevel(logging.INFO)
-    operator_file_handler.setFormatter(stream_formatter)
-    root_logger.addHandler(operator_file_handler)
+    screen_file_handler.setLevel(logging.INFO)
+    screen_file_handler.setFormatter(stream_formatter)
+    root_logger.addHandler(screen_file_handler)
 
     # --- Console channel (same scheme as setup_logging) ---
     console_logger_name: str = f"{base_logger_name}.{CONSOLE_LOGGER_SUFFIX}"
@@ -368,7 +347,7 @@ def setup_bot_logging(*, debug: bool = False) -> None:
     console_logger.addHandler(console_stream_handler)
 
     console_file_handler: logging.FileHandler = logging.FileHandler(
-        filename=str(operator_log_file_path),
+        filename=str(screen_log_file_path),
         mode="a",
         encoding="utf-8",
     )
@@ -377,23 +356,16 @@ def setup_bot_logging(*, debug: bool = False) -> None:
     console_file_handler.addFilter(console_only_filter)
     console_logger.addHandler(console_file_handler)
 
-    # Filter root logger's operator handlers: WARNING+ only, console records blocked
+    # Filter root logger's screen handlers: WARNING+ only, console records blocked
     channel_filter: _ConsoleChannelFilter = _ConsoleChannelFilter(console_logger_name)
     stream_handler.addFilter(channel_filter)
-    operator_file_handler.addFilter(channel_filter)
+    screen_file_handler.addFilter(channel_filter)
 
     root_logger.info(
         "Bot logging initialized console_channel=enabled detailed_file_level=DEBUG operator_filter=WARNING+ detailed_file=%s operator_file=%s",
         str(detailed_log_file_path),
-        str(operator_log_file_path),
+        str(screen_log_file_path),
     )
-    _, logger_name_source, _ = resolve_logger_name_meta()
-    if logger_name_source == f"env:{LEGACY_LOGGER_NAME_ENV_VAR}":
-        root_logger.warning(
-            "Logger name was resolved from deprecated env var %s; use %s instead.",
-            LEGACY_LOGGER_NAME_ENV_VAR,
-            LOGGER_NAME_ENV_VAR,
-        )
 
     logging.getLogger("requests_oauthlib").setLevel(logging.WARNING)
     logging.getLogger("oauthlib").setLevel(logging.WARNING)

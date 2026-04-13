@@ -52,23 +52,70 @@ def load_app_settings_from_path(path: Path) -> Dict[str, Any]:
     return app_settings
 
 
-def load_google_auth_mode_from_env() -> str:
-    raw_value: str = os.getenv("GOOGLE_AUTH_MODE", "").strip().lower()
-    if not raw_value:
-        return "oauth"
-    if raw_value in {"oauth", "service_account"}:
-        return raw_value
+def _parse_env_bool(raw_value: str, *, env_name: str) -> bool:
+    """Parse common boolean-like env values. Raises RuntimeError on invalid input."""
+    normalized_value: str = raw_value.strip().lower()
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"0", "false", "no", "off", ""}:
+        return False
     raise RuntimeError(
-        "Invalid GOOGLE_AUTH_MODE. Allowed values: 'oauth', 'service_account'. "
-        f"Current value: {raw_value!r}"
+        f"Invalid {env_name} value: {raw_value!r}. "
+        "Allowed: true/false, 1/0, yes/no, on/off."
     )
+
+
+def load_google_auth_mode(
+    app_settings: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Resolve Google auth mode: GOOGLE_AUTH_MODE env > GOOGLE_AUTH_MODE_SERVICE_ACCOUNT env > YAML > default 'oauth'."""
+    env_mode: str = os.getenv("GOOGLE_AUTH_MODE", "").strip().lower()
+    if env_mode:
+        if env_mode in {"oauth", "service_account"}:
+            return env_mode
+        raise RuntimeError(
+            "Invalid GOOGLE_AUTH_MODE. Allowed values: 'oauth', 'service_account'. "
+            f"Current value: {env_mode!r}"
+        )
+
+    env_service_account_toggle: str = os.getenv(
+        "GOOGLE_AUTH_MODE_SERVICE_ACCOUNT",
+        "",
+    ).strip()
+    if env_service_account_toggle:
+        if _parse_env_bool(
+            env_service_account_toggle,
+            env_name="GOOGLE_AUTH_MODE_SERVICE_ACCOUNT",
+        ):
+            return "service_account"
+        return "oauth"
+
+    if isinstance(app_settings, dict):
+        google_payload: Any = app_settings.get("google")
+        if isinstance(google_payload, dict):
+            yaml_value: str = str(
+                google_payload.get("auth_mode") or ""
+            ).strip().lower()
+            if yaml_value in {"oauth", "service_account"}:
+                return yaml_value
+
+    return "oauth"
+
+
+# Legacy alias kept for backward compatibility (used by google/auth.py import)
+def load_google_auth_mode_from_env() -> str:
+    return load_google_auth_mode()
 
 
 def load_google_service_account_path() -> Optional[Path]:
     raw_value: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "").strip()
-    if not raw_value:
-        return None
-    return Path(raw_value)
+    if raw_value:
+        return Path(raw_value)
+    # Fallback: secrets/service_account.json via ProjectPaths
+    default_path: Path = get_project_paths().service_account_path
+    if default_path.exists():
+        return default_path
+    return None
 
 
 def load_google_oauth_credentials_path() -> Path:
@@ -79,24 +126,6 @@ def load_google_oauth_credentials_path() -> Path:
 def load_google_oauth_token_path() -> Path:
     raw_value: str = os.getenv("GOOGLE_OAUTH_TOKEN_PATH", "").strip()
     return Path(raw_value) if raw_value else get_project_paths().oauth_token_path
-
-
-def warn_ignored_google_auth_mode_in_config(
-    app_settings: Dict[str, Any],
-    *,
-    logger: Optional[logging.Logger] = None,
-) -> None:
-    google_payload: Any = app_settings.get("google")
-    if not isinstance(google_payload, dict):
-        return
-    for key, value in google_payload.items():
-        normalized_key: str = str(key or "").strip().lower()
-        if "auth" in normalized_key and "mode" in normalized_key:
-            (logger or logging.getLogger(__name__)).warning(
-                "auth_mode in config is ignored; use GOOGLE_AUTH_MODE env; ignored_value=%r",
-                value,
-            )
-            return
 
 
 def warn_ignored_google_ids_in_config(
@@ -125,7 +154,6 @@ def validate_google_service_account_path_requirement(
     *,
     google_enabled: bool,
     google_auth_mode: str,
-    service_account_path_raw: str,
     service_account_path: Optional[Path],
     summarize_error: Optional[Callable[[Exception], str]] = None,
 ) -> None:
@@ -133,21 +161,21 @@ def validate_google_service_account_path_requirement(
         return
     if google_auth_mode != "service_account":
         return
-    resolved_path: str = str(service_account_path_raw or "").strip()
-    if not resolved_path or service_account_path is None:
+    if service_account_path is None:
         raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_PATH is required when google integration is enabled. "
-            f"Resolved path: {resolved_path!r}"
+            "Service account JSON is required when GOOGLE_AUTH_MODE=service_account. "
+            "Place the file at secrets/service_account.json or set GOOGLE_SERVICE_ACCOUNT_PATH env var."
         )
     if not service_account_path.exists():
         raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_PATH is required when google integration is enabled. "
-            f"Resolved path: {resolved_path!r}. File not found."
+            "Service account JSON not found. "
+            f"Resolved path: {str(service_account_path)!r}. "
+            "Place the file at secrets/service_account.json or set GOOGLE_SERVICE_ACCOUNT_PATH env var."
         )
     if not service_account_path.is_file():
         raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_PATH is required when google integration is enabled. "
-            f"Resolved path: {resolved_path!r}. Path is not a file."
+            "Service account path is not a file. "
+            f"Resolved path: {str(service_account_path)!r}."
         )
     try:
         with service_account_path.open("r", encoding="utf-8-sig") as file_obj:
@@ -155,8 +183,8 @@ def validate_google_service_account_path_requirement(
     except Exception as error:
         format_error: str = summarize_error(error) if summarize_error else str(error)
         raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_PATH is required when google integration is enabled. "
-            f"Resolved path: {resolved_path!r}. File is not readable: {format_error}"
+            "Service account JSON is not readable. "
+            f"Resolved path: {str(service_account_path)!r}. Error: {format_error}"
         ) from error
 
 
@@ -200,18 +228,31 @@ def _build_processing_config(
     )
 
 
-def _build_llm_config() -> LlmConfig:
-    """Build LLM config entirely from env variables."""
-    openai_model: str = os.getenv("OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
-    llm_provider: str = "openai"
-    llm_model: str = openai_model
-    openai_timeout_sec: float = EnvReader.float("STG_OPENAI_TIMEOUT_SEC", 120.0, min_value=1.0)
-    openai_max_output_tokens: int = EnvReader.int("STG_OPENAI_MAX_OUTPUT_TOKENS", 1000, min_value=1)
-    openai_pre_delay_sec: float = EnvReader.float("STG_OPENAI_PRE_DELAY_SEC", 5.0, min_value=0.0)
+def _build_llm_config(app_settings: Dict[str, Any]) -> LlmConfig:
+    """Build LLM config from YAML (primary) with env overrides."""
+    llm_payload: Any = app_settings.get("llm")
+    if not isinstance(llm_payload, dict):
+        llm_payload = {}
+
+    yaml_model: str = str(llm_payload.get("model") or "").strip() or DEFAULT_OPENAI_MODEL
+    yaml_timeout: float = float(llm_payload.get("timeout_sec", 120.0) or 120.0)
+    yaml_max_output: int = int(llm_payload.get("max_output_tokens", 1000) or 1000)
+    yaml_pre_delay: float = float(llm_payload.get("pre_delay_sec", 5.0) or 5.0)
+
+    openai_model: str = os.getenv("OPENAI_MODEL", "").strip() or yaml_model
+    openai_timeout_sec: float = EnvReader.float(
+        "STG_OPENAI_TIMEOUT_SEC", yaml_timeout, min_value=1.0,
+    )
+    openai_max_output_tokens: int = EnvReader.int(
+        "STG_OPENAI_MAX_OUTPUT_TOKENS", yaml_max_output, min_value=1,
+    )
+    openai_pre_delay_sec: float = EnvReader.float(
+        "STG_OPENAI_PRE_DELAY_SEC", yaml_pre_delay, min_value=0.0,
+    )
     llm_source_desc_max_chars: int = 2000
     return LlmConfig(
-        provider=llm_provider,
-        model=llm_model,
+        provider="openai",
+        model=openai_model,
         timeout_sec=openai_timeout_sec,
         max_output_tokens=openai_max_output_tokens,
         pre_delay_sec=openai_pre_delay_sec,
@@ -219,11 +260,15 @@ def _build_llm_config() -> LlmConfig:
     )
 
 
-def _build_cleanup_config() -> CleanupConfig:
-    """Build cleanup config from environment variables only."""
+def _build_cleanup_config(app_settings: Dict[str, Any]) -> CleanupConfig:
+    """Build cleanup config from YAML (primary) with env override."""
+    cleanup_payload: Any = app_settings.get("cleanup")
+    if not isinstance(cleanup_payload, dict):
+        cleanup_payload = {}
+    yaml_max_age: int = int(cleanup_payload.get("max_age_days", 3) or 3)
     cleanup_max_age_days: int = EnvReader.int(
         "STG_CLEANUP_MAX_AGE_DAYS",
-        3,
+        yaml_max_age,
         min_value=1,
     )
     return CleanupConfig(max_age_days=cleanup_max_age_days)
@@ -236,8 +281,7 @@ def _build_google_config(
     summarize_error: Optional[Callable[[Exception], str]],
 ) -> GoogleConfig:
     """Build Google config from YAML settings + env + validation."""
-    google_auth_mode: str = load_google_auth_mode_from_env()
-    google_service_account_path_raw: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "").strip()
+    google_auth_mode: str = load_google_auth_mode(app_settings)
     if os.getenv("GOOGLE_CREDENTIALS_PATH", "").strip() or os.getenv("GOOGLE_TOKEN_PATH", "").strip():
         logger.warning(
             "GOOGLE_CREDENTIALS_PATH/GOOGLE_TOKEN_PATH are deprecated and ignored. "
@@ -245,23 +289,34 @@ def _build_google_config(
         )
 
     google_enabled: bool = setting_as_bool(app_settings, "google.enabled")
-    google_service_account_path: Optional[Path] = (
-        Path(google_service_account_path_raw)
-        if google_service_account_path_raw
-        else None
-    )
+    google_service_account_path: Optional[Path] = load_google_service_account_path()
     validate_google_service_account_path_requirement(
         google_enabled=google_enabled,
         google_auth_mode=google_auth_mode,
-        service_account_path_raw=google_service_account_path_raw,
         service_account_path=google_service_account_path,
         summarize_error=summarize_error,
     )
+    drive_folder_id: str = EnvReader.str_required("GOOGLE_DRIVE_FOLDER_ID")
+    drive_preview_folder_id: Optional[str] = EnvReader.str_optional(
+        "GOOGLE_DRIVE_PREVIEW_FOLDER_ID",
+    )
+    if drive_preview_folder_id:
+        logger.info(
+            "google_drive_preview_folder_id source=env value=%s",
+            drive_preview_folder_id,
+        )
+    else:
+        drive_preview_folder_id = drive_folder_id
+        logger.info(
+            "google_drive_preview_folder_id source=fallback_to_drive_folder_id value=%s",
+            drive_preview_folder_id,
+        )
     return GoogleConfig(
         enabled=google_enabled,
+        auth_mode=google_auth_mode,
         service_account_path=google_service_account_path,
-        drive_folder_id=EnvReader.str_required("GOOGLE_DRIVE_FOLDER_ID"),
-        drive_preview_folder_id=EnvReader.str_required("GOOGLE_DRIVE_PREVIEW_FOLDER_ID"),
+        drive_folder_id=drive_folder_id,
+        drive_preview_folder_id=drive_preview_folder_id,
         drive_preview_path_template=setting_as_str(app_settings, "google.drive_preview_path_template"),
         doc_share_mode=normalize_google_doc_share_mode(setting_as_str(app_settings, "google.doc_share_mode")),
         sheets_id=EnvReader.str_required("GOOGLE_SHEETS_ID"),
@@ -346,15 +401,14 @@ def load_config_from_env(
         else project_paths.runtime_config_path
     )
     app_settings: Dict[str, Any] = load_app_settings_from_path(app_config_path)
-    warn_ignored_google_auth_mode_in_config(app_settings, logger=logger)
     warn_ignored_google_ids_in_config(app_settings, logger=logger)
 
     templates = load_templates_from_path(project_paths.templates_path)
     entrypoint_dir: Path = project_paths.entrypoint_path.parent
     return AppConfig(
         processing=_build_processing_config(app_settings, logger=logger),
-        cleanup=_build_cleanup_config(),
-        llm=_build_llm_config(),
+        cleanup=_build_cleanup_config(app_settings),
+        llm=_build_llm_config(app_settings),
         google=_build_google_config(
             app_settings,
             logger=logger,

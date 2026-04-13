@@ -7,9 +7,12 @@ import os
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand, User
 
-from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.bootstrap.logging_config import (
+    get_console_logger,
+    get_logger as _get_logger_impl,
+)
 from app.telegram_bot.bot_auth import RoleMiddleware
-from app.telegram_bot.bot_handlers_info import router
+from app.telegram_bot.bot_handlers_info import router, _MODE_KEYBOARD
 from app.telegram_bot.group_registry import KnownGroup, load_known_groups, sync_access_lists
 
 LOGGER: logging.Logger = _get_logger_impl("bot")
@@ -135,6 +138,36 @@ async def run_bot() -> None:
     except TimeoutError:
         LOGGER.warning("Bot menu command registration timed out; continuing without menu refresh")
     LOGGER.info("Bot polling started")
+    _console = get_console_logger()
+    _console.info("✅ Бот готов к работе")
+    _console.info("🤖 @%s", username)
+    _console.info("👤 Админы: %d | Пользователи: %d", len(admin_ids), len(user_ids))
+    if known_groups:
+        _console.info("💬 Известные группы: %d", len(known_groups))
+        group: KnownGroup
+        for group in known_groups:
+            _console.info(
+                "   📌 %s | %s | id=%s",
+                group.chat_title,
+                group.chat_type,
+                group.chat_id,
+            )
+    else:
+        _console.info("💬 Известные группы: 0")
+
+    # Notify known groups that bot is ready.
+    for group in known_groups:
+        try:
+            await bot.send_message(
+                chat_id=int(group.chat_id),
+                text=f"✅ Бот готов к работе\n🤖 @{username}\n\nВыберите режим обработки:",
+                reply_markup=_MODE_KEYBOARD,
+            )
+        except Exception:
+            LOGGER.debug(
+                "startup_notify_failed chat_id=%s",
+                group.chat_id,
+            )
     try:
         await dp.start_polling(bot)
     finally:

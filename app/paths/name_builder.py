@@ -104,8 +104,7 @@ def build_drive_preview_path_segments(
     if not raw_template:
         return []
     rendered_path: str = raw_template.format(
-        streamertg="restreamer",
-        restreamer="restreamer",
+        project="preview",
         preview="preview",
         language=_display_language_code(language),
         date=date_key,

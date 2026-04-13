@@ -56,6 +56,7 @@ class TelegramConfig:
 @dataclass(frozen=True)
 class GoogleConfig:
     enabled: bool
+    auth_mode: str
     service_account_path: Optional[Path]
     drive_folder_id: Optional[str]
     drive_preview_folder_id: Optional[str]

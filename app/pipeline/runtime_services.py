@@ -22,7 +22,10 @@ class BatchServices:
 
 
 def build_runtime_services(*, config: AppConfig) -> BatchServices:
-    services_factory: GoogleServicesFactory = GoogleServicesFactory()
+    services_factory: GoogleServicesFactory = GoogleServicesFactory(
+        auth_mode=config.google.auth_mode,
+        service_account_path=config.google.service_account_path,
+    )
     sheets_client: GoogleSheetsClient = GoogleSheetsClient(
         sheets_service=services_factory.create_sheets_service()
     )

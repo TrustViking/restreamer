@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from app.application.application import RestreamerApplication
+from app.application.application import PipelineApplication
 
-# Legacy alias for backward compatibility
-StreamertgApplication = RestreamerApplication
-
-__all__: list[str] = ["RestreamerApplication", "StreamertgApplication"]
+__all__: list[str] = ["PipelineApplication"]

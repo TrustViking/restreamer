@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from aiogram import Dispatcher, F, Router, types
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -16,8 +16,11 @@ from aiogram.types import (
     InlineKeyboardMarkup,
 )
 
-from app.application.application import RestreamerApplication
-from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.application.application import PipelineApplication
+from app.bootstrap.logging_config import (
+    get_console_logger as _get_console_logger,
+    get_logger as _get_logger_impl,
+)
 
 router: Router = Router()
 LOGGER: logging.Logger = _get_logger_impl("bot")
@@ -84,6 +87,22 @@ async def _safe_callback_answer(
         else:
             await callback.answer()
         return True
+    except TelegramRetryAfter as exc:
+        retry_after: float = float(getattr(exc, "retry_after", 5) or 5)
+        LOGGER.warning(
+            "callback_answer_retry_after retry_after=%.1f callback_id=%s",
+            retry_after,
+            callback.id,
+        )
+        await asyncio.sleep(retry_after + 1.0)
+        try:
+            if text:
+                await callback.answer(text, show_alert=show_alert)
+            else:
+                await callback.answer()
+            return True
+        except Exception:
+            return False
     except TelegramBadRequest as exc:
         if _STALE_CALLBACK_PATTERN.search(str(exc)):
             LOGGER.debug("stale_callback_ignored callback_id=%s error=%s", callback.id, exc)
@@ -96,21 +115,45 @@ async def _safe_send_message(
     text: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
+    max_retries: int = 3,
 ) -> bool:
-    """Send a new message in the same chat. Returns True on success."""
+    """Send a new message in the same chat with TelegramRetryAfter handling. Best effort."""
     message_obj: Any = callback.message
     answer_method: Any = getattr(message_obj, "answer", None)
     if not callable(answer_method):
         try:
             await callback.answer(text[:200], show_alert=True)
-        except TelegramBadRequest:
+        except Exception:
             return False
         return False
-    try:
-        await answer_method(text, reply_markup=reply_markup)
-        return True
-    except TelegramBadRequest:
-        return False
+
+    attempt: int
+    for attempt in range(1, max_retries + 1):
+        try:
+            await answer_method(text, reply_markup=reply_markup)
+            return True
+        except TelegramRetryAfter as error:
+            retry_after: float = float(getattr(error, "retry_after", 5) or 5)
+            LOGGER.warning(
+                "bot_send_retry_after retry_after=%.1f attempt=%d/%d text=%s",
+                retry_after,
+                attempt,
+                max_retries,
+                text[:120],
+            )
+            await asyncio.sleep(retry_after + 1.0)
+        except TelegramBadRequest as error:
+            if _STALE_CALLBACK_PATTERN.search(str(error)):
+                LOGGER.debug("stale_or_invalid_message_send_ignored error=%s", error)
+                return False
+            LOGGER.warning("bot_send_bad_request error=%s text=%s", error, text[:120])
+            return False
+        except Exception as error:
+            LOGGER.warning("bot_send_failed error=%s text=%s", error, text[:120])
+            return False
+
+    LOGGER.warning("bot_send_exhausted_retries max_retries=%d text=%s", max_retries, text[:120])
+    return False
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -138,11 +181,12 @@ async def stop_bot_handler(message: types.Message, dispatcher: Dispatcher) -> No
     actor: types.User | None = message.from_user
     actor_id: int = int(actor.id) if actor is not None else 0
     actor_username: str = _format_username(actor.username if actor is not None else None)
-    LOGGER.warning(
+    LOGGER.info(
         "bot_stop_requested user_id=%d username=%s",
         actor_id,
         actor_username,
     )
+    _get_console_logger().info("⏹ Бот остановлен по команде %s", actor_username)
     await message.answer("⏹ Останавливаю бота...")
     try:
         await dispatcher.stop_polling()
@@ -215,26 +259,50 @@ async def run_callback_handler(callback: CallbackQuery) -> None:
         )
         return
 
-    _progress_loop: asyncio.AbstractEventLoop | None = None
-    try:
-        _progress_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        pass
+    _progress_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    _progress_loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+
+    # Operator-facing audit trail
+    _op_logger = _get_console_logger()
+    _actor_display: str = actor_username
+    if actor is not None and actor.first_name:
+        _actor_display = f"{actor.first_name} ({actor_username})"
+    _chat_display: str = source_chat_id or "config"
+    _chat_obj = getattr(callback.message, "chat", None)
+    if _chat_obj is not None:
+        _chat_title = getattr(_chat_obj, "title", None)
+        _chat_type = getattr(_chat_obj, "type", None)
+        if _chat_title:
+            _chat_display = f"{_chat_title} ({_chat_type}, id={source_chat_id})"
+    _op_logger.info(
+        "▶️ Запуск: режим=%s, от %s, чат: %s",
+        display_mode,
+        _actor_display,
+        _chat_display,
+    )
+
+    async def _progress_worker() -> None:
+        """Strictly sequential progress-message delivery."""
+        while True:
+            text: str | None = await _progress_queue.get()
+            if text is None:
+                break
+            try:
+                await _safe_send_message(
+                    callback,
+                    text,
+                    reply_markup=None,
+                )
+            except Exception:
+                LOGGER.debug("progress_worker_send_failed text=%s", text)
+
+    _worker_task: asyncio.Task[None] = asyncio.create_task(_progress_worker())
 
     def _on_progress(text: str) -> None:
-        if _progress_loop is None:
-            return
-        asyncio.run_coroutine_threadsafe(
-            _safe_send_message(
-                callback,
-                text,
-                reply_markup=None,
-            ),
-            _progress_loop,
-        )
+        _progress_loop.call_soon_threadsafe(_progress_queue.put_nowait, text)
 
     def _run_pipeline(mode: str, target_chat_id: str | None) -> int:
-        application: RestreamerApplication = RestreamerApplication(
+        application: PipelineApplication = PipelineApplication(
             telegram_chat_id_override=target_chat_id,
             progress_callback=_on_progress,
         )
@@ -252,6 +320,11 @@ async def run_callback_handler(callback: CallbackQuery) -> None:
             source_chat_id or "fallback_config",
         )
         exit_code: int = await asyncio.to_thread(_run_pipeline, audit_mode, source_chat_id)
+
+        # Wait until all queued progress messages are sent.
+        _progress_queue.put_nowait(None)
+        await _worker_task
+
         elapsed_sec: float = round(time.monotonic() - started_at, 1)
         if exit_code == 0:
             LOGGER.info(
@@ -293,6 +366,10 @@ async def run_callback_handler(callback: CallbackQuery) -> None:
             reply_markup=_MODE_KEYBOARD,
         )
     except Exception as exc:
+        if not _worker_task.done():
+            _progress_queue.put_nowait(None)
+            await _worker_task
+
         elapsed_sec: float = round(time.monotonic() - started_at, 1)
         LOGGER.exception(
             "pipeline_run_failed user_id=%d username=%s mode=%s target_chat_id=%s elapsed_sec=%.1f",
@@ -314,4 +391,10 @@ async def run_callback_handler(callback: CallbackQuery) -> None:
             reply_markup=_MODE_KEYBOARD,
         )
     finally:
+        if not _worker_task.done():
+            _progress_queue.put_nowait(None)
+            try:
+                await asyncio.wait_for(_worker_task, timeout=10.0)
+            except asyncio.TimeoutError:
+                _worker_task.cancel()
         _pipeline_lock.release()
