@@ -124,3 +124,8 @@ app/config/runtime/app_config.local.yaml
 app/config/runtime/app_config.*.local.yaml
 # Hidden editor/temp duplicates (e.g. .app_config.example.yaml)
 app/config/runtime/.*.yaml
+
+########################################
+# Claude Code local session state
+########################################
+.claude/
