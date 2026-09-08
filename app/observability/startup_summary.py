@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from app.config.settings import AppConfig
@@ -108,7 +109,10 @@ def _log_startup_banner(
         audit_branches,
     )
     logger.info("project_root=%s", startup_context.project_root)
-    logger.info("entrypoint_path=%s", startup_context.entrypoint_path)
+    logger.info(
+        "entrypoint_path=%s",
+        Path(sys.argv[0]).resolve() if sys.argv else startup_context.entrypoint_path,
+    )
     logger.info("runtime_config_path=%s", startup_context.runtime_config_path)
     logger.info("templates_path=%s", startup_context.templates_path)
     logger.info("secrets_env_path=%s", startup_context.secrets_env_path)
@@ -152,7 +156,10 @@ def _log_startup_dump(
         f"audit_mode={startup_context.args_audit_mode}"
     )
     _log_run_startup_line(f"cwd={os.getcwd()}")
-    _log_run_startup_line(f"script_path={startup_context.entrypoint_path}")
+    _invoked_script: Path = (
+        Path(sys.argv[0]).resolve() if sys.argv else startup_context.entrypoint_path
+    )
+    _log_run_startup_line(f"script_path={_invoked_script}")
     _log_run_startup_line(f"project_root={startup_context.project_root}")
     _log_run_startup_line(f"runtime_config_path={startup_context.runtime_config_path}")
     _log_run_startup_line(f"templates_path={startup_context.templates_path}")

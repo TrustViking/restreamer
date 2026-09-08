@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
+from app.core.models import MergedLanguageContent
+from app.llm.merges.merge_links import OfficialLinksFillResult, OfficialLinksSelection
 from app.llm.merges.merge_quality import count_overloaded_bullets
-from app.llm.merges.merge_service import attempt_openai_merge_with_audit
+from app.llm.merges.merge_quality import normalize_merge_description
+from app.llm.merges.merge_validation import _validate_coverage_preserving_merge_or_raise
 
 
 class CompactBulletOverflowTests(unittest.TestCase):
@@ -67,29 +68,34 @@ class CompactBulletOverflowTests(unittest.TestCase):
             "🔹 Seventh concrete point linking both sources with explicit facts.\n"
             "🔹 Eighth concrete point extending the same compact agenda."
         )
-        response_payload: dict[str, str] = {
-            "title": "Two-source agenda with too many bullets",
-            "description": description_text,
-        }
-        response: SimpleNamespace = SimpleNamespace(
-            raw_text=json.dumps(response_payload, ensure_ascii=False),
-            structured_payload=response_payload,
+        merge_quality = normalize_merge_description(
+            description=description_text,
+            language="en",
+            source_texts=(),
+            title="Two-source agenda with too many bullets",
+        ).diagnostics
+        merged_content = MergedLanguageContent(
+            title="Two-source agenda with too many bullets",
+            description=description_text,
+            description_selected=description_text,
+            description_audit=description_text,
         )
-        with patch(
-            "app.llm.merges.merge_service.openai_request_merge",
-            side_effect=[response, response, response],
-        ):
-            attempt = attempt_openai_merge_with_audit(
-                language="en",
+        with self.assertRaises(Exception) as captured:
+            _validate_coverage_preserving_merge_or_raise(
+                merged_content=merged_content,
                 videos=self._videos(),
-                config=self._config(),
-                attempt_label="TEST",
-                summarize_error=lambda error: str(error),
-                normalize_youtube_url=lambda url: url,
-                no_description_text="no description",
+                official_links_selection=OfficialLinksSelection(
+                    found_in_sources=0,
+                    kept_links=(),
+                ),
+                official_links_fill=OfficialLinksFillResult(
+                    description=description_text,
+                    links_in_output=0,
+                    fill_applied=False,
+                ),
+                merge_quality=merge_quality,
             )
-        self.assertIsNone(attempt.merged)
-        self.assertIn("compact_bullet_overflow", tuple(attempt.validation_reasons or ()))
+        self.assertIn("compact_bullet_overflow", tuple(captured.exception.reason_codes))
 
 
     def test_very_long_bullet_is_overloaded_without_names(self) -> None:

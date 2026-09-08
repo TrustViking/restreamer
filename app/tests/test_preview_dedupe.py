@@ -89,7 +89,7 @@ class PreviewDedupeTests(unittest.TestCase):
                 upload_image_and_make_public=lambda **kwargs: (_ for _ in ()).throw(AssertionError("upload must be skipped")),
             )
             with self.assertLogs("app.planning.batch_planner", level="INFO") as captured:
-                materialize_prepared_previews(
+                materialized = materialize_prepared_previews(
                     logger=logging.getLogger("app.planning.batch_planner"),
                     config=SimpleNamespace(
                         google=SimpleNamespace(
@@ -104,6 +104,36 @@ class PreviewDedupeTests(unittest.TestCase):
                     dry_run=False,
                 )
             self.assertIn("preview_save_skipped_duplicate_drive", "\n".join(captured.output))
+            self.assertEqual(1, len(materialized))
+            self.assertIsNotNone(materialized[0].saved_preview_url)
+            self.assertIn("file-1", str(materialized[0].saved_preview_url))
+
+    def test_drive_fresh_upload_sets_saved_preview_url(self) -> None:
+        prepared_video = self._prepared_video()
+        expected_url = "https://drive.google.com/uc?export=download&id=new-file-id"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "090326" / "en" / "1_en_example.jpg"
+            drive_client = SimpleNamespace(
+                ensure_folder_path=lambda **kwargs: "folder-1",
+                find_file_by_name_and_size=lambda **kwargs: None,
+                upload_image_and_make_public=lambda **kwargs: ("new-file-id", expected_url),
+            )
+            materialized = materialize_prepared_previews(
+                logger=logging.getLogger("app.planning.batch_planner"),
+                config=SimpleNamespace(
+                    google=SimpleNamespace(
+                        drive_preview_folder_id="preview-root",
+                        drive_folder_id="preview-root",
+                        drive_preview_path_template="{language}/{date}",
+                    ),
+                ),
+                drive_client=drive_client,
+                name_builder=SimpleNamespace(build_image_path=lambda **kwargs: image_path),
+                prepared_videos=[prepared_video],
+                dry_run=False,
+            )
+            self.assertEqual(1, len(materialized))
+            self.assertEqual(expected_url, materialized[0].saved_preview_url)
 
     def test_drive_duplicate_lookup_logs_for_duplicate_found(self) -> None:
         drive_client = GoogleDriveClient(

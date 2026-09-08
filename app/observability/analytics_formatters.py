@@ -17,14 +17,28 @@ def _has_failed_branch(state: RuntimeAnalyticsState) -> bool:
     return any(branch_state.failed for branch_state in state.branch_results.values())
 
 
-def _resolve_run_status(exit_code: int, state: RuntimeAnalyticsState) -> str:
-    if exit_code != 0 or state.errors > 0 or _has_failed_branch(state):
+def _resolve_run_status(
+    exit_code: int,
+    state: RuntimeAnalyticsState,
+    *,
+    fallback_merge_blocks: int = 0,
+    partial_merge_artifacts: int = 0,
+) -> str:
+    if exit_code != 0:
+        return "failed"
+    if _has_failed_branch(state):
+        return "failed"
+    if state.docs_failed > 0 or state.telegram_failed > 0:
         return "failed"
     if (
-        state.warnings_operational > 0
-        or state.docs_failed > 0
-        or state.telegram_failed > 0
+        state.errors > 0
+        or state.warnings_operational > 0
         or state.malformed_tail_url_fragments_dropped > 0
+        or state.merge_final_failure > 0
+        or state.publish_gate_blocked_count > 0
+        or state.telegram_skipped > 0
+        or fallback_merge_blocks > 0
+        or partial_merge_artifacts > 0
     ):
         return "partial"
     return "success"
@@ -57,10 +71,23 @@ def _format_branch_summary(
             branch_label,
             BranchAnalyticsState(),
         )
-        branch_parts.append(
-            f"{branch_label}:"
-            f"{'failed' if branch_state.failed else ('success' if branch_state.completed else 'not_run')}"
-        )
+        if branch_state.failed:
+            branch_status = "failed"
+        elif branch_state.completed:
+            # Merge-ветка может завершиться без краха, но с фактическими
+            # деградациями публикации (final_failure либо publish-gate fallback).
+            # В этом случае summary должен отражать `partial`, чтобы
+            # соответствовать общему status=partial.
+            if branch_label == BRANCH_MERGE and (
+                state.merge_final_failure > 0
+                or state.publish_gate_blocked_count > 0
+            ):
+                branch_status = "partial"
+            else:
+                branch_status = "success"
+        else:
+            branch_status = "not_run"
+        branch_parts.append(f"{branch_label}:{branch_status}")
     return ",".join(branch_parts)
 
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
-from app.core.cta_detection import looks_like_cta_paragraph, starts_with_cta_prefix
+from app.core.cta_detection import starts_with_cta_prefix
 from app.core.official_links import is_official_links_heading
 from app.core.text_utils import (
     normalize_newlines,
@@ -232,10 +232,6 @@ def _split_body_and_allowed_tail(text: str) -> tuple[List[str], List[str], List[
         if _looks_like_hashtags_paragraph(candidate):
             tail_paragraphs_reversed.append(body_paragraphs.pop())
             tail_blocks_reversed.append("hashtags")
-            continue
-        if looks_like_cta_paragraph(candidate):
-            tail_paragraphs_reversed.append(body_paragraphs.pop())
-            tail_blocks_reversed.append("cta")
             continue
         if _looks_like_official_links_paragraph(candidate):
             tail_paragraphs_reversed.append(body_paragraphs.pop())

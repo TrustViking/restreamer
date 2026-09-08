@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
-from typing import Any, Dict, Optional, Tuple, cast
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 from app.bootstrap.logging_config import get_logger
 from app.core.models import VideoMetadata
@@ -17,32 +20,76 @@ class YouTubeMetadataFetcher:
 
 
 class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
-    def __init__(self, timeout_seconds: float = 20.0) -> None:
+    """Fetcher через локальный бинарник yt-dlp.exe (subprocess + JSON).
+
+    Принимает ytdlp_path=None для обратной совместимости - в этом случае
+    путь резолвится из ProjectPaths при первом вызове.
+    """
+
+    def __init__(
+        self,
+        ytdlp_path: Optional[Path] = None,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self._ytdlp_path: Optional[Path] = ytdlp_path
         self._timeout_seconds: float = timeout_seconds
 
-    def fetch(self, video_url: str) -> VideoMetadata:
-        from yt_dlp import YoutubeDL
+    def _resolve_path(self) -> Path:
+        if self._ytdlp_path is not None:
+            return self._ytdlp_path
+        from app.paths.project_paths import get_project_paths
+        return get_project_paths().ytdlp_exe_path
 
-        ydl_options: Dict[str, Any] = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "socket_timeout": self._timeout_seconds,
-            "extract_flat": False,
-            "noplaylist": True,
-        }
-        with YoutubeDL(cast(Any, ydl_options)) as ydl:
-            ydl_any: Any = ydl
-            info: Dict[str, Any] = cast(
-                Dict[str, Any],
-                ydl_any.extract_info(video_url, download=False),
-            )
-        LOGGER.debug(
-            "yt-dlp diagnostics: _type=%s id=%s webpage_url=%s",
-            info.get("_type"),
-            info.get("id"),
-            info.get("webpage_url"),
+    def fetch(self, video_url: str) -> VideoMetadata:
+        ytdlp_path: Path = self._resolve_path()
+        command: list[str] = [
+            str(ytdlp_path),
+            "--dump-single-json",
+            "--no-warnings",
+            "--skip-download",
+            "--no-playlist",
+        ]
+
+        from app.paths.project_paths import get_project_paths
+        project_paths = get_project_paths()
+
+        cookies_path: Path = project_paths.cookies_file_path
+        if cookies_path.exists():
+            command += ["--cookies", str(cookies_path)]
+
+        deno_path: Path = project_paths.deno_exe_path
+        if deno_path.exists():
+            command += ["--js-runtimes", f"deno:{deno_path}"]
+
+        command.append(video_url)
+        LOGGER.debug("yt-dlp metadata command: %s", " ".join(command))
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=self._timeout_seconds,
+            encoding="utf-8",
+            errors="replace",
         )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"yt-dlp не смог получить metadata для {video_url}. "
+                f"stderr: {(result.stderr or '').strip()}"
+            )
+
+        try:
+            info: Dict[str, Any] = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"yt-dlp вернул невалидный JSON для {video_url}: {exc}"
+            ) from exc
+
+        return self._build_metadata(video_url=video_url, info=info)
+
+    def _build_metadata(self, *, video_url: str, info: Dict[str, Any]) -> VideoMetadata:
         title: str = str(info.get("title") or "").strip()
         title = sanitize_source_video_title(title)
         description: str = str(info.get("description") or "").strip()
@@ -60,7 +107,7 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
             str(info.get("webpage_url") or info.get("original_url") or video_url).strip()
             or video_url
         )
-        # --- Language signals extraction (for VideoLanguageProfile) ---
+
         formats_list: list = info.get("formats") or []
         audio_langs: list[str] = []
         for fmt in formats_list:
@@ -75,18 +122,17 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
         auto_caption_lang_keys: tuple[str, ...] = tuple(raw_auto_captions.keys())
 
         LOGGER.debug(
-            "yt-dlp language signals: url=%s video_language=%s channel_language=%s "
-            "audio_languages=%s subtitle_languages=%s auto_caption_languages=%s "
-            "formats_count=%d subtitles_count=%d auto_captions_count=%d",
+            "yt-dlp diagnostics: url=%s title=%r youtube_language=%s "
+            "channel_language=%s audio_languages=%s subtitle_languages=%s "
+            "auto_caption_languages=%s formats_count=%d",
             video_url,
+            title,
             youtube_language,
             channel_language,
             audio_langs,
             subtitle_lang_keys,
             auto_caption_lang_keys,
             len(formats_list),
-            len(raw_subtitles),
-            len(raw_auto_captions),
         )
 
         if not title:
@@ -111,9 +157,7 @@ class YtDlpYouTubeMetadataFetcher(YouTubeMetadataFetcher):
                     thumbnail_url,
                 )
             else:
-                raise ValueError(
-                    "Не удалось получить thumbnail_url (yt-dlp вернул пусто)."
-                )
+                raise ValueError("Не удалось получить thumbnail_url (yt-dlp вернул пусто).")
         if not description:
             LOGGER.warning(
                 "yt-dlp returned empty description for url=%s (id=%s).",

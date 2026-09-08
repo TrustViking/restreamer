@@ -99,6 +99,11 @@ def _normalize_formatting_only_description(
     language: str,
     source_texts: Sequence[str],
     reason_codes: Sequence[str],
+    branch_label: str,
+    date_key: str,
+    slot_key: str,
+    model_name: str,
+    attempt_index: int,
 ) -> FormattingNormalizationResult:
     normalized_reason_codes: tuple[str, ...] = _normalize_description_validation_reason_codes(
         reason_codes
@@ -158,6 +163,11 @@ def _attempt_expanded_formatting_recovery(
         language=language,
         source_texts=source_texts,
         reason_codes=reason_codes,
+        branch_label=branch_label,
+        date_key=date_key,
+        slot_key=slot_key,
+        model_name=model_name,
+        attempt_index=attempt_index,
     )
     if (
         normalization_result.description_text == merged_content.description

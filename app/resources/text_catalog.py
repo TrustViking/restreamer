@@ -21,38 +21,6 @@ def canonical_service_lines() -> Dict[str, Dict[str, str]]:
 
 
 @lru_cache(maxsize=1)
-def official_links_headings() -> Dict[str, str]:
-    raw_payload: Dict[str, object] = load_json_resource("official_links_headings.json")
-    normalized_payload: Dict[str, str] = {
-        str(key): str(value)
-        for key, value in raw_payload.items()
-    }
-    return normalized_payload
-
-
-@lru_cache(maxsize=1)
-def recommended_materials_headings() -> Dict[str, str]:
-    raw_payload: Dict[str, object] = load_json_resource("recommended_materials_headings.json")
-    normalized_payload: Dict[str, str] = {
-        str(key): str(value)
-        for key, value in raw_payload.items()
-    }
-    return normalized_payload
-
-
-def resolve_official_links_heading(language: str) -> str:
-    normalized_language: str = str(language or "").strip().lower()
-    headings: Dict[str, str] = official_links_headings()
-    return headings.get(normalized_language, headings.get("other", ""))
-
-
-def resolve_recommended_materials_heading(language: str) -> str:
-    normalized_language: str = str(language or "").strip().lower()
-    headings: Dict[str, str] = recommended_materials_headings()
-    return headings.get(normalized_language, headings.get("other", ""))
-
-
-@lru_cache(maxsize=1)
 def promotional_opener_phrases() -> tuple[str, ...]:
     phrases: tuple[str, ...] = load_lines_resource("promotional_opener_phrases.txt")
     return phrases

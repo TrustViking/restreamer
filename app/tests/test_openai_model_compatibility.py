@@ -42,9 +42,10 @@ class OpenAIModelCompatibilityTests(unittest.TestCase):
             structured_schema={"name": "schema", "schema": {"type": "object"}},
             temperature=0.0,
             compatibility=compatibility,
+            reasoning_effort="medium",
         )
         self.assertIn("reasoning", request_kwargs)
-        self.assertEqual({"effort": "low"}, request_kwargs["reasoning"])
+        self.assertEqual({"effort": "medium"}, request_kwargs["reasoning"])
         self.assertIn("text", request_kwargs)
 
     def test_gpt4o_request_omits_reasoning_effort(self) -> None:
@@ -60,6 +61,7 @@ class OpenAIModelCompatibilityTests(unittest.TestCase):
             structured_schema={"name": "schema", "schema": {"type": "object"}},
             temperature=0.0,
             compatibility=compatibility,
+            reasoning_effort="medium",
         )
         self.assertNotIn("reasoning", request_kwargs)
         self.assertIn("text", request_kwargs)

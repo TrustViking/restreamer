@@ -49,6 +49,10 @@ class RuntimeAnalyticsState:
     telegram_failed: int = 0
     telegram_skipped: int = 0
     malformed_tail_url_fragments_dropped: int = 0
+    merge_final_failure: int = 0
+    merge_validation_rejected: int = 0
+    publish_gate_blocked_count: int = 0
+    publish_gate_blocked_languages: Set[str] = field(default_factory=set)
     malformed_tail_cleanup_keys: Set[str] | None = None
     branch_results: Dict[str, BranchAnalyticsState] = field(default_factory=dict)
     branch_date_results: Dict[str, BranchDateAnalyticsState] = field(default_factory=dict)

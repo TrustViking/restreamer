@@ -281,6 +281,20 @@ class RuntimeAnalyticsCollector:
             )
             branch_date_state.telegram_skipped += max(0, count)
 
+    def record_merge_final_failure(self, *, count: int = 1) -> None:
+        self._state.merge_final_failure += max(0, count)
+
+    def record_merge_validation_rejected(self, *, count: int = 1) -> None:
+        self._state.merge_validation_rejected += max(0, count)
+
+    def record_publish_gate_blocked(self, *, language: str, target: str) -> None:
+        # publish_gate_blocked_count считает срабатывания publish-gate ПО target-каналам.
+        # Один язык, заблокированный и в doc, и в telegram, даёт count=2 при единственном
+        # языке в publish_gate_blocked_languages — это by design, не баг отчётности.
+        self._state.publish_gate_blocked_count += 1
+        normalized_language: str = str(language or "unknown").strip().lower() or "unknown"
+        self._state.publish_gate_blocked_languages.add(normalized_language)
+
     def record_malformed_tail_url_cleanup(self, count: int, *, event_key: Optional[str] = None) -> None:
         if (
             event_key
@@ -452,13 +466,18 @@ class RuntimeAnalyticsCollector:
         full_merge_artifacts: int = 0,
         run_summary_ms: int = 0,
     ) -> None:
-        status: str = _resolve_run_status(exit_code, self._state)
+        status: str = _resolve_run_status(
+            exit_code,
+            self._state,
+            fallback_merge_blocks=fallback_merge_blocks,
+            partial_merge_artifacts=partial_merge_artifacts,
+        )
         branch_summary: str = _format_branch_summary(
             audit_mode=audit_mode,
             state=self._state,
         )
         logger.info(
-            "run_final_summary processing_mode=%s audit_mode=%s status=%s llm_provider=%s llm_model_effective=%s llm_model_configured=%s llm_provider_model=%s warnings_total=%d warnings_operational=%d warnings_informational=%d errors_total=%d warning_reason_codes=%s error_reason_codes=%s degraded_recovered_count=%d degraded_unrecovered_count=%d rows_processed=%d rows_skipped=%d planned_items=%d unique_dates_processed=%d date_branch_executions=%d docs_created=%d docs_failed=%d telegram_sent=%d telegram_failed=%d telegram_skipped=%d merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d paragraph_recovery_used=%d merge_candidate_blocks=%d fallback_merge_blocks=%d partial_merge_artifacts=%d full_merge_artifacts=%d content_contract_failures=%d content_contract_recovered=%d content_contract_unrecovered=%d malformed_tail_urls_dropped=%d startup_health_ms=%d sheet_load_ms=%d shared_preparation_ms=%d planning_ms=%d slot_processing_ms=%d doc_publish_ms=%d telegram_publish_ms=%d run_summary_ms=%d total_run_ms=%d branch_summary=%s",
+            "run_final_summary processing_mode=%s audit_mode=%s status=%s llm_provider=%s llm_model_effective=%s llm_model_configured=%s llm_provider_model=%s warnings_total=%d warnings_operational=%d warnings_informational=%d errors_total=%d warning_reason_codes=%s error_reason_codes=%s degraded_recovered_count=%d degraded_unrecovered_count=%d rows_processed=%d rows_skipped=%d planned_items=%d unique_dates_processed=%d date_branch_executions=%d docs_created=%d docs_failed=%d telegram_sent=%d telegram_failed=%d telegram_skipped=%d merge_success=%d validation_rejected=%d retry_used=%d final_failure=%d merge_final_failure_recorded=%d merge_validation_rejected_recorded=%d paragraph_recovery_used=%d merge_candidate_blocks=%d fallback_merge_blocks=%d partial_merge_artifacts=%d full_merge_artifacts=%d content_contract_failures=%d content_contract_recovered=%d content_contract_unrecovered=%d malformed_tail_urls_dropped=%d startup_health_ms=%d sheet_load_ms=%d shared_preparation_ms=%d planning_ms=%d slot_processing_ms=%d doc_publish_ms=%d telegram_publish_ms=%d run_summary_ms=%d total_run_ms=%d publish_gate_blocked_count=%d publish_gate_blocked_languages=%s branch_summary=%s",
             processing_mode,
             audit_mode,
             status,
@@ -488,6 +507,8 @@ class RuntimeAnalyticsCollector:
             validation_rejected,
             retry_used,
             final_failure,
+            self._state.merge_final_failure,
+            self._state.merge_validation_rejected,
             paragraph_recovery_used,
             merge_candidate_blocks,
             fallback_merge_blocks,
@@ -506,6 +527,8 @@ class RuntimeAnalyticsCollector:
             self._state.stage_durations_ms.get("telegram_publish", 0),
             int(run_summary_ms),
             int(round((time.perf_counter() - self._state.run_started_at) * 1000.0)),
+            self._state.publish_gate_blocked_count,
+            ",".join(sorted(self._state.publish_gate_blocked_languages)) or "none",
             branch_summary,
         )
 
@@ -714,6 +737,33 @@ def record_telegram_skipped(*, count: int, date_key: Optional[str] = None, branc
         date_key=date_key,
         branch_label=branch_label,
     )
+
+
+def record_merge_final_failure(*, count: int = 1) -> None:
+    if _ACTIVE_COLLECTOR is None:
+        return
+    _ACTIVE_COLLECTOR.record_merge_final_failure(count=count)
+
+
+def record_merge_validation_rejected(*, count: int = 1) -> None:
+    if _ACTIVE_COLLECTOR is None:
+        return
+    _ACTIVE_COLLECTOR.record_merge_validation_rejected(count=count)
+
+
+def record_publish_gate_blocked(*, language: str, target: str) -> None:
+    if _ACTIVE_COLLECTOR is None:
+        return
+    _ACTIVE_COLLECTOR.record_publish_gate_blocked(language=language, target=target)
+
+
+def get_state_snapshot() -> Optional[RuntimeAnalyticsState]:
+    # NOTE: Возвращает живой объект state, а не его копию. Имя сохранено как
+    # `snapshot` для семантической однородности с другими модулями; вызывающий
+    # код должен использовать его только для чтения, без мутаций.
+    if _ACTIVE_COLLECTOR is None:
+        return None
+    return _ACTIVE_COLLECTOR._state
 
 
 def record_malformed_tail_url_cleanup(count: int, *, event_key: Optional[str] = None) -> None:

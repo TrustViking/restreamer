@@ -21,6 +21,12 @@ BULLET_OVERLOAD_CHAR_LIMIT: int = 280
 BULLET_OVERLOAD_NAME_LIMIT: int = 3
 BULLET_ABSOLUTE_MAX_CHAR_LIMIT: int = 500
 
+# Compact-mode bullet bounds. Used by the merge prompt contract,
+# the validator's compact_bullet_overflow reject, and the normalizer's
+# deterministic trim repair. Keep these three usages in sync via this constant.
+COMPACT_BULLET_MIN: int = 4
+COMPACT_BULLET_MAX: int = 7
+
 PRIMARY_ATTEMPTS: int = 2
 PRIMARY_ATTEMPTS_EXTENDED: int = 3
 STYLE_CONTRACT_VERSION: str = "v4_merge_quality_hardening"

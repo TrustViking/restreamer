@@ -14,6 +14,7 @@ from app.core.models import (
 )
 from app.llm.merges.merge_constants import (
     ALLOWED_BULLET_MARKERS,
+    COMPACT_BULLET_MAX,
     RECOVERABLE_REJECT_CODES,
     SEMANTIC_TOKEN_PATTERN,
     STYLE_CONTRACT_VERSION,
@@ -443,7 +444,7 @@ def _validate_coverage_preserving_merge_or_raise(
                 reason_codes=("insufficient_bullet_coverage",),
                 message="description validation failed: insufficient_bullet_coverage",
             )
-    if source_count <= 2 and diagnostics.bullet_points_count > 7:
+    if source_count <= 2 and diagnostics.bullet_points_count > COMPACT_BULLET_MAX:
         raise _build_description_validation_failure(
             reason_codes=("compact_bullet_overflow",),
             message="description validation failed: compact_bullet_overflow",
@@ -609,7 +610,7 @@ def _log_merge_style_diagnostics(
         "yes" if diagnostics.official_links_fill_applied else "no",
     )
     LOGGER.info(
-        "merge_semantic_gate branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d block_language_expected=%s hook_language_detected=%s lead_in_language_detected=%s links_heading_language_detected=%s cta_language_detected=%s language_consistency_ok=%s wrong_language_heading_detected=%s person_role_claims_detected=%d suspicious_role_labels_detected=%s role_softening_applied=%s script_mix_detected=%s script_mix_suspects=%s semantic_gate_status=%s semantic_gate_reason_codes=%s",
+        "merge_semantic_gate branch=%s date_key=%s slot_key=%s language=%s model=%s attempt=%d block_language_expected=%s hook_language_detected=%s lead_in_language_detected=%s links_heading_language_detected=%s cta_language_detected=%s language_consistency_ok=%s wrong_language_heading_detected=%s script_mix_detected=%s script_mix_suspects=%s semantic_gate_status=%s semantic_gate_reason_codes=%s",
         branch_label,
         date_key,
         slot_key,
@@ -623,9 +624,6 @@ def _log_merge_style_diagnostics(
         diagnostics.merge_quality.cta_language_detected,
         "yes" if diagnostics.merge_quality.language_consistency_ok else "no",
         "yes" if diagnostics.merge_quality.wrong_language_heading_detected else "no",
-        diagnostics.merge_quality.person_role_claims_detected,
-        ",".join(diagnostics.merge_quality.suspicious_role_labels_detected) or "none",
-        "yes" if diagnostics.merge_quality.role_softening_applied else "no",
         "yes" if diagnostics.merge_quality.script_mix_detected else "no",
         ",".join(diagnostics.merge_quality.script_mix_suspects) or "none",
         diagnostics.merge_quality.semantic_gate_status,

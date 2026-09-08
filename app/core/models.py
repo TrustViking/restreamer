@@ -73,6 +73,7 @@ class PlannedVideo:
     local_thumbnail_path: Optional[Path]
     forced_block_language: Optional[str] = None
     row_characteristics: Optional[RowVideoCharacteristics] = None
+    saved_preview_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class PreparedVideo:
     metadata: VideoMetadata
     thumbnail: NormalizedImage
     local_thumbnail_path: Optional[Path]
+    saved_preview_url: Optional[str] = None
 
 
 @dataclass(frozen=True)

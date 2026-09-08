@@ -10,7 +10,6 @@ from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.llm.llm_rate_limits import (
     _extract_openai_headers_from_raw_response,
     _log_openai_rate_limit_snapshot,
-    _safe_int_or_none,
 )
 from app.llm.models.model_compatibility import (
     LlmModelConfigurationError,
@@ -20,10 +19,13 @@ from app.llm.models.model_compatibility import (
     resolve_openai_request_compatibility,
 )
 from app.llm.merges.merge_parser import extract_json_object_candidates, parse_json_tolerant, strip_json_code_fences
+from app.llm.model_pricing import estimate_cost_usd
 
 # Backward-compatible re-exports — DO NOT REMOVE
 from app.llm.llm_usage_tracker import (  # noqa: F401
+    OpenAIRequestUsage,
     RunLocalOpenAIUsageState,
+    extract_openai_request_usage,
     reset_run_local_openai_usage,
     get_run_local_openai_usage,
     record_run_local_openai_repair_call,
@@ -113,28 +115,15 @@ def _openai_incomplete_reason(response: Any) -> str:
     return str(getattr(incomplete, "reason", "")).strip().lower()
 
 
-def _extract_openai_usage_tokens(response: Any) -> Tuple[Optional[int], Optional[int]]:
-    usage: Any = getattr(response, "usage", None)
-    if usage is None and isinstance(response, dict):
-        usage = response.get("usage")
+def _usage_log_fields(usage: Optional[OpenAIRequestUsage]) -> str:
     if usage is None:
-        return (None, None)
-    if isinstance(usage, dict):
-        input_tokens: Optional[int] = _safe_int_or_none(
-            usage.get("input_tokens") or usage.get("prompt_tokens")
-        )
-        output_tokens: Optional[int] = _safe_int_or_none(
-            usage.get("output_tokens") or usage.get("completion_tokens")
-        )
-        return (input_tokens, output_tokens)
-    input_tokens = _safe_int_or_none(
-        getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None)
+        return "input_tokens=unknown output_tokens=unknown"
+    return (
+        f"input_tokens={usage.input_tokens} cached_input_tokens={usage.cached_input_tokens} "
+        f"cache_write_tokens={usage.cache_write_tokens} output_tokens={usage.output_tokens} "
+        f"reasoning_tokens={usage.reasoning_tokens} total_tokens={usage.total_tokens} "
+        f"served_model={usage.served_model or 'unknown'} response_id={usage.response_id or 'unknown'}"
     )
-    output_tokens = _safe_int_or_none(
-        getattr(usage, "output_tokens", None)
-        or getattr(usage, "completion_tokens", None)
-    )
-    return (input_tokens, output_tokens)
 
 
 def _log_llm_request_start(
@@ -176,7 +165,7 @@ def _log_llm_request_finish(
 ) -> None:
     if trace_context is None:
         return
-    input_tokens, output_tokens = _extract_openai_usage_tokens(response)
+    usage: Optional[OpenAIRequestUsage] = extract_openai_request_usage(response)
     raw_text: str = _extract_openai_response_text(response)
     finish_reason: str = _openai_incomplete_reason(response) or "completed"
     LOGGER.info(
@@ -188,7 +177,7 @@ def _log_llm_request_finish(
         trace_context.request_kind,
     )
     LOGGER.info(
-        "llm_request_finish branch=%s date_key=%s slot_key=%s lang=%s provider=%s model=%s attempt_index=%d request_kind=%s success=%s llm_call_ms=%d output_chars=%d input_tokens=%s output_tokens=%s finish_reason=%s max_output_hit=%s",
+        "llm_request_finish branch=%s date_key=%s slot_key=%s lang=%s provider=%s model=%s attempt_index=%d request_kind=%s success=%s llm_call_ms=%d output_chars=%d %s finish_reason=%s max_output_hit=%s",
         trace_context.branch_label,
         trace_context.date_key,
         trace_context.slot_key,
@@ -200,8 +189,7 @@ def _log_llm_request_finish(
         "yes" if success else "no",
         elapsed_ms,
         len(raw_text),
-        str(input_tokens if input_tokens is not None else "unknown"),
-        str(output_tokens if output_tokens is not None else "unknown"),
+        _usage_log_fields(usage),
         finish_reason,
         "yes" if max_output_hit else "no",
     )
@@ -223,6 +211,7 @@ def _log_llm_request_failed(
         trace_context.attempt_index,
         trace_context.request_kind,
         elapsed_ms,
+        extra={"warning_category": "informational"},
     )
 
 
@@ -263,13 +252,20 @@ def _record_run_local_openai_request(
     state.models_used.add(cleaned_model_name)
     if request_kind == "structured":
         state.structured_calls += 1
+    elif request_kind == "heading_translation":
+        state.heading_translation_calls += 1
     else:
         state.fallback_calls += 1
-    input_tokens, output_tokens = _extract_openai_usage_tokens(response)
-    if input_tokens is not None:
-        state.input_tokens = (state.input_tokens or 0) + input_tokens
-    if output_tokens is not None:
-        state.output_tokens = (state.output_tokens or 0) + output_tokens
+    usage: Optional[OpenAIRequestUsage] = extract_openai_request_usage(response)
+    if usage is not None:
+        state.add(
+            usage,
+            cost_usd=estimate_cost_usd(
+                usage.served_model or cleaned_model_name,
+                usage,
+                service_tier=usage.service_tier or "default",
+            ),
+        )
 
 
 def _is_openai_temperature_unsupported_error(error: Exception) -> bool:
@@ -309,6 +305,8 @@ def _build_openai_responses_request_kwargs(
     structured_schema: Optional[Dict[str, Any]],
     temperature: float,
     compatibility: OpenAIRequestCompatibility,
+    reasoning_effort: str,
+    service_tier: str = "default",
 ) -> Dict[str, Any]:
     request_kwargs: Dict[str, Any] = {
         "model": model_name,
@@ -316,7 +314,9 @@ def _build_openai_responses_request_kwargs(
         "max_output_tokens": max_tokens,
     }
     if compatibility.reasoning_effort_enabled:
-        request_kwargs["reasoning"] = {"effort": "low"}
+        request_kwargs["reasoning"] = {"effort": reasoning_effort}
+    if service_tier and service_tier != "default":
+        request_kwargs["service_tier"] = service_tier
     if structured_schema is not None:
         request_kwargs["text"] = {
             "format": {
@@ -385,14 +385,28 @@ def get_openai_client(
     return client
 
 
+_PROBE_PROMPT_TEXT: str = "Reply with OK."
+_PROBE_MAX_OUTPUT_TOKENS: int = 16
+_FLEX_RETRY_DELAYS_SEC: tuple[float, ...] = (20.0, 40.0, 80.0)
+
+
 def probe_openai_model_access(
     *,
     provider_name: str,
     model_name: str,
     timeout_sec: float,
+    reasoning_effort: str,
     api_key_env: str = "GPT_API_KEY",
     base_url: Optional[str] = None,
 ) -> None:
+    """Send one minimal real request through the Responses API.
+
+    A successful HTTP response (even an incomplete one) proves that this project
+    can actually use the model with the configured reasoning effort. Fatal
+    model/config errors (401/403/404/400) are raised as LlmModelConfigurationError;
+    anything else (timeout, 429, 5xx) is re-raised as-is for the caller to treat
+    as inconclusive.
+    """
     client: Any = get_openai_client(
         provider_name=provider_name,
         api_key_env=api_key_env,
@@ -400,8 +414,22 @@ def probe_openai_model_access(
         base_url=base_url,
         max_retries=0,
     ).with_options(timeout=timeout_sec, max_retries=0)
+    compatibility: OpenAIRequestCompatibility = resolve_openai_request_compatibility(
+        model_name=model_name,
+        structured_output_requested=False,
+        temperature_requested=False,
+    )
+    request_kwargs: Dict[str, Any] = _build_openai_responses_request_kwargs(
+        prompt_text=_PROBE_PROMPT_TEXT,
+        model_name=model_name,
+        max_tokens=_PROBE_MAX_OUTPUT_TOKENS,
+        structured_schema=None,
+        temperature=0.0,
+        compatibility=compatibility,
+        reasoning_effort=reasoning_effort,
+    )
     try:
-        client.models.retrieve(model_name)
+        response: Any = client.responses.create(**request_kwargs)
     except Exception as error:
         _raise_if_fatal_model_configuration_error(
             provider_name=provider_name,
@@ -409,6 +437,12 @@ def probe_openai_model_access(
             error=cast(Exception, error),
         )
         raise
+    LOGGER.info(
+        "openai_model_probe_passed model=%s reasoning_effort=%s probe=responses.create %s",
+        model_name,
+        reasoning_effort,
+        _usage_log_fields(extract_openai_request_usage(response)),
+    )
 
 
 def _extract_structured_payload_or_none(response: Any) -> Optional[Dict[str, Any]]:
@@ -443,6 +477,8 @@ def openai_compatible_request_merge(
     max_retries: int,
     attempt_label: str,
     max_output_tokens: int,
+    reasoning_effort: str,
+    service_tier: str = "default",
     structured_schema: Optional[Dict[str, Any]] = None,
     temperature: float = 0.0,
     trace_context: Optional[LlmTraceContext] = None,
@@ -454,6 +490,7 @@ def openai_compatible_request_merge(
         base_url=base_url,
         max_retries=max_retries,
     ).with_options(timeout=timeout_sec, max_retries=max_retries)
+    active_service_tier: str = str(service_tier or "default").strip().lower() or "default"
     request_kind: str = (
         trace_context.request_kind
         if trace_context is not None
@@ -480,6 +517,8 @@ def openai_compatible_request_merge(
             structured_schema=structured_schema,
             temperature=temperature,
             compatibility=active_compatibility,
+            reasoning_effort=reasoning_effort,
+            service_tier=active_service_tier,
         )
         _log_openai_request_compatibility(
             trace_context=trace_context,
@@ -581,11 +620,44 @@ def openai_compatible_request_merge(
                 )
             raise
 
+    def _create_with_flex_fallback(max_tokens: int) -> Any:
+        """Flex tier can answer 429 resource_unavailable: wait and retry, then use the default tier."""
+        nonlocal active_service_tier
+        if active_service_tier != "flex":
+            return _create_with_temp_fallback(max_tokens)
+        for delay_sec in _FLEX_RETRY_DELAYS_SEC:
+            try:
+                return _create_with_temp_fallback(max_tokens)
+            except Exception as error:
+                if classify_openai_request_error(cast(Exception, error)).reason_code != "openai_rate_limit":
+                    raise
+                LOGGER.warning(
+                    "openai_flex_unavailable model=%s retry_in_sec=%.0f detail=%s",
+                    model_name,
+                    delay_sec,
+                    str(error)[:200],
+                    extra={"warning_category": "informational"},
+                )
+                time.sleep(delay_sec)
+        try:
+            return _create_with_temp_fallback(max_tokens)
+        except Exception as error:
+            if classify_openai_request_error(cast(Exception, error)).reason_code != "openai_rate_limit":
+                raise
+            LOGGER.warning(
+                "openai_flex_fallback_to_default model=%s detail=%s",
+                model_name,
+                str(error)[:200],
+                extra={"warning_category": "informational"},
+            )
+            active_service_tier = "default"
+            return _create_with_temp_fallback(max_tokens)
+
     used_max_tokens: int = int(max_output_tokens)
-    response: Any = _create_with_temp_fallback(used_max_tokens)
+    response: Any = _create_with_flex_fallback(used_max_tokens)
     incomplete_reason: str = _openai_incomplete_reason(response)
     if incomplete_reason == "max_output_tokens":
-        used_max_tokens = min(3000, max(1, used_max_tokens * 2))
+        used_max_tokens = used_max_tokens * 2
         LOGGER.warning(
             "OpenAI response hit max_output_tokens attempt=%s model=%s retrying_once_with_max_output_tokens=%d",
             attempt_label,
@@ -600,7 +672,7 @@ def openai_compatible_request_merge(
             retry_kind="max_output_retry",
             recovered=True,
         )
-        response = _create_with_temp_fallback(used_max_tokens)
+        response = _create_with_flex_fallback(used_max_tokens)
         incomplete_reason = _openai_incomplete_reason(response)
 
     raw_text: str = _extract_openai_response_text(response)
@@ -621,6 +693,8 @@ def openai_request_merge(
     timeout_sec: float,
     attempt_label: str,
     max_output_tokens: int,
+    reasoning_effort: str,
+    service_tier: str = "default",
     structured_schema: Optional[Dict[str, Any]] = None,
     temperature: float = 0.0,
     trace_context: Optional[LlmTraceContext] = None,
@@ -635,6 +709,8 @@ def openai_request_merge(
         max_retries=0,
         attempt_label=attempt_label,
         max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
         structured_schema=structured_schema,
         temperature=temperature,
         trace_context=trace_context,

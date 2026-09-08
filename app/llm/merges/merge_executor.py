@@ -29,6 +29,7 @@ from app.llm.merges.merge_parser import (
 )
 from app.llm.merges.merge_prompt import _source_texts_for_merge_quality, build_llm_merge_prompt_text
 from app.llm.merges.merge_quality import MergeQualityNormalizationResult, normalize_merge_description
+from app.llm.merges.script_mix_repair import ScriptMixRepairStats, repair_script_mix_homoglyphs
 from app.llm.merges.merge_retry import ExpandedRetryProfile
 from app.llm.merges.merge_text_utils import _bullet_marker_for_line
 from app.llm.merges.merge_validation import (
@@ -172,12 +173,38 @@ class MergeExecutor:
             links_in_output=_count_output_official_links(merged_content.description),
             fill_applied=False,
         )
+        repaired_description, script_mix_repair_stats = repair_script_mix_homoglyphs(
+            description=merged_content.description,
+            language=language,
+        )
+        if script_mix_repair_stats.tokens_repaired > 0:
+            LOGGER.info(
+                "merge_script_mix_repaired branch=%s date_key=%s slot_key=%s "
+                "language=%s model=%s attempt=%d tokens_repaired=%d "
+                "before_tokens=%s after_tokens=%s",
+                self._branch_label,
+                self._date_key,
+                self._slot_key,
+                language,
+                self._model_name,
+                attempt_index,
+                script_mix_repair_stats.tokens_repaired,
+                ",".join(script_mix_repair_stats.repaired_tokens_before) or "none",
+                ",".join(script_mix_repair_stats.repaired_tokens_after) or "none",
+            )
+            merged_content = dataclasses.replace(
+                merged_content,
+                description=repaired_description,
+                description_selected=repaired_description,
+                description_audit=repaired_description,
+            )
         source_texts: tuple[str, ...] = _source_texts_for_merge_quality(videos)
         quality_result: MergeQualityNormalizationResult = normalize_merge_description(
             description=merged_content.description,
             language=language,
             source_texts=source_texts,
             title=merged_content.title,
+            source_count=len(videos),
         )
         if quality_result.description_text != merged_content.description:
             merged_content = dataclasses.replace(

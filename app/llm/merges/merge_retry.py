@@ -145,7 +145,7 @@ def _targeted_duplicate_retry_profile(
         "CRITICAL: Previous attempt had a structural error — the opening paragraph was repeated or a CTA appeared where the hook should be.",
         "RULE 1 — HOOK STRUCTURE: The very first paragraph must be the hook: a question, tension, or key thesis. It appears exactly ONCE.",
         "RULE 2 — NO DUPLICATION: Paragraph 2 and later must NOT restate, paraphrase, or echo any sentence from paragraph 1. If paragraph 1 ends with a question, paragraph 2 must answer it with new facts — never repeat the question.",
-        "RULE 3 — NO CTA IN HOOK POSITION: Do NOT place 'Subscribe', 'Follow', 'Watch', 'Share', 'Подпишитесь', 'Поширюйте', 'Смотрите', or any call to action as the first paragraph. CTA belongs only at the very end, after all bullets.",
+        "RULE 3 — NO CTA: Do NOT place 'Subscribe', 'Follow', 'Watch', 'Share', 'Подпишитесь', 'Поширюйте', 'Смотрите', or any call to action anywhere in the description. The output must not contain a CTA paragraph at all.",
         "RULE 4 — PARAGRAPH 2 MUST BE BULLETS: Immediately after the hook, start the bullet block. The second paragraph must begin with a bullet marker (🔹, ⚖, 📌, etc.), not with another prose sentence.",
     )
     reinforcement_lines: tuple[str, ...] = _load_retry_reinforcement_lines(
@@ -301,8 +301,8 @@ def _targeted_cta_opener_retry_profile(
     fallback_lines: tuple[str, ...] = (
         "CRITICAL: Previous attempt placed a CTA (subscribe/follow/watch) as the first paragraph.",
         "RULE: The first paragraph must be the editorial hook — a question, tension, or key thesis.",
-        "CTA belongs ONLY at the very end, after all bullets and before hashtags.",
-        "Rewrite so paragraph 1 is the hook, and any CTA is the last line before hashtags.",
+        "Do not write a CTA at all. Remove any subscribe/follow/watch line.",
+        "Rewrite so paragraph 1 is the hook and there is no CTA paragraph anywhere in the description.",
     )
     reinforcement_lines: tuple[str, ...] = _load_retry_reinforcement_lines(
         templates=templates,
@@ -423,9 +423,18 @@ def _merge_contract_block_with_retry(
         "llm_merge_structural_rules",
     )
     contract_block: str = contract_mode.contract_block.strip()
+    # Static structural rules go first so every request shares the same cacheable prefix;
+    # the mode-specific contract varies between compact/expanded and follows.
     if structural_rules_block:
-        contract_block = f"{contract_block}\n\n{structural_rules_block.strip()}".strip()
-    if expanded_retry_profile is not None and expanded_retry_profile.enabled:
-        reinforcement_block: str = "\n".join(expanded_retry_profile.reinforcement_lines)
-        return f"{contract_block}\n\nRETRY INSTRUCTION:\n{reinforcement_block}"
+        contract_block = f"{structural_rules_block.strip()}\n\n{contract_block}".strip()
+    retry_block: str = _retry_instruction_block(expanded_retry_profile)
+    if retry_block:
+        return f"{contract_block}\n\n{retry_block}"
     return contract_block
+
+
+def _retry_instruction_block(expanded_retry_profile: Optional[ExpandedRetryProfile]) -> str:
+    if expanded_retry_profile is None or not expanded_retry_profile.enabled:
+        return ""
+    reinforcement_block: str = "\n".join(expanded_retry_profile.reinforcement_lines)
+    return f"RETRY INSTRUCTION:\n{reinforcement_block}"

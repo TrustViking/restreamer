@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import logging
 import re
-from typing import List, Optional, Sequence
+from typing import List, Sequence
 
 from app.core.text_utils import normalize_newlines
 from app.llm.merges.merge_constants import (
     ACCENT_BULLET_MARKERS,
     ACCENT_MARKER_CAP,
     ALLOWED_BULLET_MARKERS,
+    COMPACT_BULLET_MAX,
     NEUTRAL_BULLET_MARKER,
 )
 from app.llm.merges.quality_diagnostics import (
@@ -26,50 +28,7 @@ from app.llm.merges.quality_service_lines import (
     replace_cta_preserving_hashtags,
 )
 
-_ROLE_LABELS: tuple[str, ...] = (
-    "pastor",
-    "bishop",
-    "human rights defender",
-    "international expert",
-    "official representative",
-    "founder",
-    "co-founder",
-    "chair",
-    "chairman",
-    "chairwoman",
-    "spiritual leader",
-    "activist",
-    "advocate",
-    "пастор",
-    "єпископ",
-    "епископ",
-    "правозахисник",
-    "правозащитник",
-    "міжнародний експерт",
-    "международный эксперт",
-    "офіційний представник",
-    "официальный представитель",
-    "засновник",
-    "основатель",
-    "співзасновник",
-    "сооснователь",
-    "голова",
-    "председатель",
-    "духовний лідер",
-    "духовный лидер",
-    "активіст",
-    "активист",
-    "адвокат",
-)
-_ROLE_PATTERN: re.Pattern[str] = re.compile(
-    r"^(?P<prefix>(?:🔹|📌|🎤|🎥|⚖|🌐|✅)\s+)?"
-    r"(?P<label>"
-    + "|".join(re.escape(label) for label in sorted(_ROLE_LABELS, key=len, reverse=True))
-    + r")\s+"
-    r"(?P<name>[A-ZА-ЯЁІЇЄҐ][A-Za-zА-Яа-яЁёІіЇїЄєҐґ'`-]+(?:\s+[A-ZА-ЯЁІЇЄҐ][A-Za-zА-Яа-яЁёІіЇїЄєҐґ'`-]+){0,2})"
-    r"(?P<rest>\b.*)$",
-    flags=re.IGNORECASE | re.UNICODE,
-)
+LOGGER = logging.getLogger(__name__)
 
 
 def normalize_merge_description(
@@ -78,8 +37,11 @@ def normalize_merge_description(
     language: str,
     source_texts: Sequence[str],
     title: str = "",
+    source_count: int = 0,
 ) -> MergeQualityNormalizationResult:
+    # source_count gates compact bullet trimming; 0 means unknown / do not trim.
     normalized_input: str = _normalize_text(description)
+    del source_texts
     if not normalized_input:
         diagnostics = build_diagnostics(
             description_text="",
@@ -89,9 +51,6 @@ def normalize_merge_description(
             accent_overflow=False,
             wrong_language_heading_detected=False,
             official_links_heading_mismatch=False,
-            person_role_claims_detected=0,
-            suspicious_role_labels_detected=(),
-            role_softening_applied=False,
         )
         return MergeQualityNormalizationResult(
             description_text="",
@@ -105,6 +64,21 @@ def normalize_merge_description(
     normalized_links_heading: str = blocks.links_heading
     normalized_links_urls: List[str] = list(blocks.links_urls)
     normalized_cta: str = blocks.cta
+    if (
+        normalized_hook
+        and normalized_cta
+        and normalized_hook == normalized_cta
+        and not normalized_theses_lines
+        and not normalized_links_heading
+    ):
+        normalized_cta = ""
+    if (
+        normalized_hook
+        and len(normalized_theses_lines) == 1
+        and normalized_theses_lines[0] == normalized_hook
+        and not normalized_links_heading
+    ):
+        normalized_hook = ""
 
     wrong_language_heading_detected: bool = False
     official_links_heading_mismatch: bool = False
@@ -145,22 +119,22 @@ def normalize_merge_description(
     ) = _normalize_bullets(normalized_theses_lines)
     if bullet_changed:
         normalization_applied = True
-
-    (
-        normalized_hook,
-        normalized_theses_lines,
-        normalized_cta,
-        person_role_claims_detected,
-        suspicious_role_labels_detected,
-        role_softening_applied,
-    ) = _soften_person_roles(
-        hook=normalized_hook,
-        theses_lines=normalized_theses_lines,
-        cta=normalized_cta,
-        source_texts=source_texts,
+    trimmed_theses_lines, trim_applied, bullets_before_trim, bullets_after_trim = (
+        _trim_compact_bullet_overflow(
+            normalized_theses_lines,
+            source_count=source_count,
+        )
     )
-    if role_softening_applied:
+    if trim_applied:
+        normalized_theses_lines = trimmed_theses_lines
         normalization_applied = True
+        LOGGER.info(
+            "merge_compact_bullet_trimmed source_count=%d bullets_before=%d bullets_after=%d cap=%d",
+            source_count,
+            bullets_before_trim,
+            bullets_after_trim,
+            COMPACT_BULLET_MAX,
+        )
 
     normalized_description: str = _render_blocks(
         hook=normalized_hook,
@@ -169,6 +143,12 @@ def normalize_merge_description(
         links_urls=normalized_links_urls,
         cta=normalized_cta,
     )
+    # NOTE: имя `block_spacing_ok` историческое и неточное.
+    # Здесь мы фиксируем не «правильность отступов между блоками», а сам факт
+    # того, что normalizer ВООБЩЕ изменил текст по сравнению с входом LLM
+    # (роли, отступы, бракованные фрагменты — что угодно). Любая правка → False.
+    # Reject-код `missing_block_spacing` в quality_diagnostics.py поднимается
+    # именно отсюда. Переименование кода — отдельная задача и в этом коммите не делается.
     block_spacing_ok: bool = normalized_description == normalized_input
     if not block_spacing_ok:
         normalization_applied = True
@@ -181,9 +161,6 @@ def normalize_merge_description(
         accent_overflow=accent_overflow,
         wrong_language_heading_detected=wrong_language_heading_detected,
         official_links_heading_mismatch=official_links_heading_mismatch,
-        person_role_claims_detected=person_role_claims_detected,
-        suspicious_role_labels_detected=suspicious_role_labels_detected,
-        role_softening_applied=role_softening_applied,
         accent_marker_types=accent_marker_types,
         neutral_bullets_count=neutral_bullets_count,
         accent_bullets_count=accent_bullets_count,
@@ -255,97 +232,47 @@ def _split_bullet_marker(line: str) -> tuple[str, str]:
     return (NEUTRAL_BULLET_MARKER, stripped)
 
 
-def _soften_person_roles(
-    *,
-    hook: str,
+def _trim_compact_bullet_overflow(
     theses_lines: Sequence[str],
-    cta: str,
-    source_texts: Sequence[str],
-) -> tuple[str, List[str], str, int, tuple[str, ...], bool]:
-    detected_count: int = 0
-    labels_detected: List[str] = []
-    changed: bool = False
-
-    new_hook, hook_count, hook_labels, hook_changed = _soften_roles_in_text(hook, source_texts)
-    detected_count += hook_count
-    labels_detected.extend(hook_labels)
-    changed = changed or hook_changed
-
-    new_theses_lines: List[str] = []
-    for line in theses_lines:
-        new_line, line_count, line_labels, line_changed = _soften_roles_in_text(
-            line,
-            source_texts,
-        )
-        new_theses_lines.append(new_line)
-        detected_count += line_count
-        labels_detected.extend(line_labels)
-        changed = changed or line_changed
-
-    new_cta, cta_count, cta_labels, cta_changed = _soften_roles_in_text(cta, source_texts)
-    detected_count += cta_count
-    labels_detected.extend(cta_labels)
-    changed = changed or cta_changed
-
-    unique_labels: List[str] = []
-    for label in labels_detected:
-        if label not in unique_labels:
-            unique_labels.append(label)
-    return (
-        new_hook,
-        new_theses_lines,
-        new_cta,
-        detected_count,
-        tuple(unique_labels),
-        changed,
-    )
-
-
-def _soften_roles_in_text(
-    text: str,
-    source_texts: Sequence[str],
-) -> tuple[str, int, List[str], bool]:
-    if not text:
-        return ("", 0, [], False)
-    match: Optional[re.Match[str]] = _ROLE_PATTERN.match(text.strip())
-    if match is None:
-        return (text, 0, [], False)
-    label: str = str(match.group("label") or "").strip().lower()
-    name: str = str(match.group("name") or "").strip()
-    if _role_label_is_supported(label=label, name=name, source_texts=source_texts):
-        return (text, 1, [label], False)
-    prefix: str = str(match.group("prefix") or "")
-    rest: str = str(match.group("rest") or "").lstrip(" ,:-")
-    softened: str = f"{prefix}{name}"
-    if rest:
-        softened = f"{softened} {rest}"
-    return (softened.strip(), 1, [label], softened.strip() != text.strip())
-
-
-def _role_label_is_supported(
     *,
-    label: str,
-    name: str,
-    source_texts: Sequence[str],
-) -> bool:
-    if not source_texts:
-        return False
-    support_hits: int = 0
-    exact_pattern: re.Pattern[str] = re.compile(
-        rf"\b{re.escape(label)}\s+{re.escape(name.lower())}\b",
-        flags=re.IGNORECASE | re.UNICODE,
-    )
-    label_pattern: re.Pattern[str] = re.compile(
-        rf"\b{re.escape(label)}\b",
-        flags=re.IGNORECASE | re.UNICODE,
-    )
-    for source_text in source_texts:
-        normalized: str = str(source_text or "").lower()
-        if exact_pattern.search(normalized) or label_pattern.search(normalized):
-            support_hits += 1
-        if support_hits >= 2:
-            return True
-    return False
+    source_count: int,
+) -> tuple[List[str], bool, int, int]:
+    """Trim trailing bullets when compact contract is exceeded.
+
+    Returns:
+        (trimmed_lines, trim_applied, bullets_before, bullets_after)
+
+    Trim is applied only when:
+      - source_count > 0 and source_count <= 2 (compact mode), AND
+      - the count of bullet lines (per is_bullet_line) > COMPACT_BULLET_MAX.
+
+    Trim policy:
+      - Walk lines left to right; keep all non-bullet lines as-is and in place.
+      - Keep the first COMPACT_BULLET_MAX bullets in their original order.
+      - Drop every bullet after that, but keep any subsequent non-bullet
+        lines that were already there (defensive - there should not be any
+        in a well-formed thesis block, but do not silently delete them).
+      - Do not modify bullet text.
+
+    If no trim is needed, returns (list(theses_lines), False,
+    bullet_count, bullet_count).
+    """
+    lines: List[str] = list(theses_lines)
+    bullet_count: int = sum(1 for line in lines if is_bullet_line(line))
+    if source_count <= 0 or source_count > 2 or bullet_count <= COMPACT_BULLET_MAX:
+        return (lines, False, bullet_count, bullet_count)
+
+    trimmed_lines: List[str] = []
+    kept_bullets: int = 0
+    for line in lines:
+        if not is_bullet_line(line):
+            trimmed_lines.append(line)
+            continue
+        if kept_bullets >= COMPACT_BULLET_MAX:
+            continue
+        trimmed_lines.append(line)
+        kept_bullets += 1
+    return (trimmed_lines, True, bullet_count, kept_bullets)
 
 
 def _render_blocks(

@@ -13,6 +13,7 @@ from app.core.models import (
     SanitizedPublishBlock,
     VideoMetadata,
 )
+from app.observability.runtime_analytics import record_publish_gate_blocked
 from app.planning import planned_video_block_language
 from app.publish.post_llm_sanitation import (
     MergedPublicationPayload,
@@ -89,6 +90,7 @@ def _build_merged_publication_payload(
             if bool(getattr(sanitized_payload, "has_publish_stage_opener_cta", False))
             else "no",
         )
+        record_publish_gate_blocked(language=language, target="telegram")
         return None
     return MergedPublicationPayload(
         title_text=sanitized_payload.title_text.strip(),
@@ -321,34 +323,6 @@ def build_telegram_language_nomerge_block(
     )
 
 
-def build_telegram_language_digest_block(
-    language: str,
-    videos: List[PlannedVideo],
-    context: Dict[str, str],
-    config: AppConfig,
-) -> str:
-    times_text: str = ", ".join(
-        sorted({video.scheduled_at_kiev.strftime("%H:%M") for video in videos})
-    )
-    digest_header: str = _render_template(
-        config.templates.telegram_language_digest_header,
-        {
-            "language_flags": _telegram_language_flags(language, config),
-            "language_name": _telegram_language_name(language),
-            "date": context["date"],
-            "time_kiev": _telegram_safe_time(times_text),
-        },
-    )
-    lines: List[str] = [digest_header, ""]
-    for video in videos:
-        lines.append(
-            f"{config.telegram.symbol_done} {telegram_safe_html(video.metadata.title)}"
-        )
-        lines.append(telegram_safe_html(video.normalized_link))
-        lines.append("")
-    return "\n".join(lines).rstrip()
-
-
 def build_telegram_key_form_reminder(
     context: Dict[str, str],
     config: AppConfig,
@@ -356,20 +330,6 @@ def build_telegram_key_form_reminder(
     return _render_template(
         config.templates.telegram_key_form_reminder,
         {"form_url": _escape_html(context["form_url"])},
-    )
-
-
-def build_telegram_post_header_text(
-    header_context: Dict[str, str],
-    config: AppConfig,
-) -> str:
-    return _render_template(
-        config.templates.telegram_post_header,
-        {
-            "symbol_broadcast": config.telegram.symbol_broadcast,
-            "date": header_context["date"],
-            "time_kiev": _telegram_safe_time(header_context["time_kiev"]),
-        },
     )
 
 

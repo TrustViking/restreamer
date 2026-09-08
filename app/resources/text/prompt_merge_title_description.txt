@@ -1,5 +1,4 @@
 You are writing a YouTube stream title and description.
-Write output only in {language_name}.
 Use only facts explicitly present in the source descriptions.
 Treat the sources as one complete stream, not as a list of separate videos.
 Generate a new final title, not a copy of any single source title.
@@ -7,7 +6,6 @@ Do not use emoji in the title.
 Mentally extract key points from each source, preserve all non-trivial source-specific points,
 combine overlaps, compress repetition, and produce one coherent final description.
 Write a strong native YouTube title no longer than 99 characters.
-{merge_contract_block}
 The hook must open with a concrete conflict, paradox, unanswered question, or surprising fact drawn directly from the sources. Avoid editorial generalizations like "an important discussion about X" or "experts gathered to talk about Y". Prefer something the viewer could not predict before watching — a confrontation, an injustice, a twist, a direct challenge. The hook must contain at least one of these punctuation marks: ":" or "!" or "?".
 Identify the single sharpest fact, confrontation, or consequence from the sources — the one that would make a viewer stop scrolling — and place it first in the hook. Do not open with the general topic, the participants' names, or a summary of what the video is about. Open with the most specific, most charged detail.
 Keep the hook short (about 220 characters maximum). Optionally start the hook with one light emoji.
@@ -15,32 +13,30 @@ If one source has a unique fact, topic, event, or angle, keep it unless it is tr
 Preserve important recognizable names from sources when relevant; never invent names.
 If names are present in sources, surface 1 to 3 key names in bullets or as a short participants line.
 Avoid asserting strong person titles or role labels unless they are clearly necessary and well-supported by the sources.
-You may use light emoji in the description only, sparingly and only from the allowed marker set above.
+You may use light emoji in the description only, sparingly and only from the allowed marker set defined in the merge contract.
 You may include 0, 1, or 2 YouTube URLs from the allowed candidates block only.
 Choosing none is valid.
 Pick only the most relevant main streams, with priority to longer broadcasts.
 Do not pick short promo, teaser, clip, or secondary videos.
-If you include selected YouTube URLs, place each selected URL on its own line near the end of the description before any official links block or CTA.
-Optional official links block: if sources contain meaningful official links, you may add a short block before close paragraph.
+If you include selected YouTube URLs, place each selected URL on its own line near the end of the description before any official links block.
+Optional official links block: if sources contain meaningful official links, you may add a short block before the hashtags line.
 Heading must be language-aware:
 Ukrainian: "🌐 Офіційні ресурси:"
 English: "🌐 Official links:"
 Russian: "🌐 Официальные ссылки:"
 Then list 1 to 3 meaningful links from sources only.
 Never include YouTube source links in this official links block.
-Optional Paragraph 3 (short close): 1 compact practical CTA close line only.
-If you add hashtags, they must be written on a separate final line after the CTA line.
-Never append hashtags at the end of the CTA line.
-The hashtags line must be a standalone final line containing only 2 to 5 relevant hashtags.
-Keep the close concrete; avoid abstract slogans.
+Do not write a closing call-to-action paragraph and do not address the viewer with engagement requests (subscribe, follow, watch, share, write in the comments). The description ends with the body content or, if present, the optional links blocks and the hashtags line. There is no closing engagement line.
+Always end the description with a hashtags line: a standalone final line containing only 2 to 5 relevant hashtags in the description language. Never omit it.
+Keep the body concrete; avoid abstract slogans.
 Do not enumerate sources as 1) 2) 3).
 Do not write a dry digest, protocol, or generic filler text.
 Do not output generic slogans, abstract editorial text, or propagandistic phrasing.
 Do not replace concrete facts with broad statements like "an important talk about unity and change".
 Always open with a standalone hook paragraph (1–3 sentences). This hook paragraph must appear BEFORE any bullet points. Do not start the description directly with a bullet.
-Separate every structural block with one blank line: one blank line after the hook, one blank line between each bullet, and one blank line before the closing call-to-action. Never run two structural elements together without a blank line between them.
+Separate every structural block with one blank line: one blank line after the hook, one blank line between each bullet, and one blank line before the final hashtags line. Never run two structural elements together without a blank line between them.
 If there is only ONE source in the slot and it covers a single unified event, case, or interview, write the full description body as 2–3 connected prose paragraphs without bullet points. For two or more sources always use the expanded structure with bullets regardless of topic similarity.
-If the total cleaned source text across all sources is below 1500 characters, write a compact description of maximum 3 bullets. Do not pad with generic CTA phrases or filler sentences to fill space.
+If the total cleaned source text across all sources is below 1500 characters, write a compact description of maximum 3 bullets. Do not pad with generic engagement phrases or filler sentences to fill space.
 Always include full names of at least 2 key speakers or participants found in the sources. Never replace a person's name with a generic role label ("a State Department official", "an international expert") unless the person explicitly chose to remain anonymous in the source.
 Structure examples:
 WRONG structure: description starts directly with a bullet — no hook paragraph before it.
@@ -77,6 +73,8 @@ Each bullet must read like something a viewer would want to click on, not like a
 Output only one strict JSON object with exactly these keys:
 title, description.
 Do not output markdown fences, notes, variants, or explanations.
+{merge_contract_block}
+Write output only in {language_name}.
 
 {youtube_candidates_block}
 

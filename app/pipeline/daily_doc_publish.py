@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 from pathlib import Path
+import time
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,8 @@ from app.core.models import (
     SanitizedPublishBlock,
 )
 from app.google import GoogleDocsClient, GoogleDriveClient
+from app.google.docs_client import GoogleDocsTransientError
+from app.google.drive_client import GoogleDriveTransientError
 from app.llm.models.model_identity import resolve_effective_llm_model
 from app.observability.content_contract import (
     analyze_content_contract,
@@ -46,6 +49,9 @@ from app.publish.post_llm_sanitation import (
 )
 
 from .slot_processing import SlotProcessResult, resolve_merge_artifact_status
+
+_DOC_WRITE_TRANSIENT_MAX_RETRIES: int = 2
+_DOC_WRITE_TRANSIENT_RETRY_DELAY_SEC: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -417,115 +423,172 @@ def publish_daily_document(
     google_doc_created: bool = False
     exported_docx_path: Optional[Path] = None
     if not dry_run:
-        try:
-            document_id: str = docs_client.create_document(title=doc_title)
-            google_doc_created = True
-        except Exception as error:
-            raise RuntimeError(
-                "Google Docs create_document failed. "
-                f"date={date_key} title={doc_title!r} "
-                f"reason={summarize_error(error)}"
-            ) from error
-        if config.google.doc_share_mode != "private":
-            role_by_mode: Dict[str, str] = {
-                "anyone_reader": "reader",
-                "anyone_commenter": "commenter",
-                "anyone_writer": "writer",
-            }
-            role: str = role_by_mode[config.google.doc_share_mode]
+        document_id: str = ""
+        for doc_attempt in range(1, _DOC_WRITE_TRANSIENT_MAX_RETRIES + 1):
             try:
-                drive_client.set_anyone_permission(file_id=document_id, role=role)
-            except Exception as error:
-                raise RuntimeError(
-                    "Google Drive set_anyone_permission failed. "
-                    f"document_id={document_id} "
-                    f"share_mode={config.google.doc_share_mode} role={role} "
-                    f"reason={summarize_error(error)}"
-                ) from error
-        if config.google.drive_folder_id:
-            try:
-                drive_client.move_file_to_folder(
-                    file_id=document_id,
-                    folder_id=config.google.drive_folder_id,
-                )
-            except Exception as error:
-                raise RuntimeError(
-                    "Google Drive move_file_to_folder failed. "
-                    f"document_id={document_id} "
-                    f"folder_id={config.google.drive_folder_id} "
-                    f"reason={summarize_error(error)}"
-                ) from error
-        try:
-            report_writer.write_header_only(
-                document_id=document_id,
-                header=daily_doc_header,
-            )
-            guard_index: int = docs_client.get_document_end_index(document_id=document_id) - 1
-            docs_client.insert_text_at_index(
-                document_id=document_id,
-                index=guard_index,
-                text="\n",
-            )
-            logger.info(
-                "docs_formatting_guard date_key=%s inserted_blank_paragraph_before_first_table index=%d",
-                date_key,
-                guard_index,
-            )
-            first_table: bool = True
-            for slot in slot_results:
-                time_display = format_time_key_for_display(slot.slot_time_key)
-                language = slot.language
-                if language == "unknown":
-                    language = next(
-                        (key for key, value in slot.language_groups.items() if value),
-                        language,
+                try:
+                    document_id = docs_client.create_document(title=doc_title)
+                    google_doc_created = True
+                except GoogleDocsTransientError:
+                    raise
+                except Exception as error:
+                    raise RuntimeError(
+                        "Google Docs create_document failed. "
+                        f"date={date_key} title={doc_title!r} "
+                        f"reason={summarize_error(error)}"
+                    ) from error
+                if config.google.doc_share_mode != "private":
+                    role_by_mode: Dict[str, str] = {
+                        "anyone_reader": "reader",
+                        "anyone_commenter": "commenter",
+                        "anyone_writer": "writer",
+                    }
+                    role: str = role_by_mode[config.google.doc_share_mode]
+                    try:
+                        drive_client.set_anyone_permission(file_id=document_id, role=role)
+                    except GoogleDriveTransientError:
+                        raise
+                    except Exception as error:
+                        raise RuntimeError(
+                            "Google Drive set_anyone_permission failed. "
+                            f"document_id={document_id} "
+                            f"share_mode={config.google.doc_share_mode} role={role} "
+                            f"reason={summarize_error(error)}"
+                        ) from error
+                if config.google.drive_folder_id:
+                    try:
+                        drive_client.move_file_to_folder(
+                            file_id=document_id,
+                            folder_id=config.google.drive_folder_id,
+                        )
+                    except GoogleDriveTransientError:
+                        raise
+                    except Exception as error:
+                        raise RuntimeError(
+                            "Google Drive move_file_to_folder failed. "
+                            f"document_id={document_id} "
+                            f"folder_id={config.google.drive_folder_id} "
+                            f"reason={summarize_error(error)}"
+                        ) from error
+                try:
+                    report_writer.write_header_only(
+                        document_id=document_id,
+                        header=daily_doc_header,
                     )
-                slot_language_items: List[PlannedVideo] = list(
-                    slot.language_groups.get(language, slot.day_videos)
-                )
-                if not slot_language_items:
-                    continue
-                merged_content = slot.merged_content_by_language.get(language)
-                merge_attempt = slot.merge_audit_by_language.get(language)
-                cached_block: Optional[SanitizedPublishBlock] = slot.sanitized_blocks.get(language)
-                _log_merge_block_publish_truth(
+                    guard_index: int = (
+                        docs_client.get_document_end_index(document_id=document_id) - 1
+                    )
+                    docs_client.insert_text_at_index(
+                        document_id=document_id,
+                        index=guard_index,
+                        text="\n",
+                    )
+                    logger.info(
+                        "docs_formatting_guard date_key=%s inserted_blank_paragraph_before_first_table index=%d",
+                        date_key,
+                        guard_index,
+                    )
+                    first_table: bool = True
+                    for slot in slot_results:
+                        time_display = format_time_key_for_display(slot.slot_time_key)
+                        language = slot.language
+                        if language == "unknown":
+                            language = next(
+                                (key for key, value in slot.language_groups.items() if value),
+                                language,
+                            )
+                        slot_language_items: List[PlannedVideo] = list(
+                            slot.language_groups.get(language, slot.day_videos)
+                        )
+                        if not slot_language_items:
+                            continue
+                        merged_content = slot.merged_content_by_language.get(language)
+                        merge_attempt = slot.merge_audit_by_language.get(language)
+                        cached_block: Optional[SanitizedPublishBlock] = slot.sanitized_blocks.get(language)
+                        _log_merge_block_publish_truth(
+                            logger=logger,
+                            branch_label=branch_label,
+                            date_key=date_key,
+                            slot_key=slot.slot_key,
+                            language=language,
+                            source_videos=slot_language_items,
+                            merged_content=merged_content,
+                            merge_attempt=merge_attempt,
+                        )
+                        if not first_table:
+                            report_writer.insert_page_break(document_id=document_id)
+                        report_writer.write_language_table(
+                            document_id=document_id,
+                            language=language,
+                            videos=slot_language_items,
+                            merged_content=merged_content,
+                            merge_attempt=merge_attempt,
+                            time_display=time_display,
+                            artifact_status=slot.merge_artifact_status,
+                            sanitized_block=cached_block,
+                        )
+                        first_table = False
+                except GoogleDocsTransientError:
+                    raise
+                except Exception as error:
+                    raise RuntimeError(
+                        "Google Docs write_daily_document failed. "
+                        f"document_id={document_id} date={date_key} "
+                        f"reason={summarize_error(error)}"
+                    ) from error
+                exported_docx_path = _export_document_to_local_docx(
                     logger=logger,
-                    branch_label=branch_label,
-                    date_key=date_key,
-                    slot_key=slot.slot_key,
-                    language=language,
-                    source_videos=slot_language_items,
-                    merged_content=merged_content,
-                    merge_attempt=merge_attempt,
-                )
-                if not first_table:
-                    report_writer.insert_page_break(document_id=document_id)
-                report_writer.write_language_table(
+                    drive_client=drive_client,
+                    name_builder=name_builder,
                     document_id=document_id,
-                    language=language,
-                    videos=slot_language_items,
-                    merged_content=merged_content,
-                    merge_attempt=merge_attempt,
-                    time_display=time_display,
-                    artifact_status=slot.merge_artifact_status,
-                    sanitized_block=cached_block,
+                    date_key=date_key,
+                    doc_title=doc_title,
                 )
-                first_table = False
-        except Exception as error:
-            raise RuntimeError(
-                "Google Docs write_daily_document failed. "
-                f"document_id={document_id} date={date_key} "
-                f"reason={summarize_error(error)}"
-            ) from error
-        exported_docx_path = _export_document_to_local_docx(
-            logger=logger,
-            drive_client=drive_client,
-            name_builder=name_builder,
-            document_id=document_id,
-            date_key=date_key,
-            doc_title=doc_title,
-        )
-        doc_url = f"https://docs.google.com/document/d/{document_id}/edit"
+                doc_url = f"https://docs.google.com/document/d/{document_id}/edit"
+                break
+            except GoogleDocsTransientError as transient_err:
+                logger.warning(
+                    "doc_write_transient_retry doc_attempt=%d/%d status=%d document_id=%s date_key=%s",
+                    doc_attempt,
+                    _DOC_WRITE_TRANSIENT_MAX_RETRIES,
+                    transient_err.status_code,
+                    transient_err.document_id,
+                    date_key,
+                )
+                if doc_attempt == _DOC_WRITE_TRANSIENT_MAX_RETRIES:
+                    raise RuntimeError(
+                        "Google Docs write_daily_document failed after transient retry. "
+                        f"document_id={transient_err.document_id} date={date_key} "
+                        f"reason={summarize_error(transient_err.original)}"
+                    ) from transient_err.original
+                time.sleep(_DOC_WRITE_TRANSIENT_RETRY_DELAY_SEC)
+                google_doc_created = False
+                continue
+            except GoogleDriveTransientError as transient_err:
+                logger.warning(
+                    "drive_write_transient_retry doc_attempt=%d/%d status=%d file_id=%s date_key=%s",
+                    doc_attempt,
+                    _DOC_WRITE_TRANSIENT_MAX_RETRIES,
+                    transient_err.status_code,
+                    transient_err.file_id,
+                    date_key,
+                )
+                if doc_attempt == _DOC_WRITE_TRANSIENT_MAX_RETRIES:
+                    raise RuntimeError(
+                        "Google Drive write_daily_document failed after transient retry. "
+                        f"file_id={transient_err.file_id} date={date_key} "
+                        f"reason={summarize_error(transient_err.original)}"
+                    ) from transient_err.original
+                time.sleep(_DOC_WRITE_TRANSIENT_RETRY_DELAY_SEC)
+                google_doc_created = False
+                continue
+            except Exception as error:
+                raise RuntimeError(
+                    "Google Docs write_daily_document failed. "
+                    f"document_id={document_id} "
+                    f"date={date_key} "
+                    f"reason={summarize_error(error)}"
+                ) from error
 
     logger.info(
         "[%s] date=%s: Google Doc created: %s (slots=%d)",

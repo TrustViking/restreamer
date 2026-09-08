@@ -5,7 +5,11 @@ import re
 from typing import List, Optional, Sequence
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
-from app.core.cta_detection import looks_like_cta_line as _cta_gate_check
+from app.core.constants import ALLOWED_BULLET_MARKERS
+from app.core.cta_detection import (
+    looks_like_cta_line as _cta_gate_check,
+    looks_like_cta_paragraph,
+)
 from app.core.models import (
     BLOCK_GENERATION_MODE_REAL_MERGE,
     LanguageMergeAttempt,
@@ -15,6 +19,7 @@ from app.core.models import (
 )
 from app.core.text_utils import normalize_multiline_text
 from app.ingest.youtube_metadata import YtDlpYouTubeMetadataFetcher
+from app.llm.merges.merge_prompt import _source_texts_for_merge_quality
 
 # Backward compat re-exports from submodules
 from app.publish.sanitizers.tail_parser import (
@@ -37,6 +42,11 @@ from app.publish.sanitizers.quality_gate import PublishQualityGate
 
 
 LOGGER = _get_logger_impl(__name__)
+
+_PLAIN_BULLET_PATTERN: re.Pattern[str] = re.compile(
+    r"^\s*(?:[-*•▪◦‣–—]|(?:\d+[.)]))\s+\S+",
+    flags=re.UNICODE,
+)
 
 # Keep old function names accessible for tests
 _clean_double_bullet_markers = TailParser.clean_double_bullet_markers
@@ -209,22 +219,113 @@ def _compose_full_text(
     )
 
 
+def _strip_final_body_cta_paragraph(
+    *,
+    language: str,
+    source_label: str,
+    body_text: str,
+) -> str:
+    """Strip the last paragraph of body_text if it is a CTA paragraph.
+
+    Acts as a fallback for CTA paragraphs that the tail parser did not
+    extract, so they ended up inside body_text instead of cta_text.
+
+    Only the last paragraph is inspected. The first paragraph is never
+    removed here because opener-CTA detection is handled separately.
+    The body must still contain at least one paragraph after stripping.
+    ``looks_like_cta_paragraph`` is the primary detector; the lighter
+    ``looks_like_cta_line`` fallback is restricted to single-line,
+    non-bullet last paragraphs to avoid removing factual bullet blocks
+    that happen to contain CTA hint words.
+    """
+    normalized_body: str = str(body_text or "").strip()
+    if not normalized_body:
+        LOGGER.debug(
+            "removed_final_body_cta=no lang=%s source=%s reason=empty",
+            language,
+            source_label,
+        )
+        return body_text
+
+    paragraphs: list[str] = [
+        part.strip()
+        for part in re.split(r"\n\s*\n", normalized_body)
+        if part.strip()
+    ]
+    if len(paragraphs) < 2:
+        LOGGER.debug(
+            "removed_final_body_cta=no lang=%s source=%s reason=single_paragraph",
+            language,
+            source_label,
+        )
+        return body_text
+
+    last_paragraph: str = paragraphs[-1]
+    last_paragraph_lines: list[str] = [
+        line.strip()
+        for line in last_paragraph.splitlines()
+        if line.strip()
+    ]
+    is_single_line: bool = len(last_paragraph_lines) == 1
+
+    is_cta: bool = looks_like_cta_paragraph(last_paragraph)
+
+    if not is_cta and is_single_line:
+        only_line: str = last_paragraph_lines[0]
+        is_bullet_line: bool = bool(_PLAIN_BULLET_PATTERN.match(only_line)) or any(
+            only_line.startswith(marker + " ") for marker in ALLOWED_BULLET_MARKERS
+        )
+        if not is_bullet_line:
+            is_cta = _cta_gate_check(last_paragraph)
+
+    if not is_cta:
+        LOGGER.debug(
+            "removed_final_body_cta=no lang=%s source=%s reason=not_cta",
+            language,
+            source_label,
+        )
+        return body_text
+
+    stripped_paragraphs: list[str] = paragraphs[:-1]
+    LOGGER.info(
+        "removed_final_body_cta=yes lang=%s source=%s removed_chars=%d",
+        language,
+        source_label,
+        len(last_paragraph),
+    )
+    return "\n\n".join(stripped_paragraphs)
+
+
 def _apply_publish_cta_gate(
     *,
     language: str,
     source_label: str,
     cta_text: str,
 ) -> str:
+    """Drop any CTA text extracted by the tail parser before composition.
+
+    Closing CTA paragraphs are no longer part of the published text. Any
+    non-empty ``cta_text`` reaching this gate came from the tail parser's
+    CTA classification (``TailParser.is_standalone_cta_line`` or
+    ``extract_cta_tail``), so it is dropped unconditionally.
+
+    The log line ``publish_cta_gate_dropped`` is preserved for
+    observability with the ``cta_chars=`` field counting the dropped
+    text length.
+
+    Opener-CTA detection (CTA as the FIRST paragraph instead of a hook)
+    is a separate concern handled by
+    :func:`_final_description_has_opener_cta`.
+    """
     sanitized_cta_text: str = str(cta_text or "").strip()
-    if sanitized_cta_text and _cta_gate_check(sanitized_cta_text):
+    if sanitized_cta_text:
         LOGGER.info(
-            "merged_publish_cta_gate_dropped lang=%s source=%s cta_chars=%d",
+            "publish_cta_gate_dropped lang=%s source=%s cta_chars=%d",
             language,
             source_label,
             len(sanitized_cta_text),
         )
-        return ""
-    return sanitized_cta_text
+    return ""
 
 
 def build_sanitized_merged_publication_payload(
@@ -249,7 +350,7 @@ def build_sanitized_merged_publication_payload(
     )
     source_label: str = resolve_post_llm_source_label(
         merge_attempt,
-        default_label="merged_publish",
+        default_label="publish",
     )
     block_generation_mode: str = resolve_block_generation_mode(
         merge_attempt=merge_attempt,
@@ -287,15 +388,18 @@ def build_sanitized_merged_publication_payload(
     if source_videos_sequence:
         from app.llm.merges.merge_quality import normalize_merge_description
 
+        sanitation_source_texts: tuple[str, ...] = _source_texts_for_merge_quality(
+            source_videos_sequence
+        )
         normalized_body_text: str = normalize_merge_description(
             description=sanitization_result.body_text,
             language=language,
-            source_texts=(),
+            source_texts=sanitation_source_texts,
             title="",
         ).description_text
     else:
         normalized_body_text = sanitization_result.body_text
-    sanitized_cta_text: str = _apply_publish_cta_gate(
+    _apply_publish_cta_gate(
         language=language,
         source_label=source_label,
         cta_text=sanitization_result.cta_text,
@@ -303,7 +407,7 @@ def build_sanitized_merged_publication_payload(
     final_description: str = _compose_full_text(
         language=language,
         body_text=normalized_body_text,
-        cta_text=sanitized_cta_text,
+        cta_text="",
         hashtags_line=sanitization_result.hashtags_line,
         recommended_youtube_urls=final_selected_youtube_urls,
         source_urls=final_official_links_urls,
@@ -316,14 +420,14 @@ def build_sanitized_merged_publication_payload(
     )
     if has_publish_stage_duplicate:
         LOGGER.error(
-            "merged_publish_duplicate_paragraph_detected lang=%s source=%s description_chars=%d",
+            "publish_duplicate_paragraph_detected lang=%s source=%s description_chars=%d",
             language,
             source_label,
             len(final_description),
         )
     if has_publish_stage_opener_cta:
         LOGGER.error(
-            "merged_publish_opener_cta_detected lang=%s source=%s description_chars=%d",
+            "publish_opener_cta_detected lang=%s source=%s description_chars=%d",
             language,
             source_label,
             len(final_description),
@@ -340,14 +444,14 @@ def build_sanitized_merged_publication_payload(
     )
     final_layout: str = _resolve_tail_layout(
         body_text=normalized_body_text,
-        cta_text=sanitized_cta_text,
+        cta_text="",
         hashtags_line=sanitization_result.hashtags_line,
         recommended_youtube_urls=final_selected_youtube_urls,
         source_urls=final_official_links_urls,
     )
     recommended_block_status: str = "emitted" if final_selected_youtube_urls else "skipped"
     LOGGER.info(
-        "merged_publish_sanitation_applied=yes lang=%s source=%s cta_found=%s hashtags_found=%s hashtags_split_from_cta=%s tail_layout=%s recommended_materials_text_candidates_ignored=%d raw_youtube_urls_found=%d deduped_youtube_candidates=%d repeated_youtube_candidates=%d recommended_materials_final_count=%d recommended_materials_block=%s official_links_heading_found=%s official_links_text_links=%d official_links_source_links=%d official_links_final_count=%d official_links_block=%s official_links_dedup_applied=%s official_links_non_youtube_only=yes empty_official_links_suppressed=%d ignored_llm_youtube_urls=%d",
+        "publish_sanitation_applied=yes lang=%s source=%s cta_found=%s hashtags_found=%s hashtags_split_from_cta=%s tail_layout=%s recommended_materials_text_candidates_ignored=%d raw_youtube_urls_found=%d deduped_youtube_candidates=%d repeated_youtube_candidates=%d recommended_materials_final_count=%d recommended_materials_block=%s official_links_heading_found=%s official_links_text_links=%d official_links_source_links=%d official_links_final_count=%d official_links_block=%s official_links_dedup_applied=%s official_links_non_youtube_only=yes empty_official_links_suppressed=%d ignored_llm_youtube_urls=%d",
         language,
         source_label,
         "yes" if sanitization_result.cta_found else "no",
@@ -409,16 +513,23 @@ def sanitize_post_llm_text_for_merged_publish(
             cleanup_event_key=cleanup_event_key,
         )
     )
-    from app.llm.merges.merge_quality import normalize_merge_description
+    source_videos_tuple: tuple[PlannedVideo, ...] = tuple(source_videos or ())
+    if source_videos_tuple:
+        from app.llm.merges.merge_quality import normalize_merge_description
 
-    normalized_body_text: str = normalize_merge_description(
-        description=sanitization_result.body_text,
-        language=language,
-        source_texts=(),
-        title="",
-    ).description_text
+        sanitation_source_texts: tuple[str, ...] = _source_texts_for_merge_quality(
+            source_videos_tuple
+        )
+        normalized_body_text: str = normalize_merge_description(
+            description=sanitization_result.body_text,
+            language=language,
+            source_texts=sanitation_source_texts,
+            title="",
+        ).description_text
+    else:
+        normalized_body_text = sanitization_result.body_text
     normalized_body_text = _clean_double_bullet_markers(normalized_body_text)
-    sanitized_cta_text: str = _apply_publish_cta_gate(
+    _apply_publish_cta_gate(
         language=language,
         source_label=source_label,
         cta_text=sanitization_result.cta_text,
@@ -426,7 +537,7 @@ def sanitize_post_llm_text_for_merged_publish(
     return _compose_full_text(
         language=language,
         body_text=normalized_body_text,
-        cta_text=sanitized_cta_text,
+        cta_text="",
         hashtags_line=sanitization_result.hashtags_line,
         recommended_youtube_urls=authoritative_source_urls.selected_youtube_urls,
         source_urls=authoritative_source_urls.source_urls,
@@ -472,6 +583,11 @@ def sanitize_post_llm_text(
     embedded_tail: _EmbeddedTailParts = parser.extract_embedded(initial_body_text)
     body_text, body_url_changes = _sanitize_urls_in_text(embedded_tail.body_text)
     body_text = parser.clean_double_bullet_markers(body_text)
+    body_text = _strip_final_body_cta_paragraph(
+        language=language,
+        source_label=source_label,
+        body_text=body_text,
+    )
     cta_lines: List[str] = parser.dedupe_cta_lines(
         embedded_tail.cta_lines + extracted_tail.cta_lines
     )

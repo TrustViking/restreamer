@@ -1,20 +1,29 @@
 ########################################
-# streamertg: privacy + clean repo
+# broadcaster: privacy + clean repo
 ########################################
 
 ########################################
-# Secrets / credentials (НЕ КОМИТИТЬ)
+# Environment files
 ########################################
-secrets/
-secrets/.env
+.env
+.env.*
+
+########################################
+# Secrets folder - track only the example and README
+########################################
+secrets/*
 !secrets/.env.example
+!secrets/README.txt
+# Explicit ignores below are redundant under secrets/* but kept as documentation of intent:
+secrets/.env
 secrets/token.json
 secrets/credentials.json
-*.env
-# если хочешь хранить шаблон:
-!.env.example
+secrets/service_account.json
+secrets/cookies.txt
 
+########################################
 # Google OAuth / API
+########################################
 credentials*.json
 credentials_bot.json
 .credentials_bot.json
@@ -22,9 +31,10 @@ client_secret*.json
 *oauth*.json
 *service_account*.json
 *service-account*.json
-streamertg-*.json
 
+########################################
 # Keys / certs
+########################################
 *.pem
 *.key
 *.p12
@@ -33,7 +43,6 @@ streamertg-*.json
 # Local helper materials
 ########################################
 _HELP/
-docs_example/
 
 ########################################
 # Python / caches
@@ -53,6 +62,13 @@ pip-wheel-metadata/
 build/
 dist/
 
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
 ########################################
 # Virtual environments
 ########################################
@@ -60,10 +76,7 @@ dist/
 venv/
 ENV/
 .venv_*/
-# на всякий случай (если вдруг создашь так)
 .venv-*/
-.env*
-# если используешь poetry:
 .poetry/
 
 ########################################
@@ -80,8 +93,8 @@ downloads/
 data/
 docs/
 image/
-tg/
 state/
+tools/
 
 ########################################
 # IDE / OS / local workspace stuff
@@ -94,14 +107,20 @@ Desktop.ini
 .DS_Store
 
 ########################################
-# Optional: local launcher scripts with absolute paths
+# Optional local launcher scripts with absolute paths
 ########################################
-*.bat
-!*.example.bat
-########################################
-# Local app config (keep only example)
-########################################
-app/config/runtime/app_config.yaml
-app/config/runtime/app_config.*.yaml
-!app/config/runtime/app_config.example.yaml
+*.local.bat
+run_local*.bat
 
+########################################
+# Runtime config
+########################################
+# app_config.yaml is the operator's personal config (form URL, contacts) and
+# is NOT tracked. Only app_config.example.yaml is tracked as the public template.
+# Fresh clone: copy app_config.example.yaml -> app_config.yaml before building
+# (broadcaster.spec datas requires the file to exist).
+app/config/runtime/app_config.yaml
+app/config/runtime/app_config.local.yaml
+app/config/runtime/app_config.*.local.yaml
+# Hidden editor/temp duplicates (e.g. .app_config.example.yaml)
+app/config/runtime/.*.yaml

@@ -23,6 +23,7 @@ from app.bootstrap.logging_config import (
 )
 
 router: Router = Router()
+_SEND_MESSAGE_TIMEOUT_SEC: float = 15.0
 LOGGER: logging.Logger = _get_logger_impl("bot")
 _pipeline_lock: threading.Lock = threading.Lock()
 _VALID_AUDIT_MODES: tuple[str, str, str] = ("nomerge", "merge", "audit")
@@ -50,6 +51,7 @@ _STALE_CALLBACK_PATTERN: re.Pattern[str] = re.compile(
     r"query is too old|query ID is invalid",
     re.IGNORECASE,
 )
+_shutdown_initiated: bool = False
 
 
 def _format_username(username: str | None) -> str:
@@ -93,6 +95,7 @@ async def _safe_callback_answer(
             "callback_answer_retry_after retry_after=%.1f callback_id=%s",
             retry_after,
             callback.id,
+            extra={"warning_category": "informational"},
         )
         await asyncio.sleep(retry_after + 1.0)
         try:
@@ -130,8 +133,21 @@ async def _safe_send_message(
     attempt: int
     for attempt in range(1, max_retries + 1):
         try:
-            await answer_method(text, reply_markup=reply_markup)
+            await asyncio.wait_for(
+                answer_method(text, reply_markup=reply_markup),
+                timeout=_SEND_MESSAGE_TIMEOUT_SEC,
+            )
             return True
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "bot_send_timeout timeout_sec=%.1f attempt=%d/%d text=%s",
+                _SEND_MESSAGE_TIMEOUT_SEC,
+                attempt,
+                max_retries,
+                text[:120],
+                extra={"warning_category": "informational"},
+            )
+            continue
         except TelegramRetryAfter as error:
             retry_after: float = float(getattr(error, "retry_after", 5) or 5)
             LOGGER.warning(
@@ -140,6 +156,7 @@ async def _safe_send_message(
                 attempt,
                 max_retries,
                 text[:120],
+                extra={"warning_category": "informational"},
             )
             await asyncio.sleep(retry_after + 1.0)
         except TelegramBadRequest as error:
@@ -178,6 +195,10 @@ async def start_handler(message: types.Message) -> None:
 
 @router.message(Command(commands=("stop", "stopbot")))
 async def stop_bot_handler(message: types.Message, dispatcher: Dispatcher) -> None:
+    global _shutdown_initiated
+    if _shutdown_initiated:
+        return
+    _shutdown_initiated = True
     actor: types.User | None = message.from_user
     actor_id: int = int(actor.id) if actor is not None else 0
     actor_username: str = _format_username(actor.username if actor is not None else None)
@@ -187,7 +208,10 @@ async def stop_bot_handler(message: types.Message, dispatcher: Dispatcher) -> No
         actor_username,
     )
     _get_console_logger().info("⏹ Бот остановлен по команде %s", actor_username)
-    await message.answer("⏹ Останавливаю бота...")
+    try:
+        await message.answer("⏹ Останавливаю бота...")
+    except Exception as exc:
+        LOGGER.debug("bot_stop_answer_failed reason=shutdown_race error=%s", exc)
     try:
         await dispatcher.stop_polling()
     except RuntimeError:

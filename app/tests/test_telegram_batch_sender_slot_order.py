@@ -68,9 +68,6 @@ class TelegramBatchSenderSlotOrderTests(unittest.TestCase):
                 separator_start_repeat_count=2,
                 flag_repeat_count=2,
             ),
-            templates=SimpleNamespace(
-                telegram_sparkle_separator="SPARKLE",
-            ),
         )
 
     def _send_and_collect_texts(self, slot_results: list[SlotProcessResult]) -> list[str]:
@@ -78,11 +75,6 @@ class TelegramBatchSenderSlotOrderTests(unittest.TestCase):
         with (
             patch("app.publish.telegram_batch_sender.build_telegram_header_text", return_value="HEADER"),
             patch("app.publish.telegram_batch_sender.build_telegram_key_form_reminder", return_value="KEY"),
-            patch("app.publish.telegram_batch_sender.build_telegram_post_header_text", return_value="POST"),
-            patch(
-                "app.publish.telegram_batch_sender.build_telegram_language_digest_block",
-                side_effect=lambda language, videos, context, config: f"DIGEST:{language}:{len(videos)}",
-            ),
             patch(
                 "app.publish.telegram_batch_sender.build_telegram_language_block",
                 side_effect=lambda video, config, templates: (
@@ -196,6 +188,53 @@ class TelegramBatchSenderSlotOrderTests(unittest.TestCase):
         ]
         sent_texts: list[str] = self._send_and_collect_texts(slot_results)
         self.assertEqual(3, sum(1 for text in sent_texts if text == "KEY"))
+
+    def test_final_separator_is_sparkle_only(self) -> None:
+        slot_results = [
+            self._slot(
+                time_key="1800",
+                language="uk",
+                videos=[self._video(language="uk", row_number=1, hour=18, minute=0)],
+            ),
+        ]
+        telegram_client = MagicMock()
+        config = self._config()
+        config.telegram.symbol_separator = "🎬"
+        with (
+            patch("app.publish.telegram_batch_sender.build_telegram_header_text", return_value="HEADER"),
+            patch("app.publish.telegram_batch_sender.build_telegram_key_form_reminder", return_value="KEY"),
+            patch(
+                "app.publish.telegram_batch_sender.build_telegram_language_block",
+                side_effect=lambda video, config, templates: (
+                    f"BLOCK:{video.language}:{video.scheduled_at_kiev.strftime('%H:%M')}"
+                ),
+            ),
+        ):
+            send_telegram_date_batch(
+                logger=MagicMock(),
+                config=config,
+                telegram_client=telegram_client,
+                templates=SimpleNamespace(),
+                batch=TelegramDateBatch(
+                    slot_results=slot_results,
+                    header_context={
+                        "date": "2026-03-11",
+                        "time_kiev": "18:00",
+                        "time_cet": "17:00",
+                        "time_gmt": "15:00",
+                        "form_url": "https://example.com/form",
+                        "contacts": "contacts",
+                    },
+                    doc_url="https://example.com/doc",
+                    dry_run=False,
+                    date_key="2026-03-11",
+                    processing_mode="nomerge",
+                ),
+            )
+        sent_texts = [str(call.args[0]) for call in telegram_client.send_text.call_args_list]
+        self.assertTrue(sent_texts)
+        self.assertEqual("✨✨✨✨✨✨✨", sent_texts[-1])
+        self.assertFalse(any("🎬" in text for text in sent_texts))
 
 
 if __name__ == "__main__":

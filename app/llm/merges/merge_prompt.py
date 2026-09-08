@@ -14,11 +14,16 @@ from app.core.description_cleaner import (
 from app.core.text_utils import normalize_multiline_text
 from app.resources.resource_loader import load_text_resource
 from app.core.models import PlannedVideo
-from app.llm.merges.merge_constants import SEMANTIC_TOKEN_PATTERN
+from app.llm.merges.merge_constants import (
+    COMPACT_BULLET_MAX,
+    COMPACT_BULLET_MIN,
+    SEMANTIC_TOKEN_PATTERN,
+)
 from app.llm.merges.merge_retry import (
     ExpandedRetryProfile,
     _format_template_placeholders,
     _merge_contract_block_with_retry,
+    _retry_instruction_block,
     _template_field_text,
     _template_json_object,
 )
@@ -155,9 +160,13 @@ def build_llm_merge_prompt_text(
     )
     contract_block: str = _merge_contract_block_with_retry(
         contract_mode=contract_mode,
-        expanded_retry_profile=expanded_retry_profile,
+        expanded_retry_profile=None,
         templates=config.templates,
     )
+    # Retry reinforcement goes last: the cached prompt prefix (rules + contract + sources)
+    # stays identical between the first attempt and its retries.
+    retry_suffix: str = _retry_instruction_block(expanded_retry_profile)
+    retry_suffix = f"\n\n{retry_suffix}" if retry_suffix else ""
     link_policy_block: str = (
         "SYSTEM LINK POLICY\n"
         "Do not include any URLs in the output.\n"
@@ -184,10 +193,9 @@ def build_llm_merge_prompt_text(
             formatted_template = (
                 f"{formatted_template}\n\n{contract_block}"
             ).strip()
-        return f"{formatted_template}\n\n{cross_domain_sentence_policy_block}\n\n{link_policy_block}".strip()
+        return f"{formatted_template}\n\n{cross_domain_sentence_policy_block}\n\n{link_policy_block}{retry_suffix}".strip()
     return (
         "You are writing a YouTube stream title and description.\n"
-        f"Write output only in {language_name}.\n"
         "Use only facts explicitly present in the source descriptions.\n"
         "Treat the sources as one complete stream, not as a list of separate videos.\n"
         "Generate a new final title, not a copy of any single source title.\n"
@@ -195,20 +203,22 @@ def build_llm_merge_prompt_text(
         "Mentally extract key points from each source, preserve all non-trivial source-specific points,\n"
         "combine overlaps, compress repetition, and produce one coherent final description.\n"
         "Write a strong native YouTube title no longer than 99 characters.\n"
-        f"{contract_block}\n"
         "The description must cover all source inputs that were merged.\n"
         "Do not drop a source-specific fact, event, or angle without clear overlap-based reason.\n"
         "Preserve important recognizable names from sources when relevant; never invent names.\n"
         "Avoid asserting strong person titles or role labels unless they are clearly necessary and well-supported by the sources.\n"
         f"{cross_domain_sentence_policy_block}\n"
         f"{link_policy_block}\n"
-        "An optional one-line closing sentence should be a light practical CTA with 2 to 5 hashtags.\n"
+        "Always end the description with a final hashtags line (2 to 5 hashtags on a single line). Do not write a closing call-to-action paragraph.\n"
         "Do not enumerate sources as 1) 2) 3).\n"
-        "Do not write a dry digest, protocol, or generic CTA block.\n"
+        "Do not write a dry digest, protocol, or generic engagement block.\n"
         "Do not output generic slogans, abstract editorial text, or propagandistic phrasing.\n"
         "Do not replace concrete facts with broad statements like 'an important conversation about everything'.\n"
-        'Output only one strict JSON object with exactly these keys: title, description.\n\n'
+        'Output only one strict JSON object with exactly these keys: title, description.\n'
+        f"{contract_block}\n"
+        f"Write output only in {language_name}.\n\n"
         f"{'\n\n'.join(source_blocks)}"
+        f"{retry_suffix}"
     ).strip()
 
 def _sources_share_single_event(source_texts: List[str]) -> bool:
@@ -292,8 +302,8 @@ def _select_merge_contract_mode(
     contract_templates_by_mode: dict[str, str] = _merge_contract_templates_from_templates(
         templates
     )
-    compact_bullet_min: int = 4
-    compact_bullet_max: int = 7
+    compact_bullet_min: int = COMPACT_BULLET_MIN
+    compact_bullet_max: int = COMPACT_BULLET_MAX
     compact_bullet_range: str = f"{compact_bullet_min}-{compact_bullet_max}"
     if source_count >= 3:
         if source_count <= 3:

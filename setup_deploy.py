@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from app.config.app_config_loader import load_google_auth_mode
 from app.paths import ProjectPaths, get_project_paths
 
 
@@ -131,7 +132,7 @@ def load_or_bootstrap_env(paths: ProjectPaths) -> tuple[list[CheckResult], dict[
     results: list[CheckResult] = []
     loaded_values: dict[str, str] = {}
     env_path: Path = paths.secrets_env_path
-    example_path: Path = paths.project_root / ".env.example"
+    example_path: Path = paths.project_root / "secrets" / ".env.example"
     dotenv_module_error: Exception | None = None
     dotenv_values_func: Any | None = None
     load_dotenv_func: Any | None = None
@@ -254,6 +255,24 @@ def check_google_oauth_credentials(paths: ProjectPaths) -> CheckResult:
     )
 
 
+def check_google_service_account_credentials(paths: ProjectPaths) -> CheckResult:
+    sa_path: Path = paths.service_account_path
+    if sa_path.exists() and sa_path.is_file():
+        return CheckResult(
+            check_name="Google service account credentials",
+            status=STATUS_PASS,
+            message=f"Found {sa_path}.",
+        )
+    return CheckResult(
+        check_name="Google service account credentials",
+        status=STATUS_ERROR,
+        message=(
+            f"Missing {sa_path}. Place the service account JSON file there "
+            "or set GOOGLE_SERVICE_ACCOUNT_PATH in .env."
+        ),
+    )
+
+
 def ensure_runtime_config(paths: ProjectPaths) -> CheckResult:
     runtime_config_path: Path = paths.runtime_config_path
     runtime_example_path: Path = paths.runtime_config_example_path
@@ -342,7 +361,6 @@ def validate_core_imports() -> CheckResult:
         "google.auth",
         "google_auth_oauthlib",
         "googleapiclient",
-        "yt_dlp",
         "PIL",
         "langdetect",
         "pycountry",
@@ -511,7 +529,11 @@ def run_preflight(*, include_network_checks: bool) -> int:
     results.extend(env_results)
 
     results.extend(validate_required_env_vars(env_values))
-    results.append(check_google_oauth_credentials(paths))
+    resolved_auth_mode: str = load_google_auth_mode()
+    if resolved_auth_mode == "service_account":
+        results.append(check_google_service_account_credentials(paths))
+    else:
+        results.append(check_google_oauth_credentials(paths))
     results.append(ensure_runtime_config(paths))
     results.append(validate_core_imports())
 

@@ -7,7 +7,7 @@ FORBIDDEN first-paragraph starts:
 "Підпишіться" / "Підписуйтесь" / "Подпишитесь" / "Подписывайтесь" /
 "Subscribe" / "Follow" / "Join" / "Watch" / "Поширюйте" / "Поділіться" /
 "Приєднуйтесь" / "Смотрите" / "Следите"
-CTA belongs ONLY at the very end, after all bullets and before hashtags.
+Do not write a CTA at all. The first paragraph must be the editorial hook.
 If you place a CTA as the first paragraph, the output WILL be rejected.
 
 RULE — NO COMMENT CTA:
@@ -38,7 +38,7 @@ Do not pad with generic bullets. Each bullet = one distinct fact or angle.
 RULE 4 — PARAGRAPH 2 STARTS WITH A BULLET:
 Immediately after the hook, the next content must be the bullet block.
 Paragraph 2 must begin with a bullet marker, not with another prose sentence,
-not with a rephrased hook, not with a CTA.
+not with a rephrased hook, not with a promotional phrase.
 
 EXAMPLE — CORRECT structure (uk):
 ⚖ Суд відкинув «експертні висновки» як неналежні докази у справі руху «АЛЛАТРА» — і це змінює правила гри.

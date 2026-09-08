@@ -31,6 +31,7 @@ from app.observability.startup_health import log_section, run_startup_health_che
 from app.observability.startup_summary import LlmSummarySnapshot
 from app.paths.name_builder import NamePathBuilder
 from app.planning import log_link_normalization_report
+from app.planning.link_normalization import build_sheet_cell_a1
 from app.planning.batch_planner import (
     build_prepared_videos,
     derive_planned_videos,
@@ -43,6 +44,34 @@ from .branch_executor import BranchExecutor
 from .debug_artifacts import DebugArtifactWriter
 from .operator_notifier import OperatorNotifier
 from .runtime_services import BatchServices, build_runtime_services
+
+_PREPARATION_PROGRESS_STEP: int = 5
+
+
+def _should_emit_preparation_progress(done: int, total: int) -> bool:
+    """Throttle predicate: emit every Nth step + always the final tick.
+
+    Single source of truth used both by the progress callbacks wired into
+    batch_runner._execute and by the unit tests.
+    """
+    if total <= 0:
+        return False
+    if done <= 0:
+        return False
+    if done > total:
+        return False
+    return done == total or (done % _PREPARATION_PROGRESS_STEP == 0)
+
+
+def _date_sort_key(date_key: str) -> tuple[int, str]:
+    from datetime import datetime
+
+    try:
+        parsed = datetime.strptime(date_key, "%d%m%y")
+    except ValueError:
+        # Невалидные ключи идут в конец, сохраняя стабильный порядок между собой
+        return (1, date_key)
+    return (0, parsed.strftime("%Y%m%d"))
 
 
 @dataclass(frozen=True)
@@ -102,6 +131,10 @@ class BatchRunner:
         )
 
     @property
+    def notifier(self) -> OperatorNotifier:
+        return self._notifier
+
+    @property
     def last_merge_run_summary(self) -> Optional[MergeRunSummary]:
         return self._last_merge_run_summary
 
@@ -131,12 +164,30 @@ class BatchRunner:
     ) -> List[AuditBranch]:
         if audit_mode == "audit":
             return [
-                AuditBranch(name=BRANCH_NOMERGE, processing_mode="nomerge", llm_merge_enabled=False),
-                AuditBranch(name=BRANCH_MERGE, processing_mode="merge", llm_merge_enabled=llm_merge_available),
+                AuditBranch(
+                    name=BRANCH_NOMERGE,
+                    processing_mode="nomerge",
+                    llm_merge_enabled=False,
+                ),
+                AuditBranch(
+                    name=BRANCH_MERGE,
+                    processing_mode="merge",
+                    llm_merge_enabled=llm_merge_available,
+                ),
             ]
         if audit_mode == "merge":
-            return [AuditBranch(name=BRANCH_MERGE, processing_mode="merge", llm_merge_enabled=llm_merge_available)]
-        return [AuditBranch(name=BRANCH_NOMERGE, processing_mode="nomerge", llm_merge_enabled=False)]
+            return [
+                AuditBranch(
+                    name=BRANCH_MERGE,
+                    processing_mode="merge",
+                    llm_merge_enabled=llm_merge_available,
+                )
+            ]
+        return [
+            AuditBranch(
+                name=BRANCH_NOMERGE, processing_mode="nomerge", llm_merge_enabled=False
+            )
+        ]
 
     def run(
         self,
@@ -153,7 +204,9 @@ class BatchRunner:
         merge_run_summary: MergeRunSummary = MergeRunSummary()
         self._last_merge_run_summary = merge_run_summary
         branch_failures: List[str] = []
-        branches_for_log: str = ",".join(self._resolve_branch_labels_for_log(audit_mode=audit_mode))
+        branches_for_log: str = ",".join(
+            self._resolve_branch_labels_for_log(audit_mode=audit_mode)
+        )
         self._logger.info(
             "audit_start audit_mode=%s branches=%s run_id=%s dry_run=%s",
             audit_mode,
@@ -190,9 +243,11 @@ class BatchRunner:
                 audit_mode=audit_mode,
                 llm_merge_available=prepared_context.llm_merge_available,
             )
-            processed_by_branch: Dict[str, Dict[str, List[PlannedVideo]]] = self._build_processed_by_branch(
-                branches=branches,
-                prepared_videos=prepared_context.prepared_videos,
+            processed_by_branch: Dict[str, Dict[str, List[PlannedVideo]]] = (
+                self._build_processed_by_branch(
+                    branches=branches,
+                    prepared_videos=prepared_context.prepared_videos,
+                )
             )
 
             self._log_section("Process Slots")
@@ -217,7 +272,9 @@ class BatchRunner:
             if branch_failures:
                 raise RuntimeError("; ".join(branch_failures))
         finally:
-            total_run_ms: int = int(round((time.perf_counter() - run_started_at) * 1000.0))
+            total_run_ms: int = int(
+                round((time.perf_counter() - run_started_at) * 1000.0)
+            )
             record_stage_duration(stage_name="total_run", elapsed_ms=total_run_ms)
             log_stage_timing(
                 logger=self._logger,
@@ -227,7 +284,10 @@ class BatchRunner:
             )
             if branch_failures:
                 overall_status = "failed"
-            elif self._last_merge_run_summary is not None and self._last_merge_run_summary.final_failure > 0:
+            elif (
+                self._last_merge_run_summary is not None
+                and self._last_merge_run_summary.final_failure > 0
+            ):
                 overall_status = "partial"
             else:
                 overall_status = "ok"
@@ -239,7 +299,12 @@ class BatchRunner:
             )
 
     def _resolve_branch_labels_for_log(self, *, audit_mode: str) -> List[str]:
-        return [branch.name for branch in self._resolve_audit_branches(audit_mode=audit_mode, llm_merge_available=True)]
+        return [
+            branch.name
+            for branch in self._resolve_audit_branches(
+                audit_mode=audit_mode, llm_merge_available=True
+            )
+        ]
 
     def _prepare_run_context(
         self,
@@ -263,9 +328,16 @@ class BatchRunner:
             resolved_audit_mode=audit_mode,
             run_id=run_id,
         )
-        startup_health_ms: int = int(round((time.perf_counter() - startup_health_started_at) * 1000.0))
+        startup_health_ms: int = int(
+            round((time.perf_counter() - startup_health_started_at) * 1000.0)
+        )
         record_stage_duration(stage_name="startup_health", elapsed_ms=startup_health_ms)
-        log_stage_timing(logger=self._logger, stage_name="startup_health", elapsed_ms=startup_health_ms, scope="run")
+        log_stage_timing(
+            logger=self._logger,
+            stage_name="startup_health",
+            elapsed_ms=startup_health_ms,
+            scope="run",
+        )
         self._notifier.emit(
             "✅ Проверка сервисов и конфигурации: OK",
             to_telegram=not dry_run,
@@ -280,9 +352,16 @@ class BatchRunner:
             kiev_tz=self._kiev_tz,
             run_id=run_id,
         )
-        sheet_load_ms: int = int(round((time.perf_counter() - sheet_load_started_at) * 1000.0))
+        sheet_load_ms: int = int(
+            round((time.perf_counter() - sheet_load_started_at) * 1000.0)
+        )
         record_stage_duration(stage_name="sheet_load", elapsed_ms=sheet_load_ms)
-        log_stage_timing(logger=self._logger, stage_name="sheet_load", elapsed_ms=sheet_load_ms, scope="run")
+        log_stage_timing(
+            logger=self._logger,
+            stage_name="sheet_load",
+            elapsed_ms=sheet_load_ms,
+            scope="run",
+        )
         record_sheet_loaded(rows=len(sheet_state.rows))
         log_sheet_loaded(logger=self._logger, rows=len(sheet_state.rows))
         self._notifier.emit(
@@ -292,6 +371,19 @@ class BatchRunner:
 
         self._log_section("Shared Preparation")
         shared_preparation_started_at: float = time.perf_counter()
+        self._notifier.emit(
+            "⏳ Подготовка видео: метаданные, превью, язык...",
+            to_telegram=False,
+        )
+
+        def _prepare_videos_progress(done: int, total: int) -> None:
+            if _should_emit_preparation_progress(done, total):
+                self._notifier.emit(
+                    f"⏳ Подготовка видео: подготовлено {done}/{total}",
+                    to_telegram=False,
+                )
+
+        _t_prepare: float = time.perf_counter()
         prepared_videos: List[PreparedVideo] = build_prepared_videos(
             logger=self._logger,
             config=self._config,
@@ -300,7 +392,31 @@ class BatchRunner:
             metadata_fetcher=self._metadata_fetcher,
             http_client=self._http_client,
             kiev_tz=self._kiev_tz,
+            progress_callback=_prepare_videos_progress,
         )
+        _prepare_ms: int = int(round((time.perf_counter() - _t_prepare) * 1000.0))
+        record_stage_duration(
+            stage_name="shared_prep_prepare_videos", elapsed_ms=_prepare_ms
+        )
+        log_stage_timing(
+            logger=self._logger,
+            stage_name="shared_prep_prepare_videos",
+            elapsed_ms=_prepare_ms,
+            scope="run",
+        )
+        self._notifier.emit(
+            "⏳ Подготовка видео: вывод превью...",
+            to_telegram=False,
+        )
+
+        def _preview_progress(done: int, total: int) -> None:
+            if _should_emit_preparation_progress(done, total):
+                self._notifier.emit(
+                    f"⏳ Подготовка видео: превью {done}/{total}",
+                    to_telegram=False,
+                )
+
+        _t_preview: float = time.perf_counter()
         prepared_videos = materialize_prepared_previews(
             logger=self._logger,
             config=self._config,
@@ -308,24 +424,112 @@ class BatchRunner:
             name_builder=self._name_builder,
             prepared_videos=prepared_videos,
             dry_run=dry_run,
+            progress_callback=_preview_progress,
         )
-        shared_preparation_ms: int = int(round((time.perf_counter() - shared_preparation_started_at) * 1000.0))
-        record_stage_duration(stage_name="shared_preparation", elapsed_ms=shared_preparation_ms)
+        _preview_ms: int = int(round((time.perf_counter() - _t_preview) * 1000.0))
+        record_stage_duration(
+            stage_name="shared_prep_preview_materialize", elapsed_ms=_preview_ms
+        )
+        log_stage_timing(
+            logger=self._logger,
+            stage_name="shared_prep_preview_materialize",
+            elapsed_ms=_preview_ms,
+            scope="run",
+        )
+        self._notifier.emit(
+            "⏳ Запись превью в таблицу...",
+            to_telegram=False,
+        )
+        _t_preview_writeback: float = time.perf_counter()
+        self._writeback_preview_urls(
+            services=services,
+            prepared_videos=prepared_videos,
+            sheet_state=sheet_state,
+            dry_run=dry_run,
+        )
+        _preview_writeback_ms: int = int(
+            round((time.perf_counter() - _t_preview_writeback) * 1000.0)
+        )
+        record_stage_duration(
+            stage_name="shared_prep_preview_writeback", elapsed_ms=_preview_writeback_ms
+        )
+        log_stage_timing(
+            logger=self._logger,
+            stage_name="shared_prep_preview_writeback",
+            elapsed_ms=_preview_writeback_ms,
+            scope="run",
+        )
+        self._notifier.emit(
+            "⏳ Запись языка в таблицу...",
+            to_telegram=False,
+        )
+        _t_language_writeback: float = time.perf_counter()
+        self._writeback_detected_languages(
+            services=services,
+            prepared_videos=prepared_videos,
+            sheet_state=sheet_state,
+            dry_run=dry_run,
+        )
+        _language_writeback_ms: int = int(
+            round((time.perf_counter() - _t_language_writeback) * 1000.0)
+        )
+        record_stage_duration(
+            stage_name="shared_prep_language_writeback",
+            elapsed_ms=_language_writeback_ms,
+        )
+        log_stage_timing(
+            logger=self._logger,
+            stage_name="shared_prep_language_writeback",
+            elapsed_ms=_language_writeback_ms,
+            scope="run",
+        )
+        shared_preparation_ms: int = int(
+            round((time.perf_counter() - shared_preparation_started_at) * 1000.0)
+        )
+        record_stage_duration(
+            stage_name="shared_preparation", elapsed_ms=shared_preparation_ms
+        )
         log_stage_timing(
             logger=self._logger,
             stage_name="shared_preparation",
             elapsed_ms=shared_preparation_ms,
             scope="run",
         )
+        _t_emit_start: float = time.perf_counter()
+        self._logger.debug("prepare_ctx_pause_marker stage=before_emit_prepared")
         self._notifier.emit(
             f"✅ Подготовлено ссылок видео: {len(prepared_videos)}",
             to_telegram=not dry_run,
         )
+        self._logger.debug(
+            "prepare_ctx_pause_marker stage=after_emit_prepared elapsed_ms=%.1f",
+            (time.perf_counter() - _t_emit_start) * 1000.0,
+        )
 
+        _t_aggr_start: float = time.perf_counter()
         rows_skipped: int = max(0, len(sheet_state.rows) - len(prepared_videos))
         prepared_dates_count: int = len({item.date_key for item in prepared_videos})
-        prepared_slots_count: int = len({f"{item.date_key}_{item.scheduled_at_kiev.strftime('%H%M')}" for item in prepared_videos})
-        record_planning_completed(planned_items=len(prepared_videos), rows_skipped=rows_skipped)
+        prepared_slots_count: int = len(
+            {
+                f"{item.date_key}_{item.scheduled_at_kiev.strftime('%H%M')}"
+                for item in prepared_videos
+            }
+        )
+        self._logger.debug(
+            "prepare_ctx_pause_marker stage=after_aggregations elapsed_ms=%.1f",
+            (time.perf_counter() - _t_aggr_start) * 1000.0,
+        )
+
+        _t_record_start: float = time.perf_counter()
+        record_planning_completed(
+            planned_items=len(prepared_videos), rows_skipped=rows_skipped
+        )
+        self._logger.debug(
+            "prepare_ctx_pause_marker stage=after_record_planning elapsed_ms=%.1f",
+            (time.perf_counter() - _t_record_start) * 1000.0,
+        )
+
+        _t_log_start: float = time.perf_counter()
         log_planning_completed(
             logger=self._logger,
             planned_items=len(prepared_videos),
@@ -333,12 +537,120 @@ class BatchRunner:
             dates=prepared_dates_count,
             slots=prepared_slots_count,
         )
+        self._logger.debug(
+            "prepare_ctx_pause_marker stage=after_log_planning elapsed_ms=%.1f",
+            (time.perf_counter() - _t_log_start) * 1000.0,
+        )
         return PreparedRunContext(
             services=services,
             sheet_state=sheet_state,
             prepared_videos=prepared_videos,
             llm_merge_available=llm_merge_available,
         )
+
+    def _writeback_preview_urls(
+        self,
+        *,
+        services: BatchServices,
+        prepared_videos: List[PreparedVideo],
+        sheet_state: BatchSheetState,
+        dry_run: bool,
+    ) -> None:
+        """Write saved_preview_url back to column F of the Google Sheet."""
+        preview_col_index_zero_based: int = 5  # Column F
+        for prepared in prepared_videos:
+            url: str = str(prepared.saved_preview_url or "").strip()
+            if not url:
+                self._logger.debug(
+                    "Row %d: preview_url_writeback skipped, no saved_preview_url.",
+                    prepared.row_number,
+                )
+                continue
+            cell_a1: str = build_sheet_cell_a1(
+                sheet_name=sheet_state.sheet_name_for_writeback,
+                row_index=prepared.row_number,
+                col_index_zero_based=preview_col_index_zero_based,
+            )
+            if dry_run:
+                self._logger.info(
+                    "DRY RUN preview_url_writeback row=%d cell=%s url=%s",
+                    prepared.row_number,
+                    cell_a1,
+                    url,
+                )
+                continue
+            try:
+                services.sheets_client.update_cell_string(
+                    spreadsheet_id=self._config.google.sheets_id,
+                    cell_a1=cell_a1,
+                    value=url,
+                )
+                self._logger.info(
+                    "preview_url_writeback row=%d cell=%s url=%s status=ok",
+                    prepared.row_number,
+                    cell_a1,
+                    url,
+                )
+            except Exception as error:
+                self._logger.warning(
+                    "preview_url_writeback row=%d cell=%s url=%s status=failed reason=%s",
+                    prepared.row_number,
+                    cell_a1,
+                    url,
+                    error,
+                )
+
+    def _writeback_detected_languages(
+        self,
+        *,
+        services: BatchServices,
+        prepared_videos: List[PreparedVideo],
+        sheet_state: BatchSheetState,
+        dry_run: bool,
+    ) -> None:
+        """Write detected language code back to column A of the Google Sheet."""
+        lang_col_index_zero_based: int = 0  # Column A
+        for prepared in prepared_videos:
+            language_code: str = str(prepared.language or "").strip()
+            if not language_code:
+                self._logger.debug(
+                    "Row %d: language_writeback skipped, no detected language.",
+                    prepared.row_number,
+                )
+                continue
+            cell_a1: str = build_sheet_cell_a1(
+                sheet_name=sheet_state.sheet_name_for_writeback,
+                row_index=prepared.row_number,
+                col_index_zero_based=lang_col_index_zero_based,
+            )
+            if dry_run:
+                self._logger.info(
+                    "DRY RUN language_writeback row=%d cell=%s language=%s",
+                    prepared.row_number,
+                    cell_a1,
+                    language_code,
+                )
+                continue
+            try:
+                services.sheets_client.update_cell_string(
+                    spreadsheet_id=self._config.google.sheets_id,
+                    cell_a1=cell_a1,
+                    value=language_code,
+                )
+                self._logger.info(
+                    "language_writeback row=%d cell=%s language=%s status=ok",
+                    prepared.row_number,
+                    cell_a1,
+                    language_code,
+                )
+            except Exception as error:
+                self._logger.warning(
+                    "language_writeback row=%d cell=%s language=%s status=failed reason=%s",
+                    prepared.row_number,
+                    cell_a1,
+                    language_code,
+                    error,
+                )
 
     def _build_processed_by_branch(
         self,
@@ -362,9 +674,16 @@ class BatchRunner:
                     processing_mode=branch.processing_mode,
                 )
             )
-        planning_ms: int = int(round((time.perf_counter() - planning_started_at) * 1000.0))
+        planning_ms: int = int(
+            round((time.perf_counter() - planning_started_at) * 1000.0)
+        )
         record_stage_duration(stage_name="planning", elapsed_ms=planning_ms)
-        log_stage_timing(logger=self._logger, stage_name="planning", elapsed_ms=planning_ms, scope="run")
+        log_stage_timing(
+            logger=self._logger,
+            stage_name="planning",
+            elapsed_ms=planning_ms,
+            scope="run",
+        )
         return processed_by_branch
 
     def _execute_branch_dates(
@@ -379,10 +698,20 @@ class BatchRunner:
         branch_failures: List[str],
         run_id: str = "",
     ) -> None:
-        date_keys: List[str] = sorted({date_key for branch_videos in processed_by_branch.values() for date_key in branch_videos.keys()})
+        date_keys: List[str] = sorted(
+            {
+                date_key
+                for branch_videos in processed_by_branch.values()
+                for date_key in branch_videos.keys()
+            },
+            key=_date_sort_key,
+        )
         stage_count: int = len(branches)
         for date_key in date_keys:
-            failures_before: int = merge_run_summary.final_failure if merge_run_summary is not None else 0
+            failures_before_count: int = len(branch_failures)
+            merge_failures_before: int = (
+                merge_run_summary.final_failure if merge_run_summary is not None else 0
+            )
             for stage_index, branch in enumerate(branches, start=1):
                 self._execute_single_branch_date(
                     services=services,
@@ -397,16 +726,22 @@ class BatchRunner:
                     stage_index=stage_index,
                     stage_count=stage_count,
                 )
-            failures_after: int = merge_run_summary.final_failure if merge_run_summary is not None else 0
-            if failures_after > failures_before:
+            merge_failures_after: int = (
+                merge_run_summary.final_failure if merge_run_summary is not None else 0
+            )
+            branch_failed_this_date: bool = len(branch_failures) > failures_before_count
+            merge_partial_this_date: bool = merge_failures_after > merge_failures_before
+            if branch_failed_this_date:
+                continue
+            if merge_partial_this_date:
                 self._notifier.emit(
                     f"⚠️ Дата {format_date_key_for_display(date_key)} завершена частично",
-                    to_telegram=not dry_run,
+                    to_telegram=False,
                 )
             else:
                 self._notifier.emit(
                     f"✅ Дата {format_date_key_for_display(date_key)} завершена",
-                    to_telegram=not dry_run,
+                    to_telegram=False,
                 )
 
     def _execute_single_branch_date(
@@ -424,12 +759,19 @@ class BatchRunner:
         stage_index: int,
         stage_count: int,
     ) -> None:
-        date_videos_all: List[PlannedVideo] = processed_by_branch.get(branch.name, {}).get(date_key, [])
+        date_videos_all: List[PlannedVideo] = processed_by_branch.get(
+            branch.name, {}
+        ).get(date_key, [])
         if not date_videos_all:
-            self._logger.info("audit_branch_skip branch=%s date_key=%s reason=empty_branch_items", branch.name, date_key)
+            self._logger.info(
+                "audit_branch_skip branch=%s date_key=%s reason=empty_branch_items",
+                branch.name,
+                date_key,
+            )
             return
         branch_started_at: float = time.perf_counter()
         self._logger.info("audit_branch_start branch=%s", branch.name)
+        final_failure_before: int = merge_run_summary.final_failure
         try:
             self._branch_executor.execute(
                 services=services,
@@ -442,8 +784,12 @@ class BatchRunner:
                 stage_index=stage_index,
                 stage_count=stage_count,
             )
-            branch_total_ms: int = int(round((time.perf_counter() - branch_started_at) * 1000.0))
-            record_branch_total_ms(date_key=date_key, branch_label=branch.name, elapsed_ms=branch_total_ms)
+            branch_total_ms: int = int(
+                round((time.perf_counter() - branch_started_at) * 1000.0)
+            )
+            record_branch_total_ms(
+                date_key=date_key, branch_label=branch.name, elapsed_ms=branch_total_ms
+            )
             log_stage_timing(
                 logger=self._logger,
                 stage_name="branch_total",
@@ -453,7 +799,10 @@ class BatchRunner:
                 date_key=date_key,
             )
             branch_status: str = "ok"
-            if branch.name == BRANCH_MERGE and merge_run_summary.final_failure > 0:
+            if (
+                branch.name == BRANCH_MERGE
+                and merge_run_summary.final_failure > final_failure_before
+            ):
                 branch_status = "partial"
             self._logger.info(
                 "audit_branch_done branch=%s status=%s date_key=%s elapsed_ms=%d",
@@ -465,7 +814,9 @@ class BatchRunner:
             if audit_mode == "audit":
                 self._debug_writer.log_audit_branch_compare(date_key=date_key)
         except LlmModelConfigurationError as error:
-            branch_failures.append(f"branch={branch.name} date={date_key} failed: {error}")
+            branch_failures.append(
+                f"branch={branch.name} date={date_key} failed: {error}"
+            )
             record_branch_failed(branch_label=branch.name)
             self._notifier.emit(
                 f"❌ Ошибка ветки {branch.name}, дата {format_date_key_for_display(date_key)}",
@@ -480,11 +831,24 @@ class BatchRunner:
             )
             raise
         except Exception as error:
-            branch_failures.append(f"branch={branch.name} date={date_key} failed: {error}")
+            branch_failures.append(
+                f"branch={branch.name} date={date_key} failed: {error}"
+            )
             self._notifier.emit(
                 f"❌ Ошибка ветки {branch.name}, дата {format_date_key_for_display(date_key)}",
                 to_telegram=not dry_run,
             )
-            self._logger.error("audit_branch_done branch=%s status=failed date_key=%s reason=%s", branch.name, date_key, error)
-            log_error_event(self._logger, "branch=%s date=%s failed: %s", branch.name, date_key, error, reason_code="branch_date_failed")
-
+            self._logger.error(
+                "audit_branch_done branch=%s status=failed date_key=%s reason=%s",
+                branch.name,
+                date_key,
+                error,
+            )
+            log_error_event(
+                self._logger,
+                "branch=%s date=%s failed: %s",
+                branch.name,
+                date_key,
+                error,
+                reason_code="branch_date_failed",
+            )

@@ -4,7 +4,15 @@ from dataclasses import dataclass
 
 from app.config.settings import AppConfig
 
-DEFAULT_OPENAI_MODEL: str = "gpt-5.1"
+DEFAULT_OPENAI_MODEL: str = "gpt-5.2"
+DEFAULT_REASONING_EFFORT: str = "medium"
+REASONING_EFFORT_VALUES: frozenset[str] = frozenset(
+    {"none", "low", "medium", "high", "xhigh", "max"}
+)
+DEFAULT_SERVICE_TIER: str = "default"
+# OpenAI `service_tier`: flex = -50% price, slower, may answer 429 resource_unavailable;
+# priority/fast = faster, +100% price ("priority" was renamed "fast" in July 2026, both accepted).
+SERVICE_TIER_VALUES: frozenset[str] = frozenset({"auto", "default", "flex", "priority", "fast"})
 
 
 @dataclass(frozen=True)

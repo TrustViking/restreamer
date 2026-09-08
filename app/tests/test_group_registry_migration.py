@@ -16,14 +16,14 @@ def test_migration_removes_old_and_keeps_new() -> None:
                 "admin_ids": [123],
                 "user_ids": [],
                 "groups": {
-                    "-5268509425": {
-                        "chat_id": "-5268509425",
+                    "-123456789": {
+                        "chat_id": "-123456789",
                         "chat_type": "group",
                         "chat_title": "Test Group",
                         "chat_username": "",
                     },
-                    "-1003867270959": {
-                        "chat_id": "-1003867270959",
+                    "-1001234567890": {
+                        "chat_id": "-1001234567890",
                         "chat_type": "supergroup",
                         "chat_title": "Test Group",
                         "chat_username": "",
@@ -39,11 +39,11 @@ def test_migration_removes_old_and_keeps_new() -> None:
             logger = logging.getLogger("test_group_registry_migration")
             handle_group_migration(
                 logger=logger,
-                old_chat_id="-5268509425",
-                new_chat_id="-1003867270959",
+                old_chat_id="-123456789",
+                new_chat_id="-1001234567890",
             )
             payload = _load_registry_payload(temp_path)
-            assert "-5268509425" not in payload["groups"]
-            assert "-1003867270959" in payload["groups"]
+            assert "-123456789" not in payload["groups"]
+            assert "-1001234567890" in payload["groups"]
     finally:
         temp_path.unlink(missing_ok=True)

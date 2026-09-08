@@ -49,14 +49,14 @@ class GoogleSheetsClient:
             if "Unable to parse range" not in error_text:
                 raise
             LOGGER.warning(
-                "Range %s is invalid for spreadsheet %s; fallback to A:D on first sheet.",
+                "Range %s is invalid for spreadsheet %s; fallback to A:F on first sheet.",
                 range_name,
                 spreadsheet_id,
             )
             response = (
                 self._sheets_service.spreadsheets()
                 .values()
-                .get(spreadsheetId=spreadsheet_id, range="A:D")
+                .get(spreadsheetId=spreadsheet_id, range="A:F")
                 .execute()
             )
         values: List[List[str]] = cast(List[List[str]], response.get("values", []))

@@ -4,7 +4,7 @@ import dataclasses
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from app.config.settings import AppConfig
@@ -34,6 +34,28 @@ from app.planning import (
 from app.planning.sheet_loader import BatchSheetState
 
 
+def _classify_shared_preparation_error(error: BaseException) -> str:
+    """Преобразовать исключение из shared preparation блока в короткое
+    операторское сообщение. Возвращает текст БЕЗ префикса 'Row N:'.
+
+    Внутри try-блока shared preparation падать может что угодно: парсинг даты,
+    нормализация ссылки, writeback в Google Sheets, fetch metadata через yt-dlp,
+    detection языка, скачивание/нормализация thumbnail. Поэтому fallback
+    должен описывать класс «не удалось подготовить строку», а не только metadata.
+
+    Распознаются три класса по подстрокам в str(error):
+    - 'Private video' / 'Sign in to confirm' / 'Sign in if you' → видео приватное / нет доступа через cookies;
+    - 'Video unavailable' / 'removed by the uploader' → видео удалено или недоступно;
+    - всё остальное → fallback с просьбой смотреть detailed log.
+    """
+    text: str = str(error)
+    if "Private video" in text or "Sign in to confirm" in text or "Sign in if you" in text:
+        return "видео приватное / нет доступа через cookies"
+    if "Video unavailable" in text or "removed by the uploader" in text:
+        return "видео недоступно (удалено или заблокировано)"
+    return "не удалось подготовить строку (см. detailed log)"
+
+
 def build_prepared_videos(
     *,
     logger: logging.Logger,
@@ -43,141 +65,162 @@ def build_prepared_videos(
     metadata_fetcher: YouTubeMetadataFetcher,
     http_client: Any,
     kiev_tz: ZoneInfo,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> List[PreparedVideo]:
     prepared_videos: List[PreparedVideo] = []
     metadata_cache: Dict[str, VideoMetadata] = {}
     thumbnail_cache: Dict[str, NormalizedImage] = {}
     language_cache: Dict[str, str] = {}
+    processed_so_far: int = 0
     for row in sheet_state.rows:
-        logger.info("Row %d: read", row.row_number)
-        if not row.link:
-            logger.warning("Row %d: skipped, empty Links", row.row_number)
-            continue
-        if not row.date_raw or not row.time_raw:
-            logger.warning("Row %d: skipped, missing Date/Time", row.row_number)
-            continue
+        processed_so_far += 1
         try:
-            scheduled_at: datetime = parse_sheet_datetime(
-                date_raw=row.date_raw,
-                time_raw=row.time_raw,
-                tz=kiev_tz,
-            )
-            if scheduled_at < sheet_state.now_for_filter:
-                logger.info(
-                    "Row %d: skipped, already in the past (%s)",
-                    row.row_number,
-                    scheduled_at.isoformat(),
-                )
+            logger.info("Row %d: read", row.row_number)
+            if not row.link:
+                logger.warning("Row %d: skipped, empty Links", row.row_number)
                 continue
-            normalized_link: Optional[str] = normalize_youtube_link(row.link)
-            if not normalized_link:
+            if not row.date_raw or not row.time_raw:
+                logger.warning("Row %d: skipped, missing Date/Time", row.row_number)
+                continue
+            try:
+                scheduled_at: datetime = parse_sheet_datetime(
+                    date_raw=row.date_raw,
+                    time_raw=row.time_raw,
+                    tz=kiev_tz,
+                )
+                if scheduled_at < sheet_state.now_for_filter:
+                    logger.info(
+                        "Row %d: skipped, already in the past (%s)",
+                        row.row_number,
+                        scheduled_at.isoformat(),
+                    )
+                    continue
+                normalized_link: Optional[str] = normalize_youtube_link(row.link)
+                if not normalized_link:
+                    log_link_forensic_event(
+                        logger=logger,
+                        row_number=row.row_number,
+                        original_url=row.link,
+                        normalized_url="",
+                        status="invalid",
+                        writeback="not_applicable",
+                        reason="cannot_extract_video_id",
+                    )
+                    logger.warning(
+                        "Row %d: skipped, cannot extract YouTube video id from Links=%r",
+                        row.row_number,
+                        row.link,
+                    )
+                    continue
+                writeback_outcome = handle_normalized_link_writeback(
+                    logger=logger,
+                    summarize_error=summarize_error,
+                    sheets_client=services.sheets_client,
+                    spreadsheet_id=config.google.sheets_id,
+                    sheet_name_for_writeback=sheet_state.sheet_name_for_writeback,
+                    row_number=row.row_number,
+                    links_column_index=row.links_column_index,
+                    old_link=row.link,
+                    normalized_link=normalized_link,
+                    writeback_enabled=sheet_state.sheets_link_writeback_enabled,
+                    normalization_candidates=sheet_state.link_normalization_candidates,
+                    links_column_label=(
+                        f"Links/{column_index_to_letters(row.links_column_index)}"
+                    ),
+                )
                 log_link_forensic_event(
                     logger=logger,
                     row_number=row.row_number,
                     original_url=row.link,
-                    normalized_url="",
-                    status="invalid",
-                    writeback="not_applicable",
-                    reason="cannot_extract_video_id",
+                    normalized_url=normalized_link,
+                    status=writeback_outcome.status,
+                    writeback=writeback_outcome.writeback,
+                    reason=writeback_outcome.reason,
                 )
-                logger.warning(
-                    "Row %d: skipped, cannot extract YouTube video id from Links=%r",
-                    row.row_number,
-                    row.link,
-                )
-                continue
-            writeback_outcome = handle_normalized_link_writeback(
-                logger=logger,
-                summarize_error=summarize_error,
-                sheets_client=services.sheets_client,
-                spreadsheet_id=config.google.sheets_id,
-                sheet_name_for_writeback=sheet_state.sheet_name_for_writeback,
-                row_number=row.row_number,
-                links_column_index=row.links_column_index,
-                old_link=row.link,
-                normalized_link=normalized_link,
-                writeback_enabled=sheet_state.sheets_link_writeback_enabled,
-                normalization_candidates=sheet_state.link_normalization_candidates,
-                links_column_label=(
-                    f"Links/{column_index_to_letters(row.links_column_index)}"
-                ),
-            )
-            log_link_forensic_event(
-                logger=logger,
-                row_number=row.row_number,
-                original_url=row.link,
-                normalized_url=normalized_link,
-                status=writeback_outcome.status,
-                writeback=writeback_outcome.writeback,
-                reason=writeback_outcome.reason,
-            )
-            metadata: Optional[VideoMetadata] = metadata_cache.get(normalized_link)
-            if metadata is None:
-                metadata = metadata_fetcher.fetch(video_url=normalized_link)
-                metadata_cache[normalized_link] = metadata
-                logger.info("Row %d: metadata fetched", row.row_number)
-            else:
-                logger.info(
-                    "Row %d: metadata reused from cache for %s",
-                    row.row_number,
-                    normalized_link,
-                )
-            language: Optional[str] = language_cache.get(normalized_link)
-            if language is None:
-                from app.core.language import detect_language_decision, log_language_decision
+                metadata: Optional[VideoMetadata] = metadata_cache.get(normalized_link)
+                if metadata is None:
+                    metadata = metadata_fetcher.fetch(video_url=normalized_link)
+                    metadata_cache[normalized_link] = metadata
+                    logger.info("Row %d: metadata fetched", row.row_number)
+                else:
+                    logger.info(
+                        "Row %d: metadata reused from cache for %s",
+                        row.row_number,
+                        normalized_link,
+                    )
+                language: Optional[str] = language_cache.get(normalized_link)
+                if language is None:
+                    from app.core.language import detect_language_decision, log_language_decision
 
-                language_decision = detect_language_decision(metadata)
-                language = language_decision.final_language
-                log_language_decision(
-                    row_number=row.row_number,
-                    decision=language_decision,
+                    language_decision = detect_language_decision(metadata)
+                    language = language_decision.final_language
+                    log_language_decision(
+                        row_number=row.row_number,
+                        decision=language_decision,
+                    )
+                    language_cache[normalized_link] = language
+                else:
+                    logger.info(
+                        "Row %d: language=%s (cached)",
+                        row.row_number,
+                        language,
+                    )
+                normalized_thumbnail: Optional[NormalizedImage] = thumbnail_cache.get(
+                    normalized_link
                 )
-                language_cache[normalized_link] = language
-            else:
-                logger.info(
-                    "Row %d: language=%s (cached)",
+                if normalized_thumbnail is None:
+                    thumbnail_bytes: bytes = http_client.get_bytes(metadata.thumbnail_url)
+                    normalized_thumbnail = normalize_thumbnail(
+                        thumbnail_bytes,
+                        logger=logger,
+                    )
+                    thumbnail_cache[normalized_link] = normalized_thumbnail
+                    logger.info("Row %d: thumbnail fetched", row.row_number)
+                else:
+                    logger.info(
+                        "Row %d: thumbnail reused from cache for %s",
+                        row.row_number,
+                        normalized_link,
+                    )
+                prepared_videos.append(
+                    PreparedVideo(
+                        row_number=row.row_number,
+                        original_link=row.link,
+                        normalized_link=normalized_link,
+                        date_raw=row.date_raw,
+                        time_raw=row.time_raw,
+                        scheduled_at_kiev=scheduled_at,
+                        date_key=scheduled_at.strftime("%d%m%y"),
+                        date_display=scheduled_at.strftime("%d.%m.%Y"),
+                        language=language,
+                        metadata=metadata,
+                        thumbnail=normalized_thumbnail,
+                        local_thumbnail_path=None,
+                    )
+                )
+            except Exception as error:
+                reason: str = _classify_shared_preparation_error(error)
+                logger.warning(
+                    "⚠️ Строка %d пропущена: %s",
                     row.row_number,
-                    language,
+                    reason,
                 )
-            normalized_thumbnail: Optional[NormalizedImage] = thumbnail_cache.get(
-                normalized_link
-            )
-            if normalized_thumbnail is None:
-                thumbnail_bytes: bytes = http_client.get_bytes(metadata.thumbnail_url)
-                normalized_thumbnail = normalize_thumbnail(
-                    thumbnail_bytes,
-                    logger=logger,
-                )
-                thumbnail_cache[normalized_link] = normalized_thumbnail
-                logger.info("Row %d: thumbnail fetched", row.row_number)
-            else:
-                logger.info(
-                    "Row %d: thumbnail reused from cache for %s",
+                logger.debug(
+                    "Row %d: shared preparation traceback (reason=%s)",
                     row.row_number,
-                    normalized_link,
+                    reason,
+                    exc_info=error,
                 )
-            prepared_videos.append(
-                PreparedVideo(
-                    row_number=row.row_number,
-                    original_link=row.link,
-                    normalized_link=normalized_link,
-                    date_raw=row.date_raw,
-                    time_raw=row.time_raw,
-                    scheduled_at_kiev=scheduled_at,
-                    date_key=scheduled_at.strftime("%d%m%y"),
-                    date_display=scheduled_at.strftime("%d.%m.%Y"),
-                    language=language,
-                    metadata=metadata,
-                    thumbnail=normalized_thumbnail,
-                    local_thumbnail_path=None,
-                )
-            )
-        except Exception as error:
-            logger.exception(
-                "Row %d: shared preparation failed. reason=%s",
-                row.row_number,
-                error,
-            )
+        finally:
+            if progress_callback is not None:
+                try:
+                    progress_callback(processed_so_far, len(sheet_state.rows))
+                except Exception:
+                    logger.debug(
+                        "shared_prep_progress_callback_failed substage=prepare_videos row=%d",
+                        row.row_number,
+                        exc_info=True,
+                    )
     return prepared_videos
 
 
@@ -189,6 +232,7 @@ def materialize_prepared_previews(
     name_builder: NamePathBuilder,
     prepared_videos: List[PreparedVideo],
     dry_run: bool,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> List[PreparedVideo]:
     preview_root_folder_id: Optional[str] = (
         config.google.drive_preview_folder_id or config.google.drive_folder_id
@@ -196,6 +240,7 @@ def materialize_prepared_previews(
     language_positions: Dict[Tuple[str, str], int] = {}
     drive_folder_cache: Dict[Tuple[str, str], Optional[str]] = {}
     materialized_videos: List[PreparedVideo] = []
+    processed_so_far: int = 0
     for prepared in sorted(
         prepared_videos,
         key=lambda item: (
@@ -205,126 +250,145 @@ def materialize_prepared_previews(
             item.row_number,
         ),
     ):
-        language_key: Tuple[str, str] = (prepared.date_key, prepared.language)
-        next_position: int = language_positions.get(language_key, 0) + 1
-        language_positions[language_key] = next_position
-        local_image_path: Path = name_builder.build_image_path(
-            language=prepared.language,
-            date_key=prepared.date_key,
-            language_position=next_position,
-            title=prepared.metadata.title,
-            extension=prepared.thumbnail.extension,
-        )
-        local_image_path.parent.mkdir(parents=True, exist_ok=True)
-        expected_preview_size: int = len(prepared.thumbnail.bytes_data)
-        if not local_image_path.exists():
-            local_image_path.write_bytes(prepared.thumbnail.bytes_data)
-            logger.info(
-                "Row %d: shared preview saved to %s",
-                prepared.row_number,
-                local_image_path,
+        processed_so_far += 1
+        try:
+            language_key: Tuple[str, str] = (prepared.date_key, prepared.language)
+            next_position: int = language_positions.get(language_key, 0) + 1
+            language_positions[language_key] = next_position
+            local_image_path: Path = name_builder.build_image_path(
+                language=prepared.language,
+                date_key=prepared.date_key,
+                language_position=next_position,
+                title=prepared.metadata.title,
+                extension=prepared.thumbnail.extension,
             )
-        else:
-            existing_local_size: int = int(local_image_path.stat().st_size)
-            if existing_local_size == expected_preview_size:
+            local_image_path.parent.mkdir(parents=True, exist_ok=True)
+            expected_preview_size: int = len(prepared.thumbnail.bytes_data)
+            if not local_image_path.exists():
+                local_image_path.write_bytes(prepared.thumbnail.bytes_data)
                 logger.info(
-                    'preview_save_skipped_duplicate_local row=%d filename="%s" size=%d path="%s"',
+                    "Row %d: shared preview saved to %s",
                     prepared.row_number,
-                    local_image_path.name,
-                    existing_local_size,
                     local_image_path,
                 )
             else:
-                local_image_path.write_bytes(prepared.thumbnail.bytes_data)
+                existing_local_size: int = int(local_image_path.stat().st_size)
+                if existing_local_size == expected_preview_size:
+                    logger.info(
+                        'preview_save_skipped_duplicate_local row=%d filename="%s" size=%d path="%s"',
+                        prepared.row_number,
+                        local_image_path.name,
+                        existing_local_size,
+                        local_image_path,
+                    )
+                else:
+                    local_image_path.write_bytes(prepared.thumbnail.bytes_data)
+                    logger.info(
+                        "Row %d: shared preview overwritten at %s",
+                        prepared.row_number,
+                        local_image_path,
+                    )
                 logger.info(
-                    "Row %d: shared preview overwritten at %s",
+                    "Row %d: shared preview reused at %s",
                     prepared.row_number,
                     local_image_path,
                 )
-            logger.info(
-                "Row %d: shared preview reused at %s",
-                prepared.row_number,
-                local_image_path,
-            )
 
-        preview_target_folder_id: Optional[str] = preview_root_folder_id
-        drive_folder_key: Tuple[str, str] = (prepared.date_key, prepared.language)
-        if not dry_run and preview_root_folder_id:
-            if drive_folder_key not in drive_folder_cache:
-                try:
-                    preview_path_parts: List[str] = build_drive_preview_path_segments(
-                        template=config.google.drive_preview_path_template,
-                        language=prepared.language,
-                        date_key=prepared.date_key,
-                    )
-                    if preview_path_parts:
-                        preview_target_folder_id = drive_client.ensure_folder_path(
-                            parent_folder_id=preview_root_folder_id,
-                            path_parts=preview_path_parts,
+            preview_target_folder_id: Optional[str] = preview_root_folder_id
+            drive_folder_key: Tuple[str, str] = (prepared.date_key, prepared.language)
+            uploaded_preview_url: Optional[str] = None
+            if not dry_run and preview_root_folder_id:
+                if drive_folder_key not in drive_folder_cache:
+                    try:
+                        preview_path_parts: List[str] = build_drive_preview_path_segments(
+                            template=config.google.drive_preview_path_template,
+                            language=prepared.language,
+                            date_key=prepared.date_key,
                         )
-                except Exception as error:
-                    logger.warning(
-                        "Date %s language=%s: failed to ensure shared Drive preview path under %s. template=%r. Fallback to parent folder. reason=%s",
-                        prepared.date_key,
-                        prepared.language,
-                        preview_root_folder_id,
-                        config.google.drive_preview_path_template,
-                        summarize_error(error),
-                    )
-                drive_folder_cache[drive_folder_key] = preview_target_folder_id
-            preview_target_folder_id = drive_folder_cache[drive_folder_key]
-            if preview_target_folder_id and local_image_path.exists():
-                try:
-                    duplicate_drive_file = drive_client.find_file_by_name_and_size(
-                        folder_id=preview_target_folder_id,
-                        file_name=local_image_path.name,
-                        expected_size=local_image_path.stat().st_size,
-                    )
-                    if duplicate_drive_file is not None:
+                        if preview_path_parts:
+                            preview_target_folder_id = drive_client.ensure_folder_path(
+                                parent_folder_id=preview_root_folder_id,
+                                path_parts=preview_path_parts,
+                            )
+                    except Exception as error:
+                        logger.warning(
+                            "Date %s language=%s: failed to ensure shared Drive preview path under %s. template=%r. Fallback to parent folder. reason=%s",
+                            prepared.date_key,
+                            prepared.language,
+                            preview_root_folder_id,
+                            config.google.drive_preview_path_template,
+                            summarize_error(error),
+                        )
+                    drive_folder_cache[drive_folder_key] = preview_target_folder_id
+                preview_target_folder_id = drive_folder_cache[drive_folder_key]
+                if preview_target_folder_id and local_image_path.exists():
+                    try:
+                        duplicate_drive_file = drive_client.find_file_by_name_and_size(
+                            folder_id=preview_target_folder_id,
+                            file_name=local_image_path.name,
+                            expected_size=local_image_path.stat().st_size,
+                        )
+                        if duplicate_drive_file is not None:
+                            duplicate_file_id: str = duplicate_drive_file[0]
+                            logger.info(
+                                'preview_save_skipped_duplicate_drive row=%d filename="%s" size=%d folder_id=%s file_id=%s',
+                                prepared.row_number,
+                                local_image_path.name,
+                                duplicate_drive_file[1],
+                                preview_target_folder_id,
+                                duplicate_file_id,
+                            )
+                            duplicate_preview_url: str = f"https://drive.google.com/uc?export=download&id={duplicate_file_id}"
+                            materialized_videos.append(
+                                dataclasses.replace(
+                                    prepared,
+                                    local_thumbnail_path=local_image_path,
+                                    saved_preview_url=duplicate_preview_url,
+                                )
+                            )
+                            continue
                         logger.info(
-                            'preview_save_skipped_duplicate_drive row=%d filename="%s" size=%d folder_id=%s file_id=%s',
+                            'preview_drive_upload_proceeds row=%d filename="%s" size=%d folder_id=%s duplicate_lookup_result=not_found',
                             prepared.row_number,
                             local_image_path.name,
-                            duplicate_drive_file[1],
+                            local_image_path.stat().st_size,
                             preview_target_folder_id,
-                            duplicate_drive_file[0],
                         )
-                        materialized_videos.append(
-                            dataclasses.replace(
-                                prepared,
-                                local_thumbnail_path=local_image_path,
-                            )
+                        _upload_file_id, _upload_public_url = drive_client.upload_image_and_make_public(
+                            image_path=local_image_path,
+                            folder_id=preview_target_folder_id,
+                            mime_type=prepared.thumbnail.mime_type,
                         )
-                        continue
-                    logger.info(
-                        'preview_drive_upload_proceeds row=%d filename="%s" size=%d folder_id=%s duplicate_lookup_result=not_found',
-                        prepared.row_number,
-                        local_image_path.name,
-                        local_image_path.stat().st_size,
-                        preview_target_folder_id,
-                    )
-                    drive_client.upload_image_and_make_public(
-                        image_path=local_image_path,
-                        folder_id=preview_target_folder_id,
-                        mime_type=prepared.thumbnail.mime_type,
-                    )
-                    logger.info(
-                        "Row %d: shared preview uploaded to Google Drive (%s)",
-                        prepared.row_number,
-                        local_image_path.name,
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "Row %d: shared preview upload to Google Drive failed. reason=%s",
-                        prepared.row_number,
-                        summarize_error(error),
-                    )
-        materialized_videos.append(
-            dataclasses.replace(
-                prepared,
-                local_thumbnail_path=local_image_path,
+                        uploaded_preview_url = _upload_public_url
+                        logger.info(
+                            "Row %d: shared preview uploaded to Google Drive (%s) url=%s",
+                            prepared.row_number,
+                            local_image_path.name,
+                            uploaded_preview_url,
+                        )
+                    except Exception as error:
+                        logger.warning(
+                            "Row %d: shared preview upload to Google Drive failed. reason=%s",
+                            prepared.row_number,
+                            summarize_error(error),
+                        )
+            materialized_videos.append(
+                dataclasses.replace(
+                    prepared,
+                    local_thumbnail_path=local_image_path,
+                    saved_preview_url=uploaded_preview_url,
+                )
             )
-        )
+        finally:
+            if progress_callback is not None:
+                try:
+                    progress_callback(processed_so_far, len(prepared_videos))
+                except Exception:
+                    logger.debug(
+                        "shared_prep_progress_callback_failed substage=preview_materialize row=%d",
+                        prepared.row_number,
+                        exc_info=True,
+                    )
     return materialized_videos
 
 
@@ -391,6 +455,7 @@ def _build_base_planned_video(
         metadata=prepared.metadata,
         thumbnail=prepared.thumbnail,
         local_thumbnail_path=prepared.local_thumbnail_path,
+        saved_preview_url=prepared.saved_preview_url,
     )
     base_block_lang: str = planned_video_block_language(base_video)
     row_characteristics: RowVideoCharacteristics = RowVideoCharacteristics(

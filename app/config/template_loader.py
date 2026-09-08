@@ -182,13 +182,6 @@ def load_templates_from_path(path: Path) -> AppTemplates:
         telegram_key_form_reminder=must_get_template_value(
             payload, "telegram.key_form_reminder"
         ),
-        telegram_sparkle_separator=must_get_template_value(
-            payload, "telegram.sparkle_separator"
-        ),
-        telegram_post_header=must_get_template_value(payload, "telegram.post_header"),
-        telegram_language_digest_header=must_get_template_value(
-            payload, "telegram.language_digest_header"
-        ),
         llm_merge_title_description_prompt=must_get_template_value(
             payload, "llm.merge_title_description_prompt"
         ),

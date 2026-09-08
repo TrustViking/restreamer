@@ -102,7 +102,7 @@ app:
         self.assertEqual("openai", config.llm.provider)
         self.assertEqual("gpt-5.2", config.llm.model)
 
-    def test_default_active_model_is_gpt_5_1_without_hardcoding_in_callers(self) -> None:
+    def test_default_active_model_is_gpt_5_2_without_hardcoding_in_callers(self) -> None:
         runtime_config_path: str = self._write_runtime_config()
         self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
         env = {
@@ -116,7 +116,64 @@ app:
         }
         with patch.dict(os.environ, env, clear=True):
             config = load_config_from_env(logger=self._logger())
-        self.assertEqual("gpt-5.1", config.llm.model)
+        self.assertEqual("gpt-5.2", config.llm.model)
+
+    def _minimal_env(self, runtime_config_path: str) -> dict[str, str]:
+        return {
+            "APP_CONFIG_PATH": runtime_config_path,
+            "TELEGRAM_BOT_TOKEN": "token",
+            "TELEGRAM_CHAT_ID": "chat",
+            "GPT_API_KEY": "openai-secret",
+            "GOOGLE_DRIVE_FOLDER_ID": "drive-folder-id",
+            "GOOGLE_DRIVE_PREVIEW_FOLDER_ID": "drive-preview-folder-id",
+            "GOOGLE_SHEETS_ID": "sheet-id",
+        }
+
+    def test_fallback_model_and_reasoning_effort_defaults(self) -> None:
+        runtime_config_path: str = self._write_runtime_config()
+        self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
+        with patch.dict(os.environ, self._minimal_env(runtime_config_path), clear=True):
+            config = load_config_from_env(logger=self._logger())
+        self.assertEqual("gpt-5.2", config.llm.fallback_model)
+        self.assertEqual("medium", config.llm.reasoning_effort)
+
+    def test_fallback_model_and_reasoning_effort_env_overrides(self) -> None:
+        runtime_config_path: str = self._write_runtime_config()
+        self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
+        env: dict[str, str] = self._minimal_env(runtime_config_path)
+        env["OPENAI_MODEL"] = "gpt-5.4"
+        env["OPENAI_FALLBACK_MODEL"] = "gpt-5.1"
+        env["OPENAI_REASONING_EFFORT"] = "High"
+        with patch.dict(os.environ, env, clear=True):
+            config = load_config_from_env(logger=self._logger())
+        self.assertEqual("gpt-5.4", config.llm.model)
+        self.assertEqual("gpt-5.1", config.llm.fallback_model)
+        self.assertEqual("high", config.llm.reasoning_effort)
+
+    def test_service_tier_default_env_override_and_validation(self) -> None:
+        runtime_config_path: str = self._write_runtime_config()
+        self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
+        env: dict[str, str] = self._minimal_env(runtime_config_path)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual("default", load_config_from_env(logger=self._logger()).llm.service_tier)
+        env["OPENAI_SERVICE_TIER"] = "Flex"
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual("flex", load_config_from_env(logger=self._logger()).llm.service_tier)
+        env["OPENAI_SERVICE_TIER"] = "turbo"
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(RuntimeError) as raised:
+                load_config_from_env(logger=self._logger())
+        self.assertIn("llm.service_tier", str(raised.exception))
+
+    def test_invalid_reasoning_effort_is_rejected(self) -> None:
+        runtime_config_path: str = self._write_runtime_config()
+        self.addCleanup(lambda: os.path.exists(runtime_config_path) and os.remove(runtime_config_path))
+        env: dict[str, str] = self._minimal_env(runtime_config_path)
+        env["OPENAI_REASONING_EFFORT"] = "turbo"
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(RuntimeError) as raised:
+                load_config_from_env(logger=self._logger())
+        self.assertIn("llm.reasoning_effort", str(raised.exception))
 
     def test_telegram_send_delay_env_override_has_priority_over_yaml(self) -> None:
         runtime_config_path: str = self._write_runtime_config()

@@ -22,12 +22,16 @@ class ProjectPaths:
     service_account_path: Path
     bundled_config_path: Path
     bundled_templates_path: Path
+    ytdlp_exe_path: Path
+    cookies_file_path: Path
+    deno_exe_path: Path
+    state_dir: Path
 
 
 @lru_cache(maxsize=1)
 def get_project_paths() -> ProjectPaths:
     project_root: Path = PROJECT_ROOT
-    entrypoint_path: Path = project_root / "promo.py"
+    entrypoint_path: Path = project_root / "bot_main.py"
     secrets_dir: Path = project_root / "secrets"
     frozen: bool = bool(getattr(sys, "frozen", False))
 
@@ -66,4 +70,8 @@ def get_project_paths() -> ProjectPaths:
         service_account_path=secrets_dir / "service_account.json",
         bundled_config_path=bundled_config_path,
         bundled_templates_path=bundled_templates_path,
+        ytdlp_exe_path=project_root / "tools" / "yt-dlp.exe",
+        cookies_file_path=secrets_dir / "cookies.txt",
+        deno_exe_path=project_root / "tools" / "deno.exe",
+        state_dir=project_root / "state",
     )

@@ -13,6 +13,8 @@ class MergeContractServiceBase(unittest.TestCase):
             llm=SimpleNamespace(
                 provider="openai",
                 model="gpt-5.1",
+                reasoning_effort="medium",
+                service_tier="default",
                 timeout_sec=30.0,
                 max_output_tokens=1000,
                 pre_delay_sec=0.0,
@@ -33,8 +35,8 @@ Do not output generic slogans or abstract editorial phrasing.
 Do not use emoji in the title.
 {merge_contract_block}
 Avoid asserting strong person titles or role labels unless they are clearly necessary and well-supported by the sources.
-Optional official links block is allowed before close line with 1 to 3 non-YouTube links from sources.
-An optional one-line close should be practical CTA + 2 to 5 hashtags.
+Optional official links block is allowed before the hashtags line with 1 to 3 non-YouTube links from sources.
+Always end the description with a final hashtags line.
 Return strict JSON with title and description only.
 
 {youtube_candidates_block}
@@ -45,10 +47,10 @@ Return strict JSON with title and description only.
                     "MERGE STRUCTURAL RULES\n"
                     "RULE 1: Start with a standalone hook paragraph before any bullets.\n"
                     "RULE 2: Keep visual paragraph boundaries explicit with one blank line between structural blocks.\n"
-                    "RULE 3: Keep CTA and hashtags only in the final tail position, never as opener lines.\n"
+                    "RULE 3: Keep hashtags only in the final tail position; never write a CTA paragraph anywhere.\n"
                     "RULE 4: Do not repeat or paraphrase the hook thesis in the next adjacent line or paragraph.\n"
                     "EXAMPLE A (bad): CTA line opens the description and the real hook starts later.\n"
-                    "EXAMPLE A (good): Hook opens first, CTA appears only at the end.\n"
+                    "EXAMPLE A (good): Hook opens first; no CTA paragraph anywhere.\n"
                     "EXAMPLE B (bad): Two adjacent lines restate the same thesis with minor wording changes.\n"
                     "EXAMPLE B (good): The second line introduces new facts instead of repeating the opener."
                 ),

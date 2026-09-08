@@ -7,7 +7,7 @@ from typing import List, Optional, Sequence
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
 from app.config.settings import AppTemplates
 from app.core.constants import URL_PATTERN
-from app.core.cta_detection import starts_with_cta_prefix
+from app.core.cta_detection import looks_like_cta_line, starts_with_cta_prefix
 from app.core.env_flags import (
     strip_chapter_timestamps,
     strip_chapter_timestamps_enabled_from_env,
@@ -85,6 +85,72 @@ def normalize_urls_in_text(text: str) -> str:
     return URL_PATTERN.sub(_replace_url, text)
 
 
+_HASHTAG_TOKEN_PATTERN: re.Pattern[str] = re.compile(
+    r"^\s*(?:#[^\s#]+\s*)+$", flags=re.UNICODE
+)
+
+
+def _is_hashtag_only_paragraph(text: str) -> bool:
+    """Return True if paragraph is composed entirely of #hashtag tokens."""
+    normalized: str = str(text or "").strip()
+    if not normalized:
+        return False
+    return bool(_HASHTAG_TOKEN_PATTERN.match(normalized))
+
+
+_CTA_EMOJI_MARKERS: tuple[str, ...] = (
+    "✅",
+    "👍",
+    "💬",
+    "🔔",
+    "📢",
+    "🙏",
+    "❤️",
+    "❤",
+    "👇",
+    "🔥",
+)
+
+
+def _line_starts_with_cta_emoji_marker(line: str) -> bool:
+    """Return True if the line begins with a known CTA emoji marker."""
+    stripped: str = str(line or "").lstrip()
+    if not stripped:
+        return False
+    return any(stripped.startswith(marker) for marker in _CTA_EMOJI_MARKERS)
+
+
+def _strip_leading_cta_emoji_marker(line: str) -> str:
+    stripped: str = str(line or "").lstrip()
+    for marker in _CTA_EMOJI_MARKERS:
+        if stripped.startswith(marker):
+            return stripped[len(marker):].lstrip()
+    return stripped
+
+
+def _looks_like_multiline_cta_paragraph(text: str) -> bool:
+    """Detect a multi-line paragraph where most lines are CTA lines."""
+    raw_lines: List[str] = [
+        line.strip()
+        for line in str(text or "").split("\n")
+        if line.strip()
+    ]
+    if len(raw_lines) < 2:
+        return False
+    cta_lines: int = 0
+    for line in raw_lines:
+        if starts_with_cta_prefix(line):
+            cta_lines += 1
+            continue
+        if not _line_starts_with_cta_emoji_marker(line):
+            continue
+        line_without_marker: str = _strip_leading_cta_emoji_marker(line)
+        if starts_with_cta_prefix(line_without_marker) or looks_like_cta_line(line):
+            cta_lines += 1
+    threshold: int = (len(raw_lines) * 2 + 2) // 3
+    return cta_lines >= threshold
+
+
 def light_polish_single_source_description(text: str) -> str:
     """Apply light polish to a single-source description."""
     original_text: str = str(text or "")
@@ -98,8 +164,16 @@ def light_polish_single_source_description(text: str) -> str:
         or _looks_like_promotional_opener(cleaned_paragraphs[0])
     ):
         cleaned_paragraphs = cleaned_paragraphs[1:]
-    while cleaned_paragraphs and _looks_like_service_tail_paragraph(cleaned_paragraphs[-1]):
-        cleaned_paragraphs = cleaned_paragraphs[:-1]
+    while cleaned_paragraphs:
+        last_paragraph: str = cleaned_paragraphs[-1]
+        if (
+            _looks_like_service_tail_paragraph(last_paragraph)
+            or _is_hashtag_only_paragraph(last_paragraph)
+            or _looks_like_multiline_cta_paragraph(last_paragraph)
+        ):
+            cleaned_paragraphs = cleaned_paragraphs[:-1]
+            continue
+        break
 
     polished_text: str = "\n\n".join(cleaned_paragraphs).strip()
     if not polished_text:
@@ -118,5 +192,4 @@ def fallback_source_description_text(
     )
     if strip_chapter_timestamps_enabled_from_env():
         description_text = strip_chapter_timestamps(description_text)
-    description_text = light_polish_single_source_description(description_text)
-    return description_text
+    return light_polish_single_source_description(description_text)

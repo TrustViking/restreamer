@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, cast
 
 import requests
 
@@ -15,8 +15,65 @@ except ImportError:
     MediaFileUpload = None  # type: ignore
     MediaIoBaseDownload = None  # type: ignore
 
+try:
+    from googleapiclient.errors import HttpError
+except ImportError:
+    HttpError = Exception  # type: ignore
+
 
 LOGGER = _get_logger_impl(__name__)
+
+_DRIVE_MAX_RETRIES: int = 4
+_DRIVE_BASE_DELAY_SEC: float = 15.0
+_DRIVE_MAX_DELAY_SEC: float = 90.0
+_DRIVE_TRANSIENT_STATUS_CODES: frozenset[int] = frozenset({500, 502, 503, 504})
+
+
+def _compute_drive_retry_delay(attempt: int) -> float:
+    delay: float = _DRIVE_BASE_DELAY_SEC * (2 ** (attempt - 1))
+    return min(delay, _DRIVE_MAX_DELAY_SEC)
+
+
+class GoogleDriveTransientError(RuntimeError):
+    """Raised when Google Drive API returns a transient server-side error."""
+
+    def __init__(self, status_code: int, file_id: str, original: Exception) -> None:
+        super().__init__(f"Google Drive transient error status={status_code} file_id={file_id}")
+        self.status_code = status_code
+        self.file_id = file_id
+        self.original = original
+
+
+def _execute_drive_with_retry(
+    operation_name: str,
+    file_id: str,
+    request_callable: Callable[[], Any],
+) -> Any:
+    for attempt in range(1, _DRIVE_MAX_RETRIES + 1):
+        try:
+            return request_callable()
+        except HttpError as error:
+            status_code: Optional[int] = getattr(getattr(error, "resp", None), "status", None)
+            if status_code == 429 and attempt < _DRIVE_MAX_RETRIES:
+                delay_sec: float = _compute_drive_retry_delay(attempt)
+                LOGGER.warning(
+                    "drive_request_429 operation=%s attempt=%d/%d delay_sec=%.1f file_id=%s",
+                    operation_name,
+                    attempt,
+                    _DRIVE_MAX_RETRIES,
+                    delay_sec,
+                    file_id,
+                    extra={"warning_category": "informational"},
+                )
+                time.sleep(delay_sec)
+                continue
+            if status_code in _DRIVE_TRANSIENT_STATUS_CODES:
+                raise GoogleDriveTransientError(
+                    status_code=int(status_code),
+                    file_id=file_id,
+                    original=error,
+                ) from error
+            raise
 
 
 class GoogleDriveClient:
@@ -26,9 +83,13 @@ class GoogleDriveClient:
     def ping_access(self) -> Tuple[str, str]:
         response: Dict[str, Any] = cast(
             Dict[str, Any],
-            self._drive_service.about()
-            .get(fields="user(displayName,emailAddress)")
-            .execute(),
+            _execute_drive_with_retry(
+                operation_name="ping_access",
+                file_id="<ping>",
+                request_callable=lambda: self._drive_service.about()
+                .get(fields="user(displayName,emailAddress)")
+                .execute(),
+            ),
         )
         user_payload: Dict[str, Any] = cast(Dict[str, Any], response.get("user", {}))
         display_name: str = (
@@ -40,9 +101,13 @@ class GoogleDriveClient:
     def get_current_user_info(self) -> Tuple[str, str]:
         response: Dict[str, Any] = cast(
             Dict[str, Any],
-            self._drive_service.about()
-            .get(fields="user(displayName,emailAddress)")
-            .execute(),
+            _execute_drive_with_retry(
+                operation_name="get_current_user_info",
+                file_id="<lookup>",
+                request_callable=lambda: self._drive_service.about()
+                .get(fields="user(displayName,emailAddress)")
+                .execute(),
+            ),
         )
         user_payload: Dict[str, Any] = cast(Dict[str, Any], response.get("user", {}))
         display_name: str = (
@@ -54,13 +119,17 @@ class GoogleDriveClient:
     def get_file_owner_info(self, file_id: str) -> str:
         response: Dict[str, Any] = cast(
             Dict[str, Any],
-            self._drive_service.files()
-            .get(
-                fileId=file_id,
-                fields="owners(displayName,emailAddress)",
-                supportsAllDrives=True,
-            )
-            .execute(),
+            _execute_drive_with_retry(
+                operation_name="get_file_owner_info",
+                file_id=file_id,
+                request_callable=lambda: self._drive_service.files()
+                .get(
+                    fileId=file_id,
+                    fields="owners(displayName,emailAddress)",
+                    supportsAllDrives=True,
+                )
+                .execute(),
+            ),
         )
         owners: List[Dict[str, Any]] = cast(
             List[Dict[str, Any]], response.get("owners", [])
@@ -102,25 +171,36 @@ class GoogleDriveClient:
         media: Any = MediaFileUpload(
             str(image_path), mimetype=mime_type, resumable=False
         )
-        created: Dict[str, Any] = (
-            self._drive_service.files()
-            .create(
-                body=file_metadata,
-                media_body=media,
-                fields="id",
-                supportsAllDrives=True,
-            )
-            .execute()
+        created: Dict[str, Any] = cast(
+            Dict[str, Any],
+            _execute_drive_with_retry(
+                operation_name="upload_image_and_make_public_create",
+                file_id="<lookup>",
+                request_callable=lambda: self._drive_service.files()
+                .create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id",
+                    supportsAllDrives=True,
+                )
+                .execute(),
+            ),
         )
         file_id: str = str(created["id"])
 
         # Делаем файл публичным: доступен любому, у кого есть ссылка.
-        self._drive_service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            fields="id",
-            supportsAllDrives=True,
-        ).execute()
+        _execute_drive_with_retry(
+            operation_name="upload_image_and_make_public_permission",
+            file_id=file_id,
+            request_callable=lambda: self._drive_service.permissions()
+            .create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"},
+                fields="id",
+                supportsAllDrives=True,
+            )
+            .execute(),
+        )
 
         # Более надежный direct URL для insertInlineImage.
         public_url: str = f"https://drive.google.com/uc?export=download&id={file_id}"
@@ -175,16 +255,20 @@ class GoogleDriveClient:
         )
         response: Dict[str, Any] = cast(
             Dict[str, Any],
-            self._drive_service.files()
-            .list(
-                q=query,
-                spaces="drive",
-                fields="files(id,name,size)",
-                pageSize=20,
-                includeItemsFromAllDrives=True,
-                supportsAllDrives=True,
-            )
-            .execute(),
+            _execute_drive_with_retry(
+                operation_name="find_file_by_name_and_size",
+                file_id=folder_id or "<lookup>",
+                request_callable=lambda: self._drive_service.files()
+                .list(
+                    q=query,
+                    spaces="drive",
+                    fields="files(id,name,size)",
+                    pageSize=20,
+                    includeItemsFromAllDrives=True,
+                    supportsAllDrives=True,
+                )
+                .execute(),
+            ),
         )
         files_found: List[Dict[str, Any]] = cast(List[Dict[str, Any]], response.get("files", []))
         LOGGER.info(
@@ -232,16 +316,20 @@ class GoogleDriveClient:
         )
         response: Dict[str, Any] = cast(
             Dict[str, Any],
-            self._drive_service.files()
-            .list(
-                q=query,
-                spaces="drive",
-                fields="files(id,name)",
-                pageSize=1,
-                includeItemsFromAllDrives=True,
-                supportsAllDrives=True,
-            )
-            .execute(),
+            _execute_drive_with_retry(
+                operation_name="ensure_folder_list",
+                file_id=parent_folder_id or "<lookup>",
+                request_callable=lambda: self._drive_service.files()
+                .list(
+                    q=query,
+                    spaces="drive",
+                    fields="files(id,name)",
+                    pageSize=1,
+                    includeItemsFromAllDrives=True,
+                    supportsAllDrives=True,
+                )
+                .execute(),
+            ),
         )
         files_found: List[Dict[str, Any]] = cast(
             List[Dict[str, Any]], response.get("files", [])
@@ -256,13 +344,17 @@ class GoogleDriveClient:
         }
         created: Dict[str, Any] = cast(
             Dict[str, Any],
-            self._drive_service.files()
-            .create(
-                body=payload,
-                fields="id,name",
-                supportsAllDrives=True,
-            )
-            .execute(),
+            _execute_drive_with_retry(
+                operation_name="ensure_folder_create",
+                file_id=parent_folder_id or "<lookup>",
+                request_callable=lambda: self._drive_service.files()
+                .create(
+                    body=payload,
+                    fields="id,name",
+                    supportsAllDrives=True,
+                )
+                .execute(),
+            ),
         )
         created_id: str = str(created.get("id") or "").strip()
         if not created_id:
@@ -295,29 +387,46 @@ class GoogleDriveClient:
         return current_folder_id
 
     def move_file_to_folder(self, file_id: str, folder_id: str) -> None:
-        file_info: Dict[str, Any] = (
-            self._drive_service.files()
-            .get(fileId=file_id, fields="parents", supportsAllDrives=True)
-            .execute()
+        file_info: Dict[str, Any] = cast(
+            Dict[str, Any],
+            _execute_drive_with_retry(
+                operation_name="move_file_to_folder_get",
+                file_id=file_id,
+                request_callable=lambda: self._drive_service.files()
+                .get(fileId=file_id, fields="parents", supportsAllDrives=True)
+                .execute(),
+            ),
         )
         previous_parents: str = ",".join(file_info.get("parents", []))
-        self._drive_service.files().update(
-            fileId=file_id,
-            addParents=folder_id,
-            removeParents=previous_parents,
-            fields="id, parents",
-            supportsAllDrives=True,
-        ).execute()
+        _execute_drive_with_retry(
+            operation_name="move_file_to_folder_update",
+            file_id=file_id,
+            request_callable=lambda: self._drive_service.files()
+            .update(
+                fileId=file_id,
+                addParents=folder_id,
+                removeParents=previous_parents,
+                fields="id, parents",
+                supportsAllDrives=True,
+            )
+            .execute(),
+        )
 
     def set_anyone_permission(self, file_id: str, role: str) -> None:
         if role not in {"reader", "commenter", "writer"}:
             raise ValueError(f"Unsupported Google Drive anyone role: {role}")
-        self._drive_service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": role},
-            fields="id",
-            supportsAllDrives=True,
-        ).execute()
+        _execute_drive_with_retry(
+            operation_name="set_anyone_permission",
+            file_id=file_id,
+            request_callable=lambda: self._drive_service.permissions()
+            .create(
+                fileId=file_id,
+                body={"type": "anyone", "role": role},
+                fields="id",
+                supportsAllDrives=True,
+            )
+            .execute(),
+        )
 
     def export_google_doc_as_docx(self, file_id: str) -> bytes:
         if MediaIoBaseDownload is None:

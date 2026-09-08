@@ -315,3 +315,25 @@ def load_known_groups(*, logger: logging.Logger) -> list[KnownGroup]:
     groups.sort(key=lambda item: (item.chat_title.lower(), item.chat_id))
     logger.debug("group_registry_loaded path=%s groups=%d", path, len(groups))
     return groups
+
+
+def load_known_group_ids() -> frozenset[int]:
+    """Return chat_ids of all known groups as a frozenset of ints.
+
+    Used by RoleMiddleware to authorize anonymous-admin messages
+    coming from already-registered groups. Reads from the JSON
+    registry on each call (cheap: file is small, called per event).
+
+    Invalid/non-integer chat_ids in the file are silently skipped.
+    """
+    path: Path = _registry_path()
+    payload: dict[str, Any] = _load_registry_payload(path)
+    groups_map: dict[str, dict[str, str]] = payload.get("groups", {})
+    result: set[int] = set()
+    chat_id_raw: str
+    for chat_id_raw in groups_map.keys():
+        try:
+            result.add(int(chat_id_raw))
+        except (TypeError, ValueError):
+            continue
+    return frozenset(result)

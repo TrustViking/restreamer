@@ -509,7 +509,7 @@ class MergeContractValidationTests(MergeContractServiceBase):
         self.assertIn("🔹 fourth", result.description_text)
         self.assertIn("🔹 fifth", result.description_text)
 
-    def test_block_spacing_and_role_softening_are_stabilized(self) -> None:
+    def test_block_spacing_is_stabilized(self) -> None:
         result = normalize_merge_description(
             description=(
                 "This hook stays factual and readable with enough context!\n"
@@ -525,9 +525,7 @@ class MergeContractValidationTests(MergeContractServiceBase):
         )
         self.assertIn("\n\nIn this stream you'll see:\n", result.description_text)
         self.assertIn("\n\n🌐 Official links:\nhttps://example.org\n\n", result.description_text)
-        self.assertIn("🎤 Vitaliy Orlov comments on the community response", result.description_text)
-        self.assertNotIn("Pastor Vitaliy Orlov", result.description_text)
-        self.assertTrue(result.diagnostics.role_softening_applied)
+        self.assertIn("🎤 Pastor Vitaliy Orlov comments on the community response", result.description_text)
 
     def test_script_mix_guard_rejects_cyrillic_contamination_inside_english_body(self) -> None:
         result = normalize_merge_description(
@@ -740,8 +738,6 @@ class MergeContractValidationTests(MergeContractServiceBase):
         self.assertIn("accent_bullets_count=", logs)
         self.assertIn("accent_overflow=yes", logs)
         self.assertIn("block_language_expected=en", logs)
-        self.assertIn("person_role_claims_detected=", logs)
-        self.assertIn("role_softening_applied=yes", logs)
         self.assertIn("semantic_gate_status=needs_normalization", logs)
 
     def test_normalize_merge_description_does_not_double_prefix_bullet_as_lead_in(self) -> None:

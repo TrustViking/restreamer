@@ -5,6 +5,7 @@ import logging
 import os
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import BotCommand, User
 
 from app.bootstrap.logging_config import (
@@ -17,6 +18,7 @@ from app.telegram_bot.group_registry import KnownGroup, load_known_groups, sync_
 
 LOGGER: logging.Logger = _get_logger_impl("bot")
 _STARTUP_API_TIMEOUT_SEC: float = 20.0
+_BOT_REQUEST_TIMEOUT_SEC: float = 30.0
 
 
 def _read_required_env(var_name: str) -> str:
@@ -69,7 +71,8 @@ def _build_bot_and_dispatcher() -> tuple[Bot, Dispatcher, frozenset[int], frozen
     admin_ids: frozenset[int] = _parse_admin_ids(raw_admin_ids)
     raw_user_ids: str = str(os.environ.get("TELEGRAM_USER_IDS", ""))
     user_ids: frozenset[int] = _parse_optional_ids(raw_user_ids)
-    bot: Bot = Bot(token=bot_token)
+    _bot_session: AiohttpSession = AiohttpSession(timeout=_BOT_REQUEST_TIMEOUT_SEC)
+    bot: Bot = Bot(token=bot_token, session=_bot_session)
     dp: Dispatcher = Dispatcher()
     dp.include_router(router)
     role_middleware: RoleMiddleware = RoleMiddleware(admin_ids=admin_ids, user_ids=user_ids)
@@ -158,17 +161,31 @@ async def run_bot() -> None:
     # Notify known groups that bot is ready.
     for group in known_groups:
         try:
-            await bot.send_message(
-                chat_id=int(group.chat_id),
-                text=f"✅ Бот готов к работе\n🤖 @{username}\n\nВыберите режим обработки:",
-                reply_markup=_MODE_KEYBOARD,
+            await asyncio.wait_for(
+                bot.send_message(
+                    chat_id=int(group.chat_id),
+                    text=f"✅ Бот готов к работе\n🤖 @{username}\n\nВыберите режим обработки:",
+                    reply_markup=_MODE_KEYBOARD,
+                ),
+                timeout=_STARTUP_API_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "startup_notify_timeout chat_id=%s timeout_sec=%.1f",
+                group.chat_id,
+                _STARTUP_API_TIMEOUT_SEC,
+                extra={"warning_category": "informational"},
             )
         except Exception:
             LOGGER.debug(
                 "startup_notify_failed chat_id=%s",
                 group.chat_id,
             )
+
     try:
         await dp.start_polling(bot)
     finally:
-        await bot.session.close()
+        try:
+            await bot.session.close()
+        except Exception:
+            pass

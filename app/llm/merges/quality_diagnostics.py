@@ -64,9 +64,6 @@ class MergeQualityDiagnostics:
     language_consistency_ok: bool
     wrong_language_heading_detected: bool
     official_links_heading_mismatch: bool
-    person_role_claims_detected: int
-    suspicious_role_labels_detected: tuple[str, ...]
-    role_softening_applied: bool
     script_mix_detected: bool
     script_mix_suspects: tuple[str, ...]
     semantic_gate_status: str
@@ -89,9 +86,6 @@ def build_diagnostics(
     accent_overflow: bool,
     wrong_language_heading_detected: bool,
     official_links_heading_mismatch: bool,
-    person_role_claims_detected: int,
-    suspicious_role_labels_detected: tuple[str, ...],
-    role_softening_applied: bool,
     accent_marker_types: tuple[str, ...] = (),
     neutral_bullets_count: int = 0,
     accent_bullets_count: int = 0,
@@ -111,22 +105,26 @@ def build_diagnostics(
     reason_codes: List[str] = []
     if accent_overflow:
         reason_codes.append("accent_marker_overflow")
+    # NOTE: код `missing_block_spacing` сейчас означает «normalizer изменил текст»,
+    # а не буквально «нет пустой строки между блоками». См. NOTE в
+    # app/llm/merges/quality_normalizer.py возле определения block_spacing_ok.
+    # Имя кода сохраняем для совместимости с текущими операторскими сообщениями
+    # и логами; уточнение/разделение reason-кодов — будущая задача.
     if not block_spacing_ok:
         reason_codes.append("missing_block_spacing")
     if wrong_language_heading_detected:
         reason_codes.append("wrong_language_heading_detected")
     if official_links_heading_mismatch:
         reason_codes.append("official_links_heading_mismatch")
-    if role_softening_applied:
-        reason_codes.append("suspicious_role_softened")
     if script_mix_suspects:
         reason_codes.append("script_mix_contamination")
     if _core_language_mismatch(hook_language_detected, language):
         reason_codes.append("inconsistent_block_language")
-    elif suspicious_role_labels_detected and not role_softening_applied:
-        reason_codes.append("suspicious_person_role_labels_detected")
 
-    if "inconsistent_block_language" in reason_codes or "script_mix_contamination" in reason_codes:
+    if (
+        "inconsistent_block_language" in reason_codes
+        or "script_mix_contamination" in reason_codes
+    ):
         semantic_gate_status = "hard_reject"
     elif any(
         code in reason_codes
@@ -135,12 +133,9 @@ def build_diagnostics(
             "missing_block_spacing",
             "wrong_language_heading_detected",
             "official_links_heading_mismatch",
-            "suspicious_role_softened",
         )
     ):
         semantic_gate_status = "needs_normalization"
-    elif "suspicious_person_role_labels_detected" in reason_codes:
-        semantic_gate_status = "warning"
     else:
         semantic_gate_status = "ok"
 
@@ -159,9 +154,6 @@ def build_diagnostics(
         language_consistency_ok=language_consistency_ok,
         wrong_language_heading_detected=wrong_language_heading_detected,
         official_links_heading_mismatch=official_links_heading_mismatch,
-        person_role_claims_detected=person_role_claims_detected,
-        suspicious_role_labels_detected=suspicious_role_labels_detected,
-        role_softening_applied=role_softening_applied,
         script_mix_detected=bool(script_mix_suspects),
         script_mix_suspects=script_mix_suspects,
         semantic_gate_status=semantic_gate_status,

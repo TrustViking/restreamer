@@ -44,6 +44,8 @@ class OpenAIProvider(LlmProvider):
             timeout_sec=self.timeout_sec(config=config),
             attempt_label=attempt_label,
             max_output_tokens=max_output_tokens,
+            reasoning_effort=config.llm.reasoning_effort,
+            service_tier=config.llm.service_tier,
             structured_schema=structured_schema,
             temperature=temperature,
             trace_context=trace_context,

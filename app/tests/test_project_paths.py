@@ -48,7 +48,7 @@ class ProjectPathsTests(unittest.TestCase):
             Path("secrets") / "credentials.json",
         )
 
-        self.assertTrue(str(paths.entrypoint_path).endswith("promo.py"))
+        self.assertTrue(str(paths.entrypoint_path).endswith("bot_main.py"))
         self.assertTrue(
             str(paths.runtime_config_path).endswith(os.path.join("app", "config", "runtime", "app_config.yaml"))
         )

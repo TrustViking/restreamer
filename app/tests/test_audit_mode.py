@@ -68,7 +68,15 @@ class AuditModeRunnerTests(unittest.TestCase):
 
     def test_audit_reuses_shared_preparation_once(self) -> None:
         runner = self._build_runner()
-        prepared_videos = [SimpleNamespace(date_key="010130", scheduled_at_kiev=SimpleNamespace(strftime=lambda _: "1000"))]
+        prepared_videos = [
+            SimpleNamespace(
+                date_key="010130",
+                scheduled_at_kiev=SimpleNamespace(strftime=lambda _: "1000"),
+                saved_preview_url="",
+                row_number=1,
+                language="",
+            )
+        ]
         sheet_state = SimpleNamespace(
             rows=[object()],
             link_normalization_candidates=[],

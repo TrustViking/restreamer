@@ -45,7 +45,7 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
             payload.description_text,
         )
         logs: str = "\n".join(captured.output)
-        self.assertIn("merged_publish_sanitation_applied=yes", logs)
+        self.assertIn("publish_sanitation_applied=yes", logs)
         self.assertIn("hashtags_split_from_cta=yes", logs)
         self.assertIn("tail_layout=body_blank_hashtags", logs)
         self.assertEqual(BLOCK_GENERATION_MODE_REAL_MERGE, payload.block_generation_mode)
@@ -206,10 +206,10 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
             "Body paragraph.\n\n"
             "🌐 Official links:\n\n"
             "https://example.org/official?utm_source=yt\n\n"
-            "Official links:\n"
+            "🌐 Official links:\n"
             "https://example.org/official\n"
             "https://example.org/second\n\n"
-            "Official links:\n\n"
+            "🌐 Official links:\n\n"
             "https://youtu.be/ccccccccccc\n\n"
             "Join us tonight and share your thoughts.\n\n"
             "#nanoplastics #microplastics"
@@ -244,7 +244,7 @@ class MergedPublishPayloadSanitationTests(unittest.TestCase):
             "🌐 Official links:\n"
             "https://example.org/official\n"
             "https://example.org/second\n\n"
-            "Official links:\n\n"
+            "🌐 Official links:\n\n"
             "Join us tonight and share your thoughts.\n\n"
             "#nanoplastics #microplastics"
         )

@@ -381,7 +381,7 @@ def process_slot(
                     fallback_merge_blocks += 1
                     fallback_merge_targets.append(f"{slot_key}:{language}")
                     merge_run_summary.record_fallback_merge_block()
-                logger.warning(
+                logger.info(
                     "[%s] LLM merge failed for language=%s provider=%s reason=%s",
                     branch_label,
                     language,

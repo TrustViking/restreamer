@@ -45,7 +45,10 @@ from app.llm.merges.merge_validation import (
 from app.llm.models.model_compatibility import LlmModelConfigurationError, classify_openai_request_error
 from app.llm.models.model_identity import resolve_effective_llm_model
 from app.llm.providers.provider_base import LlmProvider
-from app.observability.runtime_analytics import log_warning_operational
+from app.observability.runtime_analytics import (
+    log_warning_informational,
+    record_merge_validation_rejected,
+)
 
 LOGGER = _get_logger_impl(__name__)
 
@@ -456,6 +459,7 @@ class MergeOrchestrator:
                 )
                 if self._merge_run_summary is not None:
                     self._merge_run_summary.record_validation_rejected()
+                record_merge_validation_rejected(count=1)
             except Exception as error:
                 error_classification = classify_openai_request_error(error)
                 if error_classification.reason_code == self._OPENAI_QUOTA_REASON_CODE:
@@ -499,7 +503,7 @@ class MergeOrchestrator:
                 )
 
         final_reason_code: str = last_reason_code
-        log_warning_operational(
+        log_warning_informational(
             LOGGER,
             "merge_llm_final_failure branch=%s date_key=%s slot_key=%s language=%s provider=%s stage=primary code=%s fallback_used=no raw_response_received=%s reason=%s raw_chars=%d",
             self._branch_label,

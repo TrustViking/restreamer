@@ -136,7 +136,7 @@ def _build_youtube_candidates_block(
         "Choosing none is valid.",
         "Pick only the most relevant main streams for the final summary.",
         "Prefer longer broadcasts. Do not pick short promo, teaser, clip, or secondary videos.",
-        "If you include selected YouTube URLs, place each selected URL on its own line near the end of the description before any official links block or CTA.",
+        "If you include selected YouTube URLs, place each selected URL on its own line near the end of the description before any official links block.",
     ]
     for index, candidate in enumerate(candidates_result.deduped_candidates, start=1):
         block_lines.extend(

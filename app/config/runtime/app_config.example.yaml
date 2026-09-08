@@ -1,53 +1,59 @@
-# app config template
-# Copy to config/app_config.yaml (portable exe) or app/config/runtime/app_config.yaml (dev).
-# Secrets go in secrets/.env — see .env.example.
-# Env vars override YAML values where noted.
 app:
   processing:
-    mode: audit
+    mode: audit                         # Технический режим пайплайна; сейчас поддерживается только audit. Ветку запуска выбирает --audit-mode: nomerge, merge или audit.
 
   llm:
-    model: "gpt-5.2"              # env override: OPENAI_MODEL
-    timeout_sec: 120              # env override: STG_OPENAI_TIMEOUT_SEC
-    max_output_tokens: 1000       # env override: STG_OPENAI_MAX_OUTPUT_TOKENS
-    pre_delay_sec: 5.0            # env override: STG_OPENAI_PRE_DELAY_SEC
+    model: "gpt-5.2"                    # Основная модель OpenAI; на старте проверяется одним реальным запросом.
+    fallback_model: "gpt-5.2"           # Запасная модель: используется, если основная недоступна проекту (404/403).
+    reasoning_effort: "medium"          # Уровень reasoning для gpt-5.x: none, low, medium, high, xhigh, max.
+    service_tier: "default"             # Тариф OpenAI: default, flex (вдвое дешевле, медленнее, при отказе 429 — ожидание 20/40/80 с и переход на default), fast/priority (вдвое дороже, быстрее).
+    timeout_sec: 120                    # Таймаут одного LLM-запроса в секундах; для flex ставьте 600-900.
+    max_output_tokens: 6000             # Бюджет ответа LLM в токенах, ВКЛЮЧАЯ reasoning-токены; при medium ставьте 4000-6000.
+    pre_delay_sec: 5.0                  # Пауза перед LLM-запросом, полезна для ограничения частоты запросов.
 
   cleanup:
-    max_age_days: 3               # env override: STG_CLEANUP_MAX_AGE_DAYS
+    max_age_days: 3                     # Сколько дней хранить временные файлы перед очисткой.
+
+  ytdlp:
+    auto_update: true                   # Автоматически обновлять yt-dlp перед работой.
+    update_check_interval_days: 7       # Как часто проверять обновление yt-dlp, в днях.
+    cookies_warn_age_days: 15           # Через сколько дней предупреждать, что cookies-файл устарел.
+    deno_auto_update: true              # Автоматически обновлять Deno для JS-челленджей yt-dlp.
+    deno_update_interval_days: 15       # Как часто проверять обновление Deno, в днях.
 
   google:
-    enabled: true
-    auth_mode: "oauth"            # "oauth" or "service_account"; env override: GOOGLE_AUTH_MODE
-    drive_preview_path_template: "preview/{date}/{language}"
-    doc_share_mode: anyone_writer
-    sheets_range: "A:D"
-    form_url: "https://forms.gle/REPLACE_ME"
-    contacts: "@contact1 @contact2"
+    enabled: true                       # Включить интеграцию с Google Sheets, Drive и Docs.
+    auth_mode: "oauth"                  # Способ авторизации Google: "oauth" или "service_account".
+    drive_preview_path_template: "preview/{date}/{language}" # Папка для превью в Google Drive; доступны {date} и {language}.
+    doc_share_mode: anyone_writer       # Доступ к созданным Google Docs: private, anyone_reader, anyone_commenter, anyone_writer.
+    sheets_range: "A:F"                 # Диапазон колонок Google Sheets, который читает приложение.
+    form_url: "https://example.com/form" # Пример ссылки на форму, которая попадет в публикации.
+    contacts: "@example_contact"        # Пример контактного текста для публикаций; замените на свой канал, чат или алиас.
 
   paths:
-    local_image_dir_template: "./image/{date}/{language}"
-    local_doc_dir_template: "./docs/{date}"
+    local_image_dir_template: "./image/{date}/{language}" # Локальная папка для сохранения превью; доступны {date} и {language}.
+    local_doc_dir_template: "./docs/{date}" # Локальная папка для экспортированных документов; доступен {date}.
 
   timezones:
-    kiev: "Europe/Kyiv"
-    cet: "Europe/Berlin"
+    kiev: "Europe/Kyiv"                 # Основная временная зона для дат публикаций.
+    cet: "Europe/Berlin"                # Дополнительная временная зона CET/CEST для расписаний и отчетов.
 
   telegram:
-    enabled: true
-    use_audit: false
-    symbol_separator: "🎬"
-    separator_repeat_count: 8
-    symbol_separator_start: "🔵"
-    separator_start_repeat_count: 12
-    symbol_broadcast: "❇️"
-    symbol_alert: "🚨"
-    symbol_form: "❇️"
-    symbol_description: "❇️"
-    symbol_pin: "📌"
-    symbol_done: "✅"
-    flag_repeat_count: 3
-    send_delay_seconds: 1.0
-    max_retries: 3
+    enabled: true                       # Включить отправку сообщений в Telegram.
+    use_audit: false                    # Для merge-сообщений в Telegram: true берет audit/debug текст LLM, false берет финальный очищенный текст.
+    symbol_separator: "🎬"              # Символ для разделителя между блоками публикации.
+    separator_repeat_count: 8           # Сколько раз повторять основной символ-разделитель.
+    symbol_separator_start: "🔵"        # Символ для стартового разделителя публикации.
+    separator_start_repeat_count: 12    # Сколько раз повторять стартовый символ-разделитель.
+    symbol_broadcast: "❇️"              # Символ рядом с блоком трансляции или публикации.
+    symbol_alert: "🚨"                  # Символ для предупреждений и важных сообщений.
+    symbol_form: "❇️"                   # Символ рядом со ссылкой на форму.
+    symbol_description: "❇️"            # Символ рядом с описанием.
+    symbol_pin: "📌"                    # Символ для закрепленных или важных пунктов.
+    symbol_done: "✅"                   # Символ для успешно выполненных действий.
+    flag_repeat_count: 3                # Сколько раз повторять флаг языка в заголовках.
+    send_delay_seconds: 1.0             # Пауза между отправками сообщений в Telegram.
+    max_retries: 3                      # Максимальное число повторных попыток отправки в Telegram.
 
   files:
-    preview_filename_max_stem: 120
+    preview_filename_max_stem: 120      # Максимальная длина имени файла превью без расширения.

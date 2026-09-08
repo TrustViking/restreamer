@@ -6,6 +6,7 @@ import pytest
 
 from app.google.docs_client import (
     GoogleDocsClient,
+    GoogleDocsTransientError,
     _compute_retry_delay,
     _DOCS_WRITE_BASE_DELAY_SEC,
     _DOCS_WRITE_MAX_DELAY_SEC,
@@ -20,27 +21,25 @@ except ImportError:
     Httplib2Response = None  # type: ignore
 
 
-def _make_http_429_error() -> Exception:
-    """Build a realistic HttpError 429."""
+def _make_http_error(status: int) -> Exception:
+    """Build a realistic HttpError with a specific status code."""
     if HttpError is not None and Httplib2Response is not None:
-        resp = Httplib2Response({"status": "429"})
-        return HttpError(resp, b"quota exceeded")
+        resp = Httplib2Response({"status": str(int(status))})
+        message: bytes = f"http error {int(status)}".encode("utf-8")
+        return HttpError(resp, message)
     # Fallback for environments without googleapiclient
-    error = Exception("quota exceeded")
+    error = Exception(f"http error {int(status)}")
     error.resp = MagicMock()  # type: ignore[attr-defined]
-    error.resp.status = 429  # type: ignore[attr-defined]
+    error.resp.status = int(status)  # type: ignore[attr-defined]
     return error
+
+
+def _make_http_429_error() -> Exception:
+    return _make_http_error(429)
 
 
 def _make_http_400_error() -> Exception:
-    """Build a non-retryable HttpError."""
-    if HttpError is not None and Httplib2Response is not None:
-        resp = Httplib2Response({"status": "400"})
-        return HttpError(resp, b"bad request")
-    error = Exception("bad request")
-    error.resp = MagicMock()  # type: ignore[attr-defined]
-    error.resp.status = 400  # type: ignore[attr-defined]
-    return error
+    return _make_http_error(400)
 
 
 class TestComputeRetryDelay:
@@ -107,4 +106,130 @@ class TestBatchUpdateRetry:
         client = GoogleDocsClient(mock_service)
         with pytest.raises(Exception):
             client.batch_update("doc123", [{"insertText": {}}])
+        mock_sleep.assert_not_called()
+
+
+class TestGetDocumentRetry:
+    @patch("app.google.docs_client.time.sleep")
+    def test_succeeds_on_first_try(self, mock_sleep: MagicMock) -> None:
+        mock_service = MagicMock()
+        expected_doc = {"documentId": "doc123", "body": {"content": []}}
+        mock_service.documents().get().execute.return_value = expected_doc
+        mock_service.documents().get.reset_mock()
+        client = GoogleDocsClient(mock_service)
+
+        result = client.get_document("doc123")
+
+        assert result == expected_doc
+        mock_sleep.assert_not_called()
+        mock_service.documents().get.assert_called_once_with(documentId="doc123")
+
+    @patch("app.google.docs_client.time.sleep")
+    def test_retries_on_429_then_succeeds(self, mock_sleep: MagicMock) -> None:
+        mock_service = MagicMock()
+        expected_doc = {"documentId": "doc123"}
+        mock_service.documents().get().execute.side_effect = [
+            _make_http_error(429),
+            expected_doc,
+        ]
+        client = GoogleDocsClient(mock_service)
+
+        result = client.get_document("doc123")
+
+        assert result == expected_doc
+        assert mock_sleep.call_count == 1
+        assert mock_sleep.call_args[0][0] == _DOCS_WRITE_BASE_DELAY_SEC
+
+    @patch("app.google.docs_client.time.sleep")
+    def test_502_raises_transient_error(self, mock_sleep: MagicMock) -> None:
+        mock_service = MagicMock()
+        mock_service.documents().get().execute.side_effect = _make_http_error(502)
+        client = GoogleDocsClient(mock_service)
+
+        with pytest.raises(GoogleDocsTransientError) as exc_info:
+            client.get_document("doc-502")
+
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.document_id == "doc-502"
+        mock_sleep.assert_not_called()
+
+    @patch("app.google.docs_client.time.sleep")
+    def test_400_raises_immediately(self, mock_sleep: MagicMock) -> None:
+        mock_service = MagicMock()
+        mock_service.documents().get().execute.side_effect = _make_http_error(400)
+        client = GoogleDocsClient(mock_service)
+
+        with pytest.raises(Exception):
+            client.get_document("doc400")
+
+        mock_sleep.assert_not_called()
+
+
+class TestCreateDocumentRetry:
+    @patch("app.google.docs_client.time.sleep")
+    def test_502_raises_transient_error(self, mock_sleep: MagicMock) -> None:
+        mock_service = MagicMock()
+        mock_service.documents().create().execute.side_effect = _make_http_error(502)
+        client = GoogleDocsClient(mock_service)
+
+        with pytest.raises(GoogleDocsTransientError) as exc_info:
+            client.create_document("title")
+
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.document_id == "<new_document>"
+        mock_sleep.assert_not_called()
+
+    @patch("app.google.docs_client.time.sleep")
+    def test_connection_reset_is_retried_then_succeeds(self, mock_sleep: MagicMock) -> None:
+        mock_service = MagicMock()
+        mock_service.documents().create().execute.side_effect = [
+            ConnectionResetError(10054, "Remote host forcibly closed the connection"),
+            {"documentId": "doc-after-reset"},
+        ]
+        client = GoogleDocsClient(mock_service)
+
+        assert client.create_document("title") == "doc-after-reset"
+        assert mock_sleep.call_count == 1
+        assert mock_sleep.call_args[0][0] == _DOCS_WRITE_BASE_DELAY_SEC
+
+    @patch("app.google.docs_client.time.sleep")
+    def test_connection_error_raises_after_max_retries(self, mock_sleep: MagicMock) -> None:
+        mock_service = MagicMock()
+        mock_service.documents().create().execute.side_effect = ConnectionResetError(10054, "reset")
+        client = GoogleDocsClient(mock_service)
+
+        with pytest.raises(ConnectionResetError):
+            client.create_document("title")
+
+        assert mock_service.documents().create().execute.call_count == _DOCS_WRITE_MAX_RETRIES
+        assert mock_sleep.call_count == _DOCS_WRITE_MAX_RETRIES - 1
+
+    @patch("app.google.docs_client.time.sleep")
+    def test_remote_disconnected_on_batch_update_is_retried(self, mock_sleep: MagicMock) -> None:
+        import http.client
+
+        mock_service = MagicMock()
+        mock_service.documents().batchUpdate().execute.side_effect = [
+            http.client.RemoteDisconnected("Remote end closed connection without response"),
+            {"replies": []},
+        ]
+        client = GoogleDocsClient(mock_service)
+
+        client.batch_update("doc123", [{"insertText": {}}])
+
+        assert mock_sleep.call_count == 1
+
+
+class TestBatchUpdate5xxBehavior:
+    @patch("app.google.docs_client.time.sleep")
+    def test_502_raises_transient_error(self, mock_sleep: MagicMock) -> None:
+        mock_service = MagicMock()
+        mock_service.documents().batchUpdate().execute.side_effect = _make_http_error(502)
+        client = GoogleDocsClient(mock_service)
+
+        with pytest.raises(GoogleDocsTransientError) as exc_info:
+            client.batch_update("doc-502", [{"insertText": {}}])
+
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.document_id == "doc-502"
         mock_sleep.assert_not_called()

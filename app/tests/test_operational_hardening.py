@@ -9,7 +9,6 @@ from unittest.mock import patch
 from app.bootstrap.run_context import StartupContext
 from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.llm.merges.merge_run_summary import MergeRunSummary
-from app.llm.models.model_compatibility import LlmModelConfigurationError
 from app.observability import runtime_analytics
 from app.observability.content_contract import analyze_content_contract
 from app.observability.runtime_analytics import log_warning_informational, log_warning_operational
@@ -227,10 +226,7 @@ class OperationalHardeningTests(unittest.TestCase):
             docs_client=SimpleNamespace(ping_access=lambda: "ok"),
         )
         telegram_client = SimpleNamespace(get_me=lambda: {"id": 1, "username": "bot"})
-        with patch("app.observability.startup_health.os.getenv", return_value="token"), patch(
-            "app.observability.startup_health.probe_openai_model_access",
-            return_value=None,
-        ), self.assertLogs(
+        with patch("app.observability.startup_health.os.getenv", return_value="token"), self.assertLogs(
             logger, level="INFO"
         ) as captured:
             run_startup_health_checks(
@@ -255,72 +251,11 @@ class OperationalHardeningTests(unittest.TestCase):
             text,
         )
         self.assertIn(
-            "OpenAI model compatibility effective_model=gpt-5.1 configured_model=gpt-5.1 provider_model=gpt-5.1 model_family=gpt-5 reasoning_effort=enabled structured_output=json_schema temperature=disabled capability_source=heuristic_name_rules startup_probe=models.retrieve",
+            "OpenAI model compatibility effective_model=gpt-5.1 configured_model=gpt-5.1 provider_model=gpt-5.1 model_family=gpt-5 reasoning_effort=enabled structured_output=json_schema temperature=disabled capability_source=heuristic_name_rules model_access=verified_at_startup_by_responses_probe",
             text,
         )
         self.assertIn("LLM selection: audit branch execution=merge", text)
         self.assertNotIn("packaging_stage_enabled", text)
-
-    def test_startup_health_fails_fast_for_fatal_openai_model_config_error(self) -> None:
-        logger = logging.getLogger("operational-hardening-health-fatal-model")
-        config = SimpleNamespace(
-            llm=SimpleNamespace(
-                provider="openai",
-                model="gpt-5.4",
-                timeout_sec=30.0,
-                max_output_tokens=1000,
-                source_desc_max_chars=500,
-                pre_delay_sec=0.0,
-            ),
-            telegram=SimpleNamespace(enabled=True),
-            google=SimpleNamespace(sheets_id="sheet-id"),
-        )
-        services = SimpleNamespace(
-            factory=SimpleNamespace(
-                get_auth_mode=lambda: "oauth",
-                get_oauth_paths=lambda: ("cred", "token"),
-                get_runtime_principal_email=lambda: "user@example.com",
-                get_google_project_info=lambda strict: ("id", "name"),
-            ),
-            drive_client=SimpleNamespace(
-                get_file_owner_info=lambda file_id: "owner",
-                ping_access=lambda: ("user", "user@example.com"),
-            ),
-            sheets_client=SimpleNamespace(ping_access=lambda spreadsheet_id: ("sheet-id", "title")),
-            docs_client=SimpleNamespace(ping_access=lambda: "ok"),
-        )
-        telegram_client = SimpleNamespace(get_me=lambda: {"id": 1, "username": "bot"})
-        with patch("app.observability.startup_health.os.getenv", return_value="token"), patch(
-            "app.observability.startup_health.probe_openai_model_access",
-            side_effect=LlmModelConfigurationError(
-                provider_name="openai",
-                model_name="gpt-5.4",
-                reason_code="openai_model_access_denied",
-                detail="Project does not have access to model `gpt-5.4`",
-                status_code=403,
-                api_error_code="access_denied",
-                api_error_param="model",
-            ),
-        ), self.assertLogs(logger, level="INFO") as captured:
-            with self.assertRaises(LlmModelConfigurationError):
-                run_startup_health_checks(
-                    logger=logger,
-                    config=config,
-                    llm_summary=SimpleNamespace(
-                        provider="openai",
-                        model="gpt-5.4",
-                        usage_reporting_mode="openai_run_local",
-                    ),
-                    services=services,
-                    telegram_client=telegram_client,
-                    resolve_logger_name_meta=lambda: ("logger", "test", False),
-                    dry_run=False,
-                    resolved_audit_mode="merge",
-                    run_id="run",
-                )
-        text: str = "\n".join(captured.output)
-        self.assertIn("OpenAI model compatibility effective_model=gpt-5.4", text)
-        self.assertIn("reason_code=openai_model_access_denied", text)
 
     def test_nomerge_branch_does_not_call_llm_merge(self) -> None:
         logger = logging.getLogger("operational-hardening-slot")

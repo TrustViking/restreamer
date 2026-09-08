@@ -16,9 +16,6 @@ class AppTemplates:
     telegram_language_block: str
     telegram_language_merged_block: str
     telegram_key_form_reminder: str
-    telegram_sparkle_separator: str
-    telegram_post_header: str
-    telegram_language_digest_header: str
     llm_merge_title_description_prompt: str
     llm_startup_ping_prompt: str
     llm_merge_structural_rules: str
@@ -72,6 +69,9 @@ class GoogleConfig:
 class LlmConfig:
     provider: str
     model: str
+    fallback_model: str
+    reasoning_effort: str
+    service_tier: str
     timeout_sec: float
     max_output_tokens: int
     pre_delay_sec: float
@@ -87,6 +87,15 @@ class ProcessingConfig:
 @dataclass(frozen=True)
 class CleanupConfig:
     max_age_days: int
+
+
+@dataclass(frozen=True)
+class YtDlpConfig:
+    auto_update: bool
+    update_check_interval_days: int
+    cookies_warn_age_days: int = 7
+    deno_auto_update: bool = True
+    deno_update_interval_days: int = 7
 
 
 @dataclass(frozen=True)
@@ -110,6 +119,7 @@ class AppConfig:
     llm: LlmConfig
     processing: ProcessingConfig
     cleanup: CleanupConfig
+    ytdlp: YtDlpConfig
     paths: PathsConfig
     timezones: TimezoneConfig
     templates: AppTemplates

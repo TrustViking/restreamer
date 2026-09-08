@@ -64,6 +64,10 @@ class DevBootstrapConfigTest(unittest.TestCase):
             patch("setup_deploy.load_or_bootstrap_env", return_value=([], {})),
             patch("setup_deploy.validate_required_env_vars", return_value=[]),
             patch(
+                "setup_deploy.load_google_auth_mode",
+                return_value="oauth",
+            ),
+            patch(
                 "setup_deploy.check_google_oauth_credentials",
                 return_value=CheckResult("Google OAuth credentials", STATUS_PASS, "ok"),
             ),

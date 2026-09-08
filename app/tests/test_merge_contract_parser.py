@@ -81,7 +81,6 @@ class MergeContractParserTests(unittest.TestCase):
                 'In this stream you will see:\\n🔹 point one\\n🔹 point two\\n\\n'
                 'https://youtu.be/aaaaaaaaaaa\\n\\n'
                 '🌐 Official links:\\nhttps://example.org\\n\\n'
-                'Watch the stream and share your thoughts.\\n\\n'
                 '#stream #topic"}'
             ),
         )
@@ -100,12 +99,12 @@ class MergeContractParserTests(unittest.TestCase):
                 "Paragraph four closes with the practical context and concrete next developments.\\n\\n"
                 "https://youtu.be/aaaaaaaaaaa\\nhttps://www.youtube.com/watch?v=bbbbbbbbbbb\\n\\n"
                 "🌐 Official links:\\nhttps://example.org/official\\nhttps://allatra.org/resource\\n\\n"
-                'Watch the stream and share your thoughts.\\n\\n#stream #topic"}'
+                '#stream #topic"}'
             ),
         )
         self.assertEqual(4, paragraph_count)
         self.assertEqual(
-            8,
+            7,
             len([part for part in merged_content.description.split("\n\n") if part.strip()]),
         )
         self.assertIn("https://www.youtube.com/watch?v=bbbbbbbbbbb", merged_content.description)
@@ -118,7 +117,7 @@ class MergeContractParserTests(unittest.TestCase):
             raw_text=(
                 '{"title":"Recovered title","description":"Paragraph one.\\n\\nParagraph two.\\n\\n'
                 'Paragraph three.\\n\\nParagraph four.\\n\\nParagraph five.\\n\\n'
-                'Watch the stream and share your thoughts.\\n\\n#topic"}'
+                '#topic"}'
             ),
         )
         self.assertEqual(4, paragraph_count)
@@ -149,13 +148,12 @@ class MergeContractParserTests(unittest.TestCase):
                 "https://youtu.be/aaaaaaaaaaa\n\n"
                 "🌐 Official links:\n"
                 "https://example.org\n\n"
-                "Watch the stream and share your thoughts.\n\n"
                 "#topic #update"
             )
         )
         self.assertEqual(2, separation.body_paragraph_count_after_recovery)
         self.assertEqual(
-            ("youtube_links", "official_links", "cta", "hashtags"),
+            ("youtube_links", "official_links", "hashtags"),
             separation.tail_blocks,
         )
 
@@ -171,15 +169,15 @@ class MergeContractParserTests(unittest.TestCase):
                 "https://youtu.be/aaaaaaaaaaa\\n\\n"
                 "https://www.youtube.com/watch?v=bbbbbbbbbbb\\n\\n"
                 "🌐 Official links:\\nhttps://interfaithconf.org/about\\nhttps://spiritualdiplomats.org/resources\\n\\n"
-                'Join and follow updates.\\n\\n#conference #initiative"}'
+                '#conference #initiative"}'
             ),
         )
         self.assertEqual(4, paragraph_count)
         separation = separate_merge_body_and_tail(text=merged_content.description)
-        self.assertEqual(9, separation.raw_paragraph_count)
+        self.assertEqual(8, separation.raw_paragraph_count)
         self.assertEqual(4, separation.body_paragraph_count_after_recovery)
         self.assertEqual(
-            ("youtube_links", "youtube_links", "official_links", "cta", "hashtags"),
+            ("youtube_links", "youtube_links", "official_links", "hashtags"),
             separation.tail_blocks,
         )
 

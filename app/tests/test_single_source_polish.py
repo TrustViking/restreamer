@@ -95,6 +95,61 @@ class SingleSourcePolishTests(unittest.TestCase):
         self.assertIn("комментарий", result)
         self.assertIn("Анализ", result)
 
+    def test_strips_hashtag_only_tail_block(self) -> None:
+        text = "Описание видео.\n\n#тег1 #тег2 #тег3"
+        result = light_polish_single_source_description(text)
+        self.assertEqual("Описание видео.", result)
+
+    def test_strips_multiline_cta_before_hashtags_tail(self) -> None:
+        text = (
+            "1,5 часа в неделю — и жизнь меняется.\n"
+            "Учёные доказали: помогая другим, человек становится здоровее.\n\n"
+            "✅ Подпишитесь на канал, чтобы не пропустить новые выпуски.\n"
+            "👍 Поставьте лайк, если тема волонтёрства вам близка.\n"
+            "💬 Напишите в комментариях: Как помощь другим изменила вашу жизнь?\n\n"
+            "#психология #волонтёрство #самопомощь"
+        )
+        result = light_polish_single_source_description(text)
+        self.assertEqual(
+            "1,5 часа в неделю — и жизнь меняется.\n"
+            "Учёные доказали: помогая другим, человек становится здоровее.",
+            result,
+        )
+
+    def test_strips_multiline_cta_at_end_without_hashtags(self) -> None:
+        text = (
+            "1,5 часа в неделю — и жизнь меняется.\n"
+            "Учёные доказали: помогая другим, человек становится здоровее.\n\n"
+            "✅ Подпишитесь на канал, чтобы не пропустить новые выпуски.\n"
+            "👍 Поставьте лайк, если тема волонтёрства вам близка.\n"
+            "💬 Напишите в комментариях: Как помощь другим изменила вашу жизнь?"
+        )
+        result = light_polish_single_source_description(text)
+        self.assertEqual(
+            "1,5 часа в неделю — и жизнь меняется.\n"
+            "Учёные доказали: помогая другим, человек становится здоровее.",
+            result,
+        )
+
+    def test_keeps_factual_emoji_lines(self) -> None:
+        text = (
+            "Главная тема эфира — безопасность в кризисных ситуациях.\n\n"
+            "✅ Решение принято на встрече экспертов.\n"
+            "📢 Организаторы сообщили детали программы.\n"
+            "🔥 Ключевые спикеры обсудят практические аспекты."
+        )
+        result = light_polish_single_source_description(text)
+        self.assertEqual(text, result)
+
+    def test_keeps_long_factual_paragraph_with_comments_word(self) -> None:
+        text = (
+            "Эксперты в комментариях подчеркнули важность темы. По их мнению, "
+            "феномен заслуживает дополнительного изучения. Этот вывод подтверждается "
+            "множеством исследований последних десятилетий."
+        )
+        result = light_polish_single_source_description(text)
+        self.assertEqual(text, result)
+
 
 if __name__ == "__main__":
     unittest.main()
