@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+# Kept imported here on purpose: tests patch "app.google.drive_client.time.sleep",
+# which resolves through this name into the shared retry engine.
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, cast
@@ -8,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, cast
 import requests
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
+from app.google.api_retry import GoogleApiRetryPolicy, execute_with_retry
 
 try:
     from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
@@ -30,8 +33,7 @@ _DRIVE_TRANSIENT_STATUS_CODES: frozenset[int] = frozenset({500, 502, 503, 504})
 
 
 def _compute_drive_retry_delay(attempt: int) -> float:
-    delay: float = _DRIVE_BASE_DELAY_SEC * (2 ** (attempt - 1))
-    return min(delay, _DRIVE_MAX_DELAY_SEC)
+    return _DRIVE_RETRY_POLICY.compute_delay(attempt)
 
 
 class GoogleDriveTransientError(RuntimeError):
@@ -44,36 +46,37 @@ class GoogleDriveTransientError(RuntimeError):
         self.original = original
 
 
+_DRIVE_RETRY_POLICY: GoogleApiRetryPolicy = GoogleApiRetryPolicy(
+    max_retries=_DRIVE_MAX_RETRIES,
+    base_delay_sec=_DRIVE_BASE_DELAY_SEC,
+    max_delay_sec=_DRIVE_MAX_DELAY_SEC,
+    transient_status_codes=_DRIVE_TRANSIENT_STATUS_CODES,
+    # Drive keeps HTTP-only retry semantics: transport-level errors are not retried.
+    connection_errors=(),
+    log_prefix="drive",
+    resource_label="file_id",
+    transient_error_factory=lambda status_code, file_id, original: (
+        GoogleDriveTransientError(
+            status_code=status_code,
+            file_id=file_id,
+            original=original,
+        )
+    ),
+)
+
+
 def _execute_drive_with_retry(
     operation_name: str,
     file_id: str,
     request_callable: Callable[[], Any],
 ) -> Any:
-    for attempt in range(1, _DRIVE_MAX_RETRIES + 1):
-        try:
-            return request_callable()
-        except HttpError as error:
-            status_code: Optional[int] = getattr(getattr(error, "resp", None), "status", None)
-            if status_code == 429 and attempt < _DRIVE_MAX_RETRIES:
-                delay_sec: float = _compute_drive_retry_delay(attempt)
-                LOGGER.warning(
-                    "drive_request_429 operation=%s attempt=%d/%d delay_sec=%.1f file_id=%s",
-                    operation_name,
-                    attempt,
-                    _DRIVE_MAX_RETRIES,
-                    delay_sec,
-                    file_id,
-                    extra={"warning_category": "informational"},
-                )
-                time.sleep(delay_sec)
-                continue
-            if status_code in _DRIVE_TRANSIENT_STATUS_CODES:
-                raise GoogleDriveTransientError(
-                    status_code=int(status_code),
-                    file_id=file_id,
-                    original=error,
-                ) from error
-            raise
+    return execute_with_retry(
+        policy=_DRIVE_RETRY_POLICY,
+        logger=LOGGER,
+        operation_name=operation_name,
+        resource_id=file_id,
+        request_callable=request_callable,
+    )
 
 
 class GoogleDriveClient:
