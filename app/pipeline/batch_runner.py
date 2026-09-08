@@ -27,7 +27,11 @@ from app.observability.runtime_analytics import (
     record_sheet_loaded,
     record_stage_duration,
 )
-from app.observability.startup_health import log_section, run_startup_health_checks
+from app.observability.startup_health import (
+    StartupHealthResult,
+    log_section,
+    run_startup_health_checks,
+)
 from app.observability.startup_summary import LlmSummarySnapshot
 from app.paths.name_builder import NamePathBuilder
 from app.planning import log_link_normalization_report
@@ -306,6 +310,16 @@ class BatchRunner:
             )
         ]
 
+    def _startup_health_summary_line(
+        self, *, startup_health: StartupHealthResult
+    ) -> str:
+        if startup_health.ok:
+            return "✅ Проверка сервисов и конфигурации: OK"
+        return (
+            "⚠️ Проверка сервисов и конфигурации: ошибок "
+            f"{len(startup_health.failed_checks)}"
+        )
+
     def _prepare_run_context(
         self,
         *,
@@ -317,7 +331,7 @@ class BatchRunner:
     ) -> PreparedRunContext:
         self._log_section("Startup Health Check")
         startup_health_started_at: float = time.perf_counter()
-        llm_merge_available: bool = run_startup_health_checks(
+        startup_health: StartupHealthResult = run_startup_health_checks(
             logger=self._logger,
             config=self._config,
             llm_summary=llm_summary,
@@ -328,6 +342,7 @@ class BatchRunner:
             resolved_audit_mode=audit_mode,
             run_id=run_id,
         )
+        llm_merge_available: bool = startup_health.llm_merge_enabled
         startup_health_ms: int = int(
             round((time.perf_counter() - startup_health_started_at) * 1000.0)
         )
@@ -339,7 +354,7 @@ class BatchRunner:
             scope="run",
         )
         self._notifier.emit(
-            "✅ Проверка сервисов и конфигурации: OK",
+            self._startup_health_summary_line(startup_health=startup_health),
             to_telegram=not dry_run,
         )
 

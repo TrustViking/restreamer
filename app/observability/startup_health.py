@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Tuple
 
 from app.config.settings import AppConfig
@@ -24,6 +25,16 @@ from app.telegram.bot_client import TelegramBotClient
 
 
 LoggerNameMetaResolver = Callable[[], Tuple[str, str, bool]]
+
+
+@dataclass(frozen=True)
+class StartupHealthResult:
+    llm_merge_enabled: bool
+    failed_checks: Tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not self.failed_checks
 
 
 def log_section(*, logger: logging.Logger, title: str) -> None:
@@ -164,7 +175,7 @@ def run_startup_health_checks(
     dry_run: bool,
     resolved_audit_mode: str,
     run_id: str,
-) -> bool:
+) -> StartupHealthResult:
     startup_errors: List[str] = []
     logger.info("Startup identity check: begin.")
     logger.info("Logger name in use: %s", logger.name)
@@ -344,5 +355,8 @@ def run_startup_health_checks(
             )
     else:
         logger.info("Startup health-check decision: CONTINUE.")
-    return llm_merge_enabled
+    return StartupHealthResult(
+        llm_merge_enabled=llm_merge_enabled,
+        failed_checks=tuple(startup_errors),
+    )
 

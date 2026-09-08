@@ -13,6 +13,7 @@ from app.core.branching import BRANCH_MERGE, BRANCH_NOMERGE
 from app.core.models import PlannedVideo, VideoMetadata
 from app.llm.merges.merge_run_summary import MergeRunSummary
 from app.llm.models.model_compatibility import LlmModelConfigurationError
+from app.observability.startup_health import StartupHealthResult
 from app.pipeline.batch_runner import AuditBranch, BatchRunner
 from app.pipeline.operator_notifier import OperatorNotifier
 from app.pipeline.slot_processing import process_slot
@@ -92,7 +93,7 @@ class AuditModeRunnerTests(unittest.TestCase):
             report_writer=MagicMock(),
             sheets_client=MagicMock(),
             factory=MagicMock(),
-        )), patch("app.pipeline.batch_runner.run_startup_health_checks", return_value=True), patch(
+        )), patch("app.pipeline.batch_runner.run_startup_health_checks", return_value=StartupHealthResult(llm_merge_enabled=True, failed_checks=())), patch(
             "app.pipeline.batch_runner.load_sheet_state",
             return_value=sheet_state,
         ) as load_sheet_state_mock, patch(

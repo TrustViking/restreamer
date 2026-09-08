@@ -270,8 +270,6 @@ def setup_logging(debug: bool) -> None:
 
     logging.getLogger("requests_oauthlib").setLevel(logging.WARNING)
     logging.getLogger("oauthlib").setLevel(logging.WARNING)
-    logging.getLogger("google_genai").setLevel(logging.WARNING)
-    logging.getLogger("google_genai.models").setLevel(logging.WARNING)
     logging.getLogger("googleapiclient.http").setLevel(logging.ERROR)
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -378,8 +376,6 @@ def setup_bot_logging(*, debug: bool = False) -> None:
 
     logging.getLogger("requests_oauthlib").setLevel(logging.WARNING)
     logging.getLogger("oauthlib").setLevel(logging.WARNING)
-    logging.getLogger("google_genai").setLevel(logging.WARNING)
-    logging.getLogger("google_genai.models").setLevel(logging.WARNING)
     logging.getLogger("googleapiclient.http").setLevel(logging.ERROR)
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
