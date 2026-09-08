@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.bootstrap.logging_config import get_logger as _get_logger_impl
@@ -20,6 +20,11 @@ from app.llm.models.model_compatibility import (
 )
 from app.llm.merges.merge_parser import extract_json_object_candidates, parse_json_tolerant, strip_json_code_fences
 from app.llm.model_pricing import estimate_cost_usd
+from app.llm.models.model_identity import (
+    FLEX_RETRY_DELAYS_SEC,
+    SERVICE_TIER_DEFAULT,
+    SERVICE_TIER_FLEX,
+)
 
 # Backward-compatible re-exports — DO NOT REMOVE
 from app.llm.llm_usage_tracker import (  # noqa: F401
@@ -387,7 +392,6 @@ def get_openai_client(
 
 _PROBE_PROMPT_TEXT: str = "Reply with OK."
 _PROBE_MAX_OUTPUT_TOKENS: int = 16
-_FLEX_RETRY_DELAYS_SEC: tuple[float, ...] = (20.0, 40.0, 80.0)
 
 
 def probe_openai_model_access(
@@ -466,6 +470,230 @@ def _extract_structured_payload_or_none(response: Any) -> Optional[Dict[str, Any
     return None
 
 
+@dataclass(frozen=True)
+class OpenAIResponsesRequestSpec:
+    """Immutable parameters of one merge request; identical across all fallback attempts."""
+
+    provider_name: str
+    model_name: str
+    prompt_text: str
+    structured_schema: Optional[Dict[str, Any]]
+    temperature: float
+    reasoning_effort: str
+    max_output_tokens: int
+    attempt_label: str
+    request_kind: str
+
+
+class OpenAIResponsesTransport:
+    """One merge request through the Responses API with an explicit fallback chain.
+
+    Each layer wraps the next one, outermost first::
+
+        send                          max_output_tokens exhausted -> retry once with 2x
+        _send_with_flex_fallback      429 on flex -> wait, retry, finally drop to default
+        _send_with_temperature_fallback   temperature unsupported -> retry without it
+        _create_response              a single API call
+
+    ``_active_service_tier`` is the only mutable state: the flex layer switches it to
+    the default tier for good, so a later ``send`` retry no longer asks for flex.
+    """
+
+    def __init__(
+        self,
+        *,
+        client: Any,
+        spec: OpenAIResponsesRequestSpec,
+        compatibility: OpenAIRequestCompatibility,
+        service_tier: str = SERVICE_TIER_DEFAULT,
+        trace_context: Optional[LlmTraceContext] = None,
+    ) -> None:
+        self._client: Any = client
+        self._spec: OpenAIResponsesRequestSpec = spec
+        self._compatibility: OpenAIRequestCompatibility = compatibility
+        self._trace_context: Optional[LlmTraceContext] = trace_context
+        self._active_service_tier: str = (
+            str(service_tier or SERVICE_TIER_DEFAULT).strip().lower() or SERVICE_TIER_DEFAULT
+        )
+
+    def send(self) -> OpenAITransportResult:
+        used_max_tokens: int = int(self._spec.max_output_tokens)
+        response: Any = self._send_with_flex_fallback(used_max_tokens)
+        incomplete_reason: str = _openai_incomplete_reason(response)
+        if incomplete_reason == "max_output_tokens":
+            used_max_tokens = used_max_tokens * 2
+            LOGGER.warning(
+                "OpenAI response hit max_output_tokens attempt=%s model=%s retrying_once_with_max_output_tokens=%d",
+                self._spec.attempt_label,
+                self._spec.model_name,
+                used_max_tokens,
+                extra={"warning_category": "informational"},
+            )
+            _log_llm_retry_decision(
+                trace_context=self._trace_context,
+                reason_code="openai_max_output_retry",
+                retry_index=1,
+                retry_kind="max_output_retry",
+                recovered=True,
+            )
+            response = self._send_with_flex_fallback(used_max_tokens)
+            incomplete_reason = _openai_incomplete_reason(response)
+
+        raw_text: str = _extract_openai_response_text(response)
+        if not raw_text.strip():
+            raise RuntimeError(f"{self._spec.provider_name} merge returned empty output text")
+        return OpenAITransportResult(
+            raw_text=raw_text,
+            structured_payload=(
+                _extract_structured_payload_or_none(response)
+                if self._spec.structured_schema is not None
+                else None
+            ),
+            incomplete_reason=incomplete_reason,
+            output_item_types=_openai_response_output_item_types(response),
+        )
+
+    def _send_with_flex_fallback(self, max_tokens: int) -> Any:
+        """Flex tier can answer 429 resource_unavailable: wait and retry, then use the default tier."""
+        if self._active_service_tier != SERVICE_TIER_FLEX:
+            return self._send_with_temperature_fallback(max_tokens)
+        for delay_sec in FLEX_RETRY_DELAYS_SEC:
+            try:
+                return self._send_with_temperature_fallback(max_tokens)
+            except Exception as error:
+                if classify_openai_request_error(cast(Exception, error)).reason_code != "openai_rate_limit":
+                    raise
+                LOGGER.warning(
+                    "openai_flex_unavailable model=%s retry_in_sec=%.0f detail=%s",
+                    self._spec.model_name,
+                    delay_sec,
+                    str(error)[:200],
+                    extra={"warning_category": "informational"},
+                )
+                time.sleep(delay_sec)
+        try:
+            return self._send_with_temperature_fallback(max_tokens)
+        except Exception as error:
+            if classify_openai_request_error(cast(Exception, error)).reason_code != "openai_rate_limit":
+                raise
+            LOGGER.warning(
+                "openai_flex_fallback_to_default model=%s detail=%s",
+                self._spec.model_name,
+                str(error)[:200],
+                extra={"warning_category": "informational"},
+            )
+            self._active_service_tier = SERVICE_TIER_DEFAULT
+            return self._send_with_temperature_fallback(max_tokens)
+
+    def _send_with_temperature_fallback(self, max_tokens: int) -> Any:
+        try:
+            return self._create_response(max_tokens, self._compatibility)
+        except Exception as error:
+            if self._compatibility.temperature_enabled and _is_openai_temperature_unsupported_error(cast(Exception, error)):
+                compatibility_fallback: OpenAIRequestCompatibility = replace(
+                    self._compatibility,
+                    temperature_enabled=False,
+                )
+                LOGGER.warning(
+                    "OpenAI model=%s does not support temperature; retrying_without_temperature.",
+                    self._spec.model_name,
+                )
+                _log_llm_retry_decision(
+                    trace_context=self._trace_context,
+                    reason_code="temperature_unsupported_retry",
+                    retry_index=1,
+                    retry_kind="retry_without_temperature",
+                    recovered=True,
+                )
+                return self._create_response(max_tokens, compatibility_fallback)
+            raise
+
+    def _create_response(
+        self,
+        max_tokens: int,
+        compatibility: OpenAIRequestCompatibility,
+    ) -> Any:
+        spec: OpenAIResponsesRequestSpec = self._spec
+        request_kwargs: Dict[str, Any] = _build_openai_responses_request_kwargs(
+            prompt_text=spec.prompt_text,
+            model_name=spec.model_name,
+            max_tokens=max_tokens,
+            structured_schema=spec.structured_schema,
+            temperature=spec.temperature,
+            compatibility=compatibility,
+            reasoning_effort=spec.reasoning_effort,
+            service_tier=self._active_service_tier,
+        )
+        _log_openai_request_compatibility(
+            trace_context=self._trace_context,
+            compatibility=compatibility,
+        )
+        _log_llm_request_start(
+            trace_context=self._trace_context,
+            input_chars=len(spec.prompt_text),
+        )
+        request_started_at: float = time.perf_counter()
+        try:
+            raw_response: Any = self._client.responses.with_raw_response.create(**request_kwargs)
+            _log_openai_rate_limit_snapshot(response_or_raw=raw_response, model_name=spec.model_name, request_kind="responses.create")
+            parse_method: Any = getattr(raw_response, "parse", None)
+            parsed_response: Any = parse_method() if callable(parse_method) else raw_response
+            _record_run_local_openai_request(
+                model_name=spec.model_name,
+                response=parsed_response,
+                request_kind=spec.request_kind,
+            )
+            _log_llm_request_finish(
+                trace_context=self._trace_context,
+                response=parsed_response,
+                success=True,
+                elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
+                max_output_hit=(_openai_incomplete_reason(parsed_response) == "max_output_tokens"),
+            )
+            return parsed_response
+        except AttributeError:
+            response: Any = self._client.responses.create(**request_kwargs)
+            _log_openai_rate_limit_snapshot(response_or_raw=response, model_name=spec.model_name, request_kind="responses.create")
+            _record_run_local_openai_request(model_name=spec.model_name, response=response, request_kind=spec.request_kind)
+            _log_llm_request_finish(
+                trace_context=self._trace_context,
+                response=response,
+                success=True,
+                elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
+                max_output_hit=(_openai_incomplete_reason(response) == "max_output_tokens"),
+            )
+            return response
+        except Exception as error:
+            _log_llm_request_failed(
+                trace_context=self._trace_context,
+                error=cast(Exception, error),
+                elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
+            )
+            if _is_openai_temperature_unsupported_error(cast(Exception, error)):
+                raise
+            classification: LlmRequestErrorClassification = classify_openai_request_error(
+                cast(Exception, error)
+            )
+            if classification.fatal_model_configuration:
+                LOGGER.error(
+                    "openai_model_configuration_error provider=%s model=%s reason_code=%s status_code=%s api_error_code=%s api_error_param=%s detail=%s",
+                    spec.provider_name,
+                    spec.model_name or "unknown",
+                    classification.reason_code,
+                    str(classification.status_code if classification.status_code is not None else "unknown"),
+                    classification.api_error_code or "none",
+                    classification.api_error_param or "none",
+                    classification.detail,
+                    extra={"reason_code": classification.reason_code},
+                )
+            _raise_if_fatal_model_configuration_error(
+                provider_name=spec.provider_name,
+                model_name=spec.model_name,
+                error=cast(Exception, error),
+            )
+            raise
+
+
 def openai_compatible_request_merge(
     *,
     provider_name: str,
@@ -478,7 +706,7 @@ def openai_compatible_request_merge(
     attempt_label: str,
     max_output_tokens: int,
     reasoning_effort: str,
-    service_tier: str = "default",
+    service_tier: str = SERVICE_TIER_DEFAULT,
     structured_schema: Optional[Dict[str, Any]] = None,
     temperature: float = 0.0,
     trace_context: Optional[LlmTraceContext] = None,
@@ -490,200 +718,32 @@ def openai_compatible_request_merge(
         base_url=base_url,
         max_retries=max_retries,
     ).with_options(timeout=timeout_sec, max_retries=max_retries)
-    active_service_tier: str = str(service_tier or "default").strip().lower() or "default"
-    request_kind: str = (
-        trace_context.request_kind
-        if trace_context is not None
-        else ("structured" if structured_schema is not None else "plain")
-    )
-    compatibility: OpenAIRequestCompatibility = resolve_openai_request_compatibility(
+    spec: OpenAIResponsesRequestSpec = OpenAIResponsesRequestSpec(
+        provider_name=provider_name,
         model_name=model_name,
-        structured_output_requested=(structured_schema is not None),
-        temperature_requested=True,
+        prompt_text=prompt_text,
+        structured_schema=structured_schema,
+        temperature=temperature,
+        reasoning_effort=reasoning_effort,
+        max_output_tokens=max_output_tokens,
+        attempt_label=attempt_label,
+        request_kind=(
+            trace_context.request_kind
+            if trace_context is not None
+            else ("structured" if structured_schema is not None else "plain")
+        ),
     )
-
-    def _create_response(
-        max_tokens: int,
-        *,
-        compatibility_override: Optional[OpenAIRequestCompatibility] = None,
-    ) -> Any:
-        active_compatibility: OpenAIRequestCompatibility = (
-            compatibility_override if compatibility_override is not None else compatibility
-        )
-        request_kwargs: Dict[str, Any] = _build_openai_responses_request_kwargs(
-            prompt_text=prompt_text,
+    return OpenAIResponsesTransport(
+        client=client,
+        spec=spec,
+        compatibility=resolve_openai_request_compatibility(
             model_name=model_name,
-            max_tokens=max_tokens,
-            structured_schema=structured_schema,
-            temperature=temperature,
-            compatibility=active_compatibility,
-            reasoning_effort=reasoning_effort,
-            service_tier=active_service_tier,
-        )
-        _log_openai_request_compatibility(
-            trace_context=trace_context,
-            compatibility=active_compatibility,
-        )
-        _log_llm_request_start(
-            trace_context=trace_context,
-            input_chars=len(prompt_text),
-        )
-        request_started_at: float = time.perf_counter()
-        try:
-            raw_response: Any = client.responses.with_raw_response.create(**request_kwargs)
-            _log_openai_rate_limit_snapshot(response_or_raw=raw_response, model_name=model_name, request_kind="responses.create")
-            parse_method: Any = getattr(raw_response, "parse", None)
-            parsed_response: Any = parse_method() if callable(parse_method) else raw_response
-            _record_run_local_openai_request(
-                model_name=model_name,
-                response=parsed_response,
-                request_kind=request_kind,
-            )
-            _log_llm_request_finish(
-                trace_context=trace_context,
-                response=parsed_response,
-                success=True,
-                elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
-                max_output_hit=(_openai_incomplete_reason(parsed_response) == "max_output_tokens"),
-            )
-            return parsed_response
-        except AttributeError:
-            response: Any = client.responses.create(**request_kwargs)
-            _log_openai_rate_limit_snapshot(response_or_raw=response, model_name=model_name, request_kind="responses.create")
-            _record_run_local_openai_request(model_name=model_name, response=response, request_kind=request_kind)
-            _log_llm_request_finish(
-                trace_context=trace_context,
-                response=response,
-                success=True,
-                elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
-                max_output_hit=(_openai_incomplete_reason(response) == "max_output_tokens"),
-            )
-            return response
-        except Exception as error:
-            _log_llm_request_failed(
-                trace_context=trace_context,
-                error=cast(Exception, error),
-                elapsed_ms=int(round((time.perf_counter() - request_started_at) * 1000.0)),
-            )
-            if _is_openai_temperature_unsupported_error(cast(Exception, error)):
-                raise
-            classification: LlmRequestErrorClassification = classify_openai_request_error(
-                cast(Exception, error)
-            )
-            if classification.fatal_model_configuration:
-                LOGGER.error(
-                    "openai_model_configuration_error provider=%s model=%s reason_code=%s status_code=%s api_error_code=%s api_error_param=%s detail=%s",
-                    provider_name,
-                    model_name or "unknown",
-                    classification.reason_code,
-                    str(classification.status_code if classification.status_code is not None else "unknown"),
-                    classification.api_error_code or "none",
-                    classification.api_error_param or "none",
-                    classification.detail,
-                    extra={"reason_code": classification.reason_code},
-                )
-            _raise_if_fatal_model_configuration_error(
-                provider_name=provider_name,
-                model_name=model_name,
-                error=cast(Exception, error),
-            )
-            raise
-
-    def _create_with_temp_fallback(max_tokens: int) -> Any:
-        try:
-            return _create_response(max_tokens)
-        except Exception as error:
-            if compatibility.temperature_enabled and _is_openai_temperature_unsupported_error(cast(Exception, error)):
-                compatibility_fallback: OpenAIRequestCompatibility = OpenAIRequestCompatibility(
-                    model_name=compatibility.model_name,
-                    normalized_model_name=compatibility.normalized_model_name,
-                    model_family=compatibility.model_family,
-                    reasoning_effort_supported=compatibility.reasoning_effort_supported,
-                    reasoning_effort_enabled=compatibility.reasoning_effort_enabled,
-                    structured_output_supported=compatibility.structured_output_supported,
-                    structured_output_requested=compatibility.structured_output_requested,
-                    temperature_supported=compatibility.temperature_supported,
-                    temperature_enabled=False,
-                    capability_source=compatibility.capability_source,
-                )
-                LOGGER.warning("OpenAI model=%s does not support temperature; retrying_without_temperature.", model_name)
-                _log_llm_retry_decision(
-                    trace_context=trace_context,
-                    reason_code="temperature_unsupported_retry",
-                    retry_index=1,
-                    retry_kind="retry_without_temperature",
-                    recovered=True,
-                )
-                return _create_response(
-                    max_tokens,
-                    compatibility_override=compatibility_fallback,
-                )
-            raise
-
-    def _create_with_flex_fallback(max_tokens: int) -> Any:
-        """Flex tier can answer 429 resource_unavailable: wait and retry, then use the default tier."""
-        nonlocal active_service_tier
-        if active_service_tier != "flex":
-            return _create_with_temp_fallback(max_tokens)
-        for delay_sec in _FLEX_RETRY_DELAYS_SEC:
-            try:
-                return _create_with_temp_fallback(max_tokens)
-            except Exception as error:
-                if classify_openai_request_error(cast(Exception, error)).reason_code != "openai_rate_limit":
-                    raise
-                LOGGER.warning(
-                    "openai_flex_unavailable model=%s retry_in_sec=%.0f detail=%s",
-                    model_name,
-                    delay_sec,
-                    str(error)[:200],
-                    extra={"warning_category": "informational"},
-                )
-                time.sleep(delay_sec)
-        try:
-            return _create_with_temp_fallback(max_tokens)
-        except Exception as error:
-            if classify_openai_request_error(cast(Exception, error)).reason_code != "openai_rate_limit":
-                raise
-            LOGGER.warning(
-                "openai_flex_fallback_to_default model=%s detail=%s",
-                model_name,
-                str(error)[:200],
-                extra={"warning_category": "informational"},
-            )
-            active_service_tier = "default"
-            return _create_with_temp_fallback(max_tokens)
-
-    used_max_tokens: int = int(max_output_tokens)
-    response: Any = _create_with_flex_fallback(used_max_tokens)
-    incomplete_reason: str = _openai_incomplete_reason(response)
-    if incomplete_reason == "max_output_tokens":
-        used_max_tokens = used_max_tokens * 2
-        LOGGER.warning(
-            "OpenAI response hit max_output_tokens attempt=%s model=%s retrying_once_with_max_output_tokens=%d",
-            attempt_label,
-            model_name,
-            used_max_tokens,
-            extra={"warning_category": "informational"},
-        )
-        _log_llm_retry_decision(
-            trace_context=trace_context,
-            reason_code="openai_max_output_retry",
-            retry_index=1,
-            retry_kind="max_output_retry",
-            recovered=True,
-        )
-        response = _create_with_flex_fallback(used_max_tokens)
-        incomplete_reason = _openai_incomplete_reason(response)
-
-    raw_text: str = _extract_openai_response_text(response)
-    if not raw_text.strip():
-        raise RuntimeError(f"{provider_name} merge returned empty output text")
-    return OpenAITransportResult(
-        raw_text=raw_text,
-        structured_payload=_extract_structured_payload_or_none(response) if structured_schema is not None else None,
-        incomplete_reason=incomplete_reason,
-        output_item_types=_openai_response_output_item_types(response),
-    )
+            structured_output_requested=(structured_schema is not None),
+            temperature_requested=True,
+        ),
+        service_tier=service_tier,
+        trace_context=trace_context,
+    ).send()
 
 
 def openai_request_merge(
